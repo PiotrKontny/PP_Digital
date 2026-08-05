@@ -7,11 +7,15 @@ abroad" into "edit the source and rebuild", so the rule is absolute: if a value
 concerns the wire, it lives in :class:`NetworkConfig` and is loaded from
 ``data/network.json``.
 
-Three layers, later ones winning:
+Four layers, later ones winning:
 
 1. the defaults in this file — enough to play against a server on this machine;
 2. ``data/network.json``, which is what the owner edits after deploying;
-3. environment variables, which is how hosting platforms configure a process
+3. the remembered address in the user's own preferences file — the last server
+   that a room was actually created on or joined through.  It sits above the
+   shipped file so that a player who typed an address once never has to type it
+   again, and below the environment so that automation still wins;
+4. environment variables, which is how hosting platforms configure a process
    (Railway, Render, Fly and friends all inject ``PORT``, and refusing to read
    it is the single most common reason a deployment answers nothing).
 
@@ -22,8 +26,9 @@ it without pulling in a display library.
 from __future__ import annotations
 
 import json
-import re
 import os
+import re
+import sys
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -34,6 +39,108 @@ from ..config.settings import DATA_DIR
 #: Where the configuration file lives.  Shipped with the game and editable by
 #: hand; the owner changes ``server_url`` once, after deploying the server.
 NETWORK_FILE = DATA_DIR / "network.json"
+
+
+def user_config_dir() -> Path:
+    """A directory this user may write to, whatever the game was installed as.
+
+    ``data/network.json`` is part of the *installation*: it ships with the game,
+    the owner edits it deliberately, and under a PyInstaller build it may be
+    inside a read-only bundle or a temporary extraction directory that is
+    deleted on exit.  So it is the wrong place to record something the game
+    decides by itself, like "the last server that worked" — which is why that
+    goes here instead, next to every other program's per-user settings.
+
+    Falls back to the home directory, and ultimately to the package's own data
+    directory, rather than raising: failing to remember an address must never
+    be the thing that stops the game from starting.
+    """
+    try:
+        if os.name == "nt":
+            base = os.environ.get("APPDATA")
+            root = Path(base) if base else Path.home() / "AppData" / "Roaming"
+        elif sys.platform == "darwin":
+            root = Path.home() / "Library" / "Application Support"
+        else:
+            base = os.environ.get("XDG_CONFIG_HOME")
+            root = Path(base) if base else Path.home() / ".config"
+        return root / "pedzacy-piotrek"
+    except (OSError, RuntimeError):  # pragma: no cover - exotic environments
+        return DATA_DIR
+
+
+#: Settings the *game* writes, as opposed to the ones the owner writes.
+def preferences_file() -> Path:
+    return user_config_dir() / "preferences.json"
+
+
+def load_preferences() -> Dict[str, Any]:
+    """Read the remembered settings.  Never raises; a bad file is no file."""
+    try:
+        with open(preferences_file(), "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        return dict(loaded) if isinstance(loaded, Mapping) else {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def save_preferences(values: Mapping[str, Any]) -> bool:
+    """Merge and write.  Returns False rather than raising when it cannot.
+
+    A read-only home directory, a full disk or a locked profile all end up
+    here, and none of them is worth interrupting a game for.
+    """
+    merged = load_preferences()
+    merged.update(values)
+    try:
+        path = preferences_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(merged, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        return True
+    except OSError:
+        return False
+
+
+def is_usable_url(url: str) -> bool:
+    """Is this something the game could actually connect to next time?
+
+    Guards the remembered value, and it is not a formality.  What gets offered
+    to :func:`remember_server_url` is whatever the transport calls itself, and
+    the in-process transport used by the tests calls itself ``in-process:c3``.
+    Saved unchecked, that became ``ws://in-process:c3:51337``, whose port is
+    not a number — and every later ``urlparse(...).port`` raised ValueError,
+    including the one behind the "Serwer gry:" line on the main menu.  One
+    unusable string in a preferences file broke the game's first screen until
+    the file was deleted by hand.
+    """
+    try:
+        parsed = urlparse(normalise_url(url or ""))
+        if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
+            return False
+        parsed.port                     # raises ValueError when it is nonsense
+    except ValueError:
+        return False
+    return True
+
+
+def remember_server_url(url: str) -> bool:
+    """Record a server address that actually worked.
+
+    Called when a room is successfully created or joined — NOT when one is
+    merely typed.  Remembering an address that never connected would helpfully
+    re-fill the field with the typo that caused the problem.
+    """
+    url = (url or "").strip()
+    if not url or not is_usable_url(url):
+        return False
+    return save_preferences({"server_url": url})
+
+
+def remembered_server_url() -> str:
+    value = load_preferences().get("server_url")
+    return str(value) if isinstance(value, str) else ""
 
 #: Bumped whenever the message vocabulary changes in a way old builds cannot
 #: understand.  The server refuses a mismatched client with a readable reason
@@ -132,7 +239,8 @@ class NetworkConfig:
     #: Where the game connects.  ``ws://`` for plain, ``wss://`` for TLS.
     server_url: str = f"ws://127.0.0.1:{DEFAULT_PORT}"
     #: Shown in the menus as the "play with friends anywhere" option.  Empty
-    #: until the owner deploys a server and fills it in.
+    #: until the owner deploys a server and fills it in.  Unused by the
+    #: screens today; the remembered address serves that purpose.
     public_server_url: str = ""
     #: Seconds to wait for the initial connection before saying so.
     connect_timeout: float = 8.0
@@ -158,12 +266,19 @@ class NetworkConfig:
         return replace(self, server_url=normalise_url(url, self.server.port))
 
     def describe_target(self) -> str:
-        """The server address in a form worth showing a human."""
-        parsed = urlparse(self.server_url)
-        host = parsed.hostname or "?"
-        if parsed.port:
-            return f"{host}:{parsed.port}"
-        return host
+        """The server address in a form worth showing a human.
+
+        Never raises.  It is called while drawing the main menu, so a
+        malformed address must produce a shrug rather than take the first
+        screen of the game down with it.
+        """
+        try:
+            parsed = urlparse(self.server_url)
+            host = parsed.hostname or "?"
+            port = parsed.port
+        except ValueError:
+            return self.server_url or "?"
+        return f"{host}:{port}" if port else host
 
     # ── serialisation ────────────────────────────────────────────────────────
     def to_dict(self) -> Dict[str, Any]:
@@ -214,6 +329,16 @@ class NetworkConfig:
         except (OSError, json.JSONDecodeError):
             raw = {}
         config = cls.from_dict(raw)
+        # Three layers, and the order is the point.  The shipped file is what
+        # the owner configured; the remembered address is what last actually
+        # worked on THIS machine, so it wins over the shipped default; the
+        # environment wins over both, because that is how a hosting platform
+        # and the --server flag speak.
+        remembered = remembered_server_url()
+        if remembered and is_usable_url(remembered):
+            # Checked again on the way in, not only on the way out: the file
+            # is editable by hand and may predate the check above.
+            config = config.with_url(remembered)
         return config.with_environment(os.environ if env is None else env)
 
     def with_environment(self, env: Mapping[str, str]) -> "NetworkConfig":

@@ -618,6 +618,11 @@ class PlayerTiles(Panel):
                 theme.btn_active_text if is_active
                 else (theme.prompt_bright if is_renaming else theme.text_light)
             )
+            if is_renaming and rename.showing_placeholder:  # type: ignore[union-attr]
+                # A hint is not content.  Dimmer than anything the player could
+                # have typed, so the two can never be confused — the same rule
+                # the menu fields follow.
+                text_colour = darken(theme.text_dim, 0.72)
             r.text(name, r.fonts.tile_name(), text_colour, surface,
                    center=(rect.centerx + 2, int(rect.top + rect.height * 0.40)),
                    shadow=is_active)

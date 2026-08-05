@@ -666,6 +666,9 @@ class GameScreen(Screen):
                 return
         else:
             self.session.poll()
+        # Holding Backspace in the rename box only deletes continuously while
+        # this is called; the field has no clock of its own.
+        self.rename.update(dt)
         self.pause_menu.update(dt, mouse)
         self.hand.drop_zone = self.app.layout.board_viewport
         self.hand.update(dt, mouse)

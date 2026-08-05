@@ -1300,3 +1300,148 @@ deliberate `wss://` change, with both branches now covered explicitly.
 - Still unverified by eye: I cannot see rendered output. The rename caret's new
   position and the lobby's row count were checked by measurement and by test,
   not by looking.
+
+---
+
+## Stage 14 — Usability of the online screens
+**Date:** 2026-08-05
+
+### Starting point
+Stage 13 made online play work. This stage is about whether a person can
+comfortably get at it: paste a nickname, send a room code to a friend, and not
+retype a server address every session. No networking behaviour was changed.
+
+Stage 13 had already given both text widgets a shared `TextEditor`, so item 1 of
+the brief was mostly satisfied before this stage began. What it had NOT covered
+was held-key repeat in the rename box, placeholder colour in the rename box, and
+the fact that the host screen pre-filled the nickname instead of hinting it.
+
+### Implemented features
+
+**1. Text editing, finished**
+- **Held-key repeat moved into `TextEditor`** (`ui/widgets.py`). It lived in
+  `TextInput`, so the in-game rename box did not have it: holding Backspace
+  deleted exactly one character, and clearing an eleven-letter name meant eleven
+  presses. It is editing behaviour, so it belongs with the other editing
+  behaviour. `TextField.update(dt)` is now called from `GameScreen.update`.
+  There is one repeat rate in the application instead of one per widget.
+- Repeat now respects Ctrl for word-wise `Ctrl+←/→`, which it previously
+  dropped on the second and later repeats.
+- `TextField.showing_placeholder` (new) — the HUD asks, because `display_text()`
+  returns one string either way and a hint must be drawn dimmer than content.
+  The rename placeholder now uses the same `darken(text_dim, 0.72)` as the menu
+  fields, so every placeholder in the application is the same grey.
+- Every editable surface (5 × `TextInput`, 1 × `TextField`) supports
+  Ctrl+A/C/X/V, Shift-selection, Home/End, word jumps and held-key repeat.
+
+**2. Copy the room code**
+- `CopyNotice` (new, `ui/network_screens.py`) — "show this for two seconds"
+  as one class rather than three timers that drift apart. Fades over the last
+  third rather than vanishing between frames.
+- **"Kopiuj kod pokoju"** under the room code in the lobby, with
+  "✓ Skopiowano kod pokoju" beside it for 2 s. Copies **only** the code — not
+  the sentence around it, because the person receiving it is going to paste it
+  straight into the join field and `KOD POKOJU: K7M2QD` joins nothing.
+- The confirmation sits *beside* the button, not under it, so the seat list
+  below never moves when it appears and disappears.
+- Disabled until a room actually exists.
+
+**3. Copy the server address**
+- A small **"Kopiuj"** button beside the server field on both the host and the
+  join screen, with its own 2 s confirmation underneath (to the right is the
+  window edge at 1280 wide).
+- Placed by `_FormScreen._place_copy_button`, measured from the field so it
+  stays aligned when the elastic row spacing moves the form on a short window.
+
+**4. Remembering the last server**
+- `net/config.py`: `user_config_dir()`, `load_preferences()`,
+  `save_preferences()`, `remember_server_url()`, `remembered_server_url()`.
+- Written to the user's own config directory (`%APPDATA%`, `~/Library/
+  Application Support`, `$XDG_CONFIG_HOME`), **not** `data/network.json`. The
+  shipped file is part of the installation and may be read-only or inside a
+  temporary PyInstaller extraction; a value the game decides for itself does
+  not belong there.
+- Config loading is now four layers: defaults → `data/network.json` →
+  remembered → environment. Remembered sits above the shipped file so a typed
+  address is never typed twice, and below the environment so `--server` and a
+  hosting platform still win.
+- Remembered **when a room is actually created or joined**, not when the
+  address is typed — otherwise the field is helpfully re-filled with the typo
+  that caused the failure.
+- Never resets to localhost on its own; clearing the field is the way back, and
+  an empty field falls through to the configured default.
+
+**5. Polish**
+- The host screen's nickname field was **pre-filled** with `Gracz`, so a player
+  had to select-all and delete before typing their own. It is a placeholder
+  now, matching the join screen — the two forms behave identically.
+- Server fields gained the placeholder `wss://twoj-serwer.up.railway.app`: a
+  concrete example, because the shape of the answer is the hard part and the
+  `wss://` prefix is what people leave out.
+- Every field on both forms now has either a value or a hint.
+
+### Bug found while testing
+`remember_server_url` was being handed `transport.description`, which for the
+in-process transport used by the tests is `in-process:c3`. Saved unchecked it
+normalised to `ws://in-process:c3:51337`, whose port is not a number — and every
+subsequent `urlparse(...).port` raised `ValueError`, including the one drawing
+the "Serwer gry:" line on the main menu. Nine tests went red and the real
+preferences file had to be deleted by hand.
+
+Two fixes, because one was not enough:
+- `is_usable_url()` guards what may be remembered, checked both on the way out
+  and on the way in (the file is editable by hand).
+- `describe_target()` no longer raises; a malformed address produces a shrug
+  rather than taking the game's first screen down with it.
+
+### Also fixed
+`ui/clipboard.py` cached "no display yet" as a definite answer. Any probe before
+the window existed pinned availability to False for the whole session, silently
+demoting every copy and paste in the game to the internal buffer with nothing in
+a log to show for it. A missing display now leaves the question open; only a
+real success or failure is recorded.
+
+### Tests
+`tests/test_usability.py` (new, 66 tests):
+- the four editing behaviours run against **every** editable surface via a
+  parametrised `_all_fields()` helper, so a new kind of field that is not listed
+  there stops being covered visibly rather than silently;
+- held Backspace keeps deleting, a tap deletes exactly one, release stops it,
+  and the keyboard beats a swallowed KEYUP — with a `_Pressed` stand-in, because
+  headless `pygame.key.get_pressed()` reports nothing;
+- the rename box repeats too (the field that did not, before this stage);
+- a placeholder is measurably dimmer than typed text — brightest-pixel sampling,
+  not an assertion by eye;
+- the copy notice lasts ~2 s and fades;
+- the lobby copies only the code, and does nothing without one;
+- both copy buttons copy the server address, and nothing when it is blank;
+- at **four resolutions**: the copy button does not cover its field, is on the
+  correct side, stays inside the window, is centred on the field to within a
+  pixel, and no two controls on a form overlap;
+- the lobby copy button never lands on the seat list;
+- remembering: survives a restart, loses to the environment, ignores an empty
+  value, ignores a corrupt file, is not fatal when the file cannot be written,
+  and rejects an address nothing could reconnect to;
+- the clipboard probe is not cached before the window exists, and copy/paste
+  still works on a platform with no system clipboard at all.
+
+### Verification
+- **562 tests passing** (496 before, +66).
+- `tools/inspect_frame.py` at 1280×760, 1920×1080, 2560×1440, 3840×2160:
+  **0 problems**.
+- A render smoke test drove all three screens at 1280×760 and 3840×2160,
+  confirming each copy button is painted, on screen, and that the confirmation
+  appears after a copy.
+
+### Notes
+- **The rename box still has no mouse selection**, and that is the one part of
+  item 1 not delivered. It is an inline editor drawn by the HUD over a player
+  tile; it owns no rectangle and no font, so it cannot hit-test a click. Worse,
+  `GameScreen` deliberately treats any mouse press during a rename as "confirm",
+  which is long-standing behaviour a player relies on. Giving it drag-selection
+  means handing it geometry and changing what a click means — a UI redesign,
+  which this stage was told not to do. Keyboard selection (Shift+arrows,
+  Shift+Home/End, Ctrl+A) all work there.
+- The five `TextInput` fields have full mouse selection, including drag.
+- `CopyNotice` is deliberately not a general toast system. If a third kind of
+  transient message appears, that is the moment to generalise it — not before.

@@ -15,7 +15,7 @@ WORKDIR /app
 # Tylko WebSockety — pygame celowo pominięte.
 RUN pip install --no-cache-dir "websockets>=13"
 
-COPY pedzacy_piotrek ./pedzacy_piotrek/
+COPY pedzacy_piotrek/ ./pedzacy_piotrek/
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 51337

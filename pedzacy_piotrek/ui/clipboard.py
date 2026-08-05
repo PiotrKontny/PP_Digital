@@ -22,18 +22,27 @@ _available = False
 
 
 def _ensure_ready() -> bool:
+    """Probe the system clipboard, remembering only a definite answer.
+
+    "No display yet" is NOT a definite answer, and caching it as one was a
+    latent trap: any call before the window exists would have pinned
+    ``_available`` to False for the rest of the session, quietly demoting every
+    copy and paste in the game to the internal buffer.  The system clipboard
+    would then work for nobody and there would be nothing to see in a log.
+    So a missing display leaves the question open and it is asked again next
+    time; only a real success or a real failure is recorded.
+    """
     global _checked, _available
     if _checked:
         return _available
-    _checked = True
     try:
         if not pygame.display.get_init():
-            _available = False
-        else:
-            pygame.scrap.init()
-            _available = pygame.scrap.get_init()
+            return False            # deliberately not cached
+        pygame.scrap.init()
+        _available = bool(pygame.scrap.get_init())
     except Exception:       # pragma: no cover - platform dependent
         _available = False
+    _checked = True
     return _available
 
 
@@ -64,6 +73,8 @@ def paste() -> str:
 
 
 def reset() -> None:
-    """Forget the fallback buffer (tests)."""
-    global _fallback
+    """Forget the fallback buffer and re-probe the platform (tests)."""
+    global _fallback, _checked, _available
     _fallback = ""
+    _checked = False
+    _available = False

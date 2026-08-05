@@ -1,7 +1,7 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 13 — the handshake gate, friendly errors, deployment
-              (see CHANGELOG_LLM.md)
+Last updated: stage 14 — text editing everywhere, copy buttons, remembered
+              server (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -139,16 +139,23 @@ WORKING:
   sent the table settings before the handshake finished, the server refused
   them, and the fatal refusal threw the host out of a room they never created.
   Every outbound message now waits for the server's WELCOME.
-- ONE TEXT EDITOR behind every text field (stage 13). Selection, caret
-  placement, word jumps, placeholder and Ctrl+A/C/X/V work in the menus AND in
-  the in-game rename box, which previously had none of it.
+- ONE TEXT EDITOR behind every text field (stages 13-14). Selection, caret
+  placement, word jumps, held-key repeat, placeholder and Ctrl+A/C/X/V work in
+  the menus AND in the in-game rename box, which previously had none of it.
+  The one gap is mouse selection in the rename box — see TEXT FIELDS below.
+- THE ADDRESS IS TYPED ONCE (stage 14). A server that a room was actually
+  created on or joined through is remembered in the user's own config
+  directory and pre-fills the field next time.
+- ROOM CODE AND SERVER ADDRESS ARE COPYABLE (stage 14). A button beside each,
+  with a two-second confirmation, because the code is going into a chat
+  window and reading it aloud is the fallback, not the plan.
 - NO PROTOCOL TEXT REACHES A PLAYER (stage 13). net/messages.py translates
   anything technical into a Polish sentence; the server's own prose survives.
 - DEPLOYABLE IN A BROWSER-VERIFIABLE WAY (stage 13): SERVER_SETUP.md,
   railway.json, requirements-server.txt (websockets only, no pygame),
   .railwayignore, and an HTTP health page at / so a first-time deployer can
   tell "server down" from "address wrong".
-- 496 automated tests.
+- 562 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - Cards whose effect requires a player decision (14 of 69 movement cards, all
@@ -240,8 +247,11 @@ pedzacy_piotrek/
     layout.py        EVERY rectangle, computed from window size.
     widgets.py       Button (measures its own label), Stepper, Checkbox,
                      Dropdown, Slider, ScrollBar, fit_buttons, and
-                     TextEditor — THE editing behaviour — wrapped by
-                     TextInput (form boxes) and TextField (inline rename).
+                     TextEditor — THE editing behaviour, including held-key
+                     repeat — wrapped by TextInput (form boxes) and TextField
+                     (inline rename).  See TEXT FIELDS.
+    clipboard.py     System clipboard with an in-process fallback, so copy and
+                     paste still work where SDL has no clipboard at all.
     board_view.py    Board viewport: camera, pawn animation, walks, stacks.
     hand_fan.py      The hand fan and the card-play gesture.
     overlays.py      ChoicePrompt (the engine asking a question), RevealOverlay
@@ -257,6 +267,8 @@ pedzacy_piotrek/
     network_screens.py  MainMenuScreen, HostSetupScreen, JoinScreen, LobbyScreen.
     debug_panel.py   NetworkDebugPanel (F3).
   net/
+    config.py        The four address layers, and the per-user preferences
+                     file that remembers the last server that worked.
     messages.py      EVERY sentence a player reads about the network, plus the
                      pattern table that catches text written for a machine.
     protocol.py      Message types, JSON-line framing, LineBuffer.
@@ -746,6 +758,51 @@ start_rename). HudContext carries everything a panel needs for one frame.
 
 
 ================================================================================
+TEXT FIELDS (stage 14 — read before adding one)
+================================================================================
+
+ONE editor, two presentations.  ui/widgets.TextEditor holds the string, the
+caret, the selection and the held-key repeat; it draws nothing.  Wrap it:
+
+  TextInput   the standing form boxes (host/join: nickname, server, code).
+              Owns a rect, so it also does mouse click-to-place and drag
+              selection.  Five instances.
+  TextField   the inline rename editor the HUD draws over a player tile.
+              Owns no rect and no font.  One instance.
+
+A NEW FIELD WRAPS TextEditor.  It does not reimplement editing, and it does not
+subclass TextInput just to get a different look.
+
+WHAT A WRAPPER MUST DO, or the field is quietly broken:
+  - call ``editor.tick(dt)`` once a frame, or holding Backspace deletes exactly
+    one character and nothing says why.  This is precisely what was wrong with
+    the rename box until stage 14: clearing an eleven-letter name took eleven
+    presses;
+  - call ``editor.release()`` when focus is lost, or a key repeats for ever —
+    a focus change can eat the KEYUP;
+  - let TEXTINPUT events reach ``editor.insert``; KEYDOWN handles the rest.
+    handle_key returns False for Enter and Tab, because those belong to the
+    screen and only the screen knows what they mean;
+  - draw the placeholder in darken(theme.text_dim, 0.72).  A hint is not
+    content and must never be mistakable for it.  TextField exposes
+    ``showing_placeholder`` because display_text() returns one string either
+    way and only the HUD picks the colour.
+
+KNOWN GAP: TextField has no MOUSE selection.  It owns no geometry, and
+GameScreen deliberately treats any mouse press during a rename as "confirm".
+Giving it drag-selection means handing it a rect and a font AND changing what a
+click means mid-rename.  Keyboard selection (Shift+arrows, Shift+Home/End,
+Ctrl+A) all works.  Do not fix this by bolting a rect onto TextField in
+passing: it is a UI change, not a patch.
+
+TRANSIENT CONFIRMATIONS
+  ui/network_screens.CopyNotice — "show this for two seconds", written once,
+  rather than three screens each keeping a string and a float that drift apart.
+  It fades over its last third; vanishing between frames reads as a glitch.
+  It is NOT a general toast system.  When a third kind of transient message
+  turns up, that is the moment to generalise it — not before.
+
+
 HOW THE RENDERER WORKS
 ================================================================================
 
@@ -867,6 +924,11 @@ D8. HIDDEN INFORMATION SPLIT EXISTS ALREADY (to_public_dict / to_private_dict)
 ================================================================================
 KNOWN LIMITATIONS
 ================================================================================
+
+- The in-game rename box (ui/widgets.TextField) supports every KEYBOARD editing
+  behaviour but no MOUSE selection: it owns no rect or font, and GameScreen
+  treats a mouse press during a rename as "confirm". See TEXT FIELDS for why
+  this is a UI decision rather than a missing patch.
 
 L1. STILL OPEN. A client rebuilds the FULL state from the seed and the command
     log, so a modified client could read another player's hand. The server now
@@ -1009,6 +1071,29 @@ FRIENDLY ERRORS (stage 13 — net/messages.py)
   never written for a player.  Three tests failed when this was got wrong; if
   you add a pattern, check you are not replacing a better sentence.
 
+WHERE THE SERVER ADDRESS COMES FROM (stage 14 — four layers, later wins)
+  1. the defaults in net/config.py — enough to play on this machine;
+  2. data/network.json — what the OWNER edits after deploying.  Part of the
+     installation: shipped, hand-edited, possibly read-only, possibly inside a
+     PyInstaller temp directory that is deleted on exit;
+  3. the remembered address, in the USER's own config directory
+     (%APPDATA% / ~/Library/Application Support / $XDG_CONFIG_HOME).  Written by
+     the game, not by a person.  Above the shipped file so an address is never
+     typed twice; below the environment so automation still wins;
+  4. environment variables and --server.
+
+  REMEMBERED WHEN A ROOM ACTUALLY EXISTS, not when the address is typed.  The
+  distinction is the whole value of the feature: remembering on connection
+  re-fills the field with whatever typo just failed.
+
+  ``is_usable_url`` guards what may be saved, and it is not a formality.  What
+  the lobby offers is whatever the transport calls itself, and the in-process
+  transport calls itself "in-process:c3".  Saved unchecked that became
+  ``ws://in-process:c3:51337``, whose port is not a number, and every later
+  ``urlparse(...).port`` raised — including the one drawing the main menu.  One
+  bad string in a preferences file broke the game's first screen.  Hence also:
+  ``describe_target`` never raises.
+
 TWO IDENTITIES, AND THEY ARE NOT THE SAME
   * connection id = one socket.  Dies with the WiFi.
   * peer id       = one player.  Survives a reconnection.
@@ -1125,6 +1210,8 @@ FILES THAT SHOULD NEVER BE REMOVED
 - players/player.py public/private split — the multiplayer hidden-info seam.
 - net/* — the networking layer. net/messages.py in particular: it is the only
   thing standing between a player and a stack trace.
+- ui/widgets.TextEditor — every text field in the application is a wrapper
+  round it, and ui/clipboard.py is what makes Ctrl+V reach the system.
 - server/* — the authoritative server. Its freedom from pygame and from ui/ is
   what makes deployment small, and a test asserts it.
 - SERVER_SETUP.md, railway.json, requirements-server.txt, .railwayignore — the
@@ -1291,6 +1378,30 @@ N54. Never import ui/ or render/ from server/ or net/, and never add pygame to
      unimportable; that test is what keeps the deployment small.
 N55. Never point a hosting platform at requirements.txt. It pins pygame.
 
+N56. Never write a text field that reimplements editing. Wrap TextEditor, and
+     call tick(dt) every frame and release() on focus loss. A field that types
+     but will not hold-to-delete is the symptom of forgetting tick().
+N57. Never draw placeholder text in the same colour as typed text. It is
+     darken(theme.text_dim, 0.72) everywhere, and a test measures it.
+N58. Never write game-decided settings into data/network.json. That file is the
+     OWNER's, shipped with the installation, and may be read-only or inside a
+     PyInstaller temp directory. Per-user state goes through
+     net/config.save_preferences().
+N59. Never remember a server address that has not actually produced a room.
+     Remembering on connection re-fills the field with the typo that failed.
+N60. Never save an address without is_usable_url(). A transport's description
+     is not always a URL: "in-process:c3" became ws://in-process:c3:51337,
+     whose port is not a number, and it broke the main menu until the
+     preferences file was deleted by hand.
+N61. Never let a urlparse(...).port call reach a screen unguarded. It raises
+     ValueError on a malformed address, and drawing code must shrug, not throw.
+N62. Never cache "no display yet" as a clipboard answer. It pins the system
+     clipboard off for the whole session and silently demotes every copy and
+     paste to the internal buffer.
+N63. Never copy decoration along with the payload. The room-code button copies
+     K7M2QD, not "KOD POKOJU: K7M2QD" — it is going straight into a join
+     field at the other end.
+
 
 ================================================================================
 RECOMMENDED ORDER OF FUTURE DEVELOPMENT
@@ -1304,6 +1415,9 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    server. Stage 13 fixed the defect that made hosting impossible, and the fix
    is covered by tests, but no human has yet completed a Poland↔UK game on a
    Railway deployment. That is the one thing the test suite cannot tell us.
+   Stage 14 makes that first attempt considerably less painful — the address is
+   typed once and the room code is one click away from a chat window — but it
+   does not substitute for doing it.
 
 0b. NOTE: two settings have now been silently dropped by config rebuilding
    (double_frequency, edit_mode).  Both normalised() and create_game() use
@@ -1331,7 +1445,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 496 tests, ~120 s
+    python -m pytest -q                     # 562 tests, ~100 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -1348,6 +1462,9 @@ HOW TO VERIFY A CHANGE
       tests/test_handshake.py    — the handshake gate, friendly errors, the
                                    shared text editor, 2-player debug games,
                                    and that the server runs without pygame
+      tests/test_usability.py    — every editable field, held-key repeat, the
+                                   copy buttons and their placement at four
+                                   resolutions, and the remembered address
       tests/test_menu_layout.py  — text overlap at four resolutions, text entry
     python -m pedzacy_piotrek --selftest    # renders frames headlessly
     python tools/inspect_frame.py --window 2560x1440

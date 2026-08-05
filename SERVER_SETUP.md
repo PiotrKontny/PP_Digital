@@ -271,6 +271,23 @@ Ten sam adres można też wpisać **wprost w grze**, w polu „Serwer gry” na
 ekranie zakładania albo dołączania — wtedy nie musisz w ogóle ruszać pliku.
 Zmiana w `network.json` sprawia tylko, że jest on domyślnie podpowiadany.
 
+**Adres zapamiętuje się sam.** Kiedy uda ci się założyć albo znaleźć pokój, gra
+zapisuje ten adres u siebie i następnym razem wpisze go za ciebie. Nie wraca do
+`localhost` — chyba że sam wyczyścisz pole. Zapis trafia do:
+
+| System | Ścieżka |
+|---|---|
+| Windows | `%APPDATA%\pedzacy-piotrek\preferences.json` |
+| macOS | `~/Library/Application Support/pedzacy-piotrek/preferences.json` |
+| Linux | `~/.config/pedzacy-piotrek/preferences.json` |
+
+Możesz ten plik skasować w każdej chwili — gra wróci wtedy do adresu
+z `network.json`.
+
+Obok pola „Serwer gry” jest przycisk **Kopiuj**, a w poczekalni **Kopiuj kod
+pokoju**. Oba wrzucają wartość do schowka, więc możesz ją od razu wkleić
+znajomym na czacie.
+
 Dla porządku: wszystkie pozostałe ustawienia sieciowe (limity czasu,
 heartbeat, ponawianie połączenia, okres na powrót po rozłączeniu) też są w tym
 pliku i **nie musisz ich ruszać**. Wartości domyślne są dobrane pod grę

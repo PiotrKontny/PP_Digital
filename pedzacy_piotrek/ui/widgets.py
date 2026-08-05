@@ -482,7 +482,20 @@ class TextEditor:
     means there is a single answer to "what does Ctrl+Left do in this game".
 
     Not a widget and deliberately not a dataclass: it is behaviour, not data.
+
+    HELD KEYS REPEAT HERE, not in the widgets.  pygame's global key repeat
+    would also spam every in-game shortcut, so the editor watches the held key
+    itself and needs ``tick(dt)`` called once a frame.  It lives at this level
+    because "holding Backspace deletes a word" is editing behaviour, and the
+    rename box needed it exactly as much as the form boxes did — it just never
+    had it, so a player wanting to clear a name pressed the key eleven times.
     """
+
+    REPEAT_DELAY = 0.42
+    REPEAT_INTERVAL = 0.035
+    #: Keys that repeat while held.
+    REPEATING = (pygame.K_BACKSPACE, pygame.K_DELETE,
+                 pygame.K_LEFT, pygame.K_RIGHT)
 
     def __init__(self, value: str = "", max_length: int = 32,
                  numeric: bool = False) -> None:
@@ -492,6 +505,50 @@ class TextEditor:
         self.caret = len(self.value)
         #: Where a selection started, or ``None`` when nothing is selected.
         self.anchor: Optional[int] = None
+        self._held_key: Optional[int] = None
+        self._held_shift = False
+        self._held_ctrl = False
+        self._held_for = 0.0
+        self._repeats = 0
+
+    # ── held keys ────────────────────────────────────────────────────────────
+    def release(self) -> None:
+        """Stop repeating.  Called on KEYUP and whenever focus changes."""
+        self._held_key = None
+        self._held_for = 0.0
+        self._repeats = 0
+
+    def tick(self, dt: float) -> None:
+        """Advance the repeat timer.  Must be called once a frame."""
+        if self._held_key is None:
+            return
+        # Trust the keyboard rather than KEYUP alone: a focus change can eat
+        # the release and leave a key repeating for ever.
+        try:
+            still_down = pygame.key.get_pressed()[self._held_key]
+        except (pygame.error, IndexError):  # pragma: no cover - headless
+            still_down = True
+        if not still_down:
+            self.release()
+            return
+        self._held_for += dt
+        if self._held_for < self.REPEAT_DELAY:
+            return
+        due = int((self._held_for - self.REPEAT_DELAY) / self.REPEAT_INTERVAL) + 1
+        while self._repeats < due:
+            self._repeats += 1
+            self._repeat_once()
+
+    def _repeat_once(self) -> None:
+        key, shift, ctrl = self._held_key, self._held_shift, self._held_ctrl
+        if key == pygame.K_BACKSPACE:
+            self.backspace()
+        elif key == pygame.K_DELETE:
+            self.delete_forward()
+        elif key == pygame.K_LEFT:
+            self.move_caret(self.word_left() if ctrl else self.caret - 1, shift)
+        elif key == pygame.K_RIGHT:
+            self.move_caret(self.word_right() if ctrl else self.caret + 1, shift)
 
     # ── selection ────────────────────────────────────────────────────────────
     @property
@@ -663,6 +720,13 @@ class TextEditor:
             # Everything printable arrives as TEXTINPUT.  Consuming it here as
             # well is the double-insertion bug this branch guards against.
             return True
+
+        if key in self.REPEATING:
+            self._held_key = key
+            self._held_shift = shift
+            self._held_ctrl = ctrl
+            self._held_for = 0.0
+            self._repeats = 0
         return True
 
 
@@ -735,9 +799,29 @@ class TextField:
             self.editor.handle_key(event)
         return None
 
+    def update(self, dt: float) -> None:
+        """Drive the held-key repeat.  The game screen calls this each frame.
+
+        Without it, holding Backspace in the rename box deletes exactly one
+        character, which is the one place in the application where that was
+        still true.
+        """
+        if self.active:
+            self.editor.tick(dt)
+
     def caret(self) -> str:
         """The blinking bar itself, blank on the off half of the cycle."""
         return "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+
+    @property
+    def showing_placeholder(self) -> bool:
+        """True when what is on screen is a hint rather than the player's text.
+
+        The HUD asks, because a placeholder has to be drawn dimmer than
+        anything a player could have typed and ``display_text`` returns one
+        string either way.
+        """
+        return self.active and not self.buffer and bool(self.placeholder)
 
     def display_text(self) -> str:
         """What the HUD draws: the text with the caret in it, or the hint.
@@ -777,10 +861,12 @@ class TextInput(Widget):
       used to draw is remembered and reused for caret placement.
     """
 
-    REPEAT_DELAY = 0.42
-    REPEAT_INTERVAL = 0.035
-    #: Keys that repeat while held.
-    REPEATING = (pygame.K_BACKSPACE, pygame.K_DELETE, pygame.K_LEFT, pygame.K_RIGHT)
+    #: Kept as class attributes because screens and tests refer to them; the
+    #: timing itself belongs to TextEditor now, so there is one repeat rate in
+    #: the application rather than one per widget.
+    REPEAT_DELAY = TextEditor.REPEAT_DELAY
+    REPEAT_INTERVAL = TextEditor.REPEAT_INTERVAL
+    REPEATING = TextEditor.REPEATING
     PADDING = 12
 
     def __init__(
@@ -798,10 +884,6 @@ class TextInput(Widget):
         self.focused = False
         #: All the editing lives here; this class is the box drawn around it.
         self.editor = TextEditor(value, max_length=max_length, numeric=numeric)
-        self._held_key: Optional[int] = None
-        self._held_shift = False
-        self._held_for = 0.0
-        self._repeats = 0
         self._dragging = False
         self._press_index = 0
         self._font: Optional[pygame.font.Font] = None
@@ -897,9 +979,7 @@ class TextInput(Widget):
             pygame.key.stop_text_input()
 
     def _release(self) -> None:
-        self._held_key = None
-        self._held_for = 0.0
-        self._repeats = 0
+        self.editor.release()
 
     # ── events ───────────────────────────────────────────────────────────────
     def handle(self, event: pygame.event.Event) -> bool:
@@ -934,7 +1014,7 @@ class TextInput(Widget):
             self.insert(event.text)
             return True
 
-        if event.type == pygame.KEYUP and event.key == self._held_key:
+        if event.type == pygame.KEYUP:
             self._release()
             return True
 
@@ -948,43 +1028,17 @@ class TextInput(Widget):
             self.blur()
             return True
 
-        shift = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
         if not self.editor.handle_key(event):
             return False        # Enter and Tab: the screen decides
-
-        if event.key in self.REPEATING:
-            self._held_key = event.key
-            self._held_shift = shift
-            self._held_for = 0.0
-            self._repeats = 0
         return True
-
-    def _repeat_once(self) -> None:
-        if self._held_key == pygame.K_BACKSPACE:
-            self.backspace()
-        elif self._held_key == pygame.K_DELETE:
-            self.delete_forward()
-        elif self._held_key == pygame.K_LEFT:
-            self._move_caret(self.caret - 1, self._held_shift)
-        elif self._held_key == pygame.K_RIGHT:
-            self._move_caret(self.caret + 1, self._held_shift)
 
     def update(self, mouse_pos: Tuple[int, int], dt: float = 0.0) -> None:
         super().update(mouse_pos, dt)
-        if not self.focused or self._held_key is None:
-            return
-        # Trust the keyboard rather than KEYUP alone: a focus change can eat the
-        # release and leave a key repeating for ever.
-        if not pygame.key.get_pressed()[self._held_key]:
-            self._release()
-            return
-        self._held_for += dt
-        if self._held_for < self.REPEAT_DELAY:
-            return
-        due = int((self._held_for - self.REPEAT_DELAY) / self.REPEAT_INTERVAL) + 1
-        while self._repeats < due:
-            self._repeats += 1
-            self._repeat_once()
+        if self.focused:
+            # Holding Backspace only deletes continuously while this is called,
+            # so a screen that forgets it gets a field that types but will not
+            # erase.  Every screen owning a field calls it.
+            self.editor.tick(dt)
 
     # ── measuring ────────────────────────────────────────────────────────────
     def _measure(self, text: str) -> int:

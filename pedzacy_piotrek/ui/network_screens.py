@@ -33,11 +33,14 @@ import pygame
 from ..cards.loader import ContentLibrary
 from ..config import settings
 from ..config.settings import RULES
+from ..config.theme import mix
 from ..net.config import current as network_config
+from ..net.config import remember_server_url
 from ..net.lobby import DEFAULT_NICKNAME, clean_room_code
 from ..net.messages import friendly
 from ..net.service import ClientService, HostService, NetworkService
 from ..net.transport import ConnectionState, TransportError
+from . import clipboard
 from .app import App, Screen
 from .headings import BLOCK_GAP, content_top, draw_title
 from .widgets import Button, Checkbox, Dropdown, Stepper, TextInput, fit_buttons
@@ -46,6 +49,52 @@ _title = draw_title
 
 #: What the character dropdown calls "deal me one".
 RANDOM_LABEL = "Losowa postać"
+
+#: Shown greyed out when the server field is empty.  A concrete example
+#: rather than "adres serwera": the shape of the answer is the hard part, and
+#: the wss:// prefix is the thing people leave out.
+SERVER_PLACEHOLDER = "wss://twoj-serwer.up.railway.app"
+
+#: How long a "✓ skopiowano" confirmation stays on screen, in seconds.
+COPY_NOTICE_SECONDS = 2.0
+
+
+class CopyNotice:
+    """A short confirmation that something reached the clipboard.
+
+    Its own tiny class rather than a string plus a float on three screens,
+    because "show this for two seconds" is the same behaviour every time and
+    the alternative is three timers that drift apart.  Screens call
+    :meth:`show` when they copy and :meth:`update` once a frame.
+    """
+
+    def __init__(self, seconds: float = COPY_NOTICE_SECONDS) -> None:
+        self.seconds = seconds
+        self.text = ""
+        self._left = 0.0
+
+    @property
+    def visible(self) -> bool:
+        return self._left > 0.0 and bool(self.text)
+
+    def show(self, text: str) -> None:
+        self.text = text
+        self._left = self.seconds
+
+    def update(self, dt: float) -> None:
+        if self._left > 0.0:
+            self._left = max(0.0, self._left - dt)
+
+    def fade(self) -> float:
+        """1.0 for most of its life, falling away over the last third.
+
+        Vanishing between one frame and the next reads as a glitch; a short
+        fade reads as a message that is finished.
+        """
+        if not self.visible:
+            return 0.0
+        tail = self.seconds / 3.0
+        return 1.0 if self._left > tail else max(0.0, self._left / tail)
 
 
 class MainMenuScreen(Screen):
@@ -153,11 +202,50 @@ class MainMenuScreen(Screen):
 class _FormScreen(Screen):
     """Shared plumbing for the two screens that are mostly text fields."""
 
+    #: How far the "Kopiuj" button sits from the field it belongs to.
+    COPY_GAP = 8
+
     def __init__(self, app: App, library: ContentLibrary) -> None:
         super().__init__(app)
         self.library = library
         self.inputs: List[TextInput] = []
         self.error = ""
+        #: Sits beside the server field so the address can be pasted into a
+        #: chat window and sent to whoever is joining.
+        self.copy_server = Button(pygame.Rect(0, 0, 92, 0), "Kopiuj",
+                                  radius=8, text_size=13)
+        self.copied = CopyNotice()
+
+    def _place_copy_button(self, field: TextInput) -> None:
+        """Put the copy button beside a field, vertically centred on it.
+
+        Measured from the field rather than given a position, so it stays put
+        when the elastic row spacing moves the form around on a short window.
+        """
+        r = self.app.renderer
+        self.copy_server.rect.height = max(28, field.rect.height - 12)
+        self.copy_server.fit(r, min_width=92,
+                             min_height=self.copy_server.rect.height)
+        self.copy_server.rect.midleft = (field.rect.right + self.COPY_GAP,
+                                         field.rect.centery)
+
+    def _copy_server_address(self, field: TextInput) -> None:
+        address = (field.value or "").strip()
+        if not address:
+            return
+        clipboard.copy(address)
+        self.copied.show("✓ Skopiowano adres")
+
+    def _draw_copy_button(self, surface: pygame.Surface, field: TextInput) -> None:
+        r, theme = self.app.renderer, self.app.renderer.theme
+        self.copy_server.draw(r, surface)
+        if self.copied.visible:
+            # Under the button, not beside it: to the right is the window edge
+            # on a 1280-wide screen.
+            r.text(self.copied.text, r.fonts.get(13, bold=True),
+                   mix(theme.background, theme.valid, self.copied.fade()),
+                   surface, midtop=(self.copy_server.rect.centerx,
+                                    self.copy_server.rect.bottom + 4))
 
     def _focus(self, field: Optional[TextInput]) -> None:
         for other in self.inputs:
@@ -195,6 +283,11 @@ class _FormScreen(Screen):
             if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.confirm()
                 return
+        if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                and getattr(self, "server", None) is not None
+                and self.copy_server.hit(mouse)):
+            self._copy_server_address(self.server)
+            return
         self.handle_click(event, mouse)
 
     def handle_click(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
@@ -208,6 +301,10 @@ class _FormScreen(Screen):
         # backspace is held down.
         for field in self.inputs:
             field.update(mouse, dt)
+        self.copied.update(dt)
+        self.copy_server.enabled = bool(getattr(self, "server", None)
+                                        and self.server.value.strip())
+        self.copy_server.update(mouse, dt)
         self.update_widgets(dt, mouse)
 
     def update_widgets(self, dt: float, mouse: Tuple[int, int]) -> None:
@@ -238,10 +335,11 @@ class HostSetupScreen(_FormScreen):
         self.run_local_server = False
 
         self.nickname = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
-                                  "Twój nick", DEFAULT_NICKNAME,
+                                  "Twój nick", "", placeholder=DEFAULT_NICKNAME,
                                   max_length=RULES.max_name_length)
         self.server = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
-                                "Serwer gry", network_config().server_url, max_length=80)
+                                "Serwer gry", network_config().server_url,
+                                placeholder=SERVER_PLACEHOLDER, max_length=80)
         self.inputs = [self.nickname, self.server]
 
         self.debug_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
@@ -292,6 +390,7 @@ class HostSetupScreen(_FormScreen):
             field.rect.size = (self.FIELD_W, self.FIELD_H)
             field.rect.topleft = (centre - self.FIELD_W // 2, y + self.LABEL_GAP)
             y = field.rect.bottom + self.ROW_GAP
+        self._place_copy_button(self.server)
 
         y += 4
         self.stepper_rows = []
@@ -396,6 +495,7 @@ class HostSetupScreen(_FormScreen):
         _title(r, layout, surface, "Załóż grę")
         for field in self.inputs:
             field.draw(r, surface)
+        self._draw_copy_button(surface, self.server)
 
         labels = ("Liczba pól planszy", "Skrzynia otwiera się w rundzie",
                   "Pola podwójne (12a / 12b)")
@@ -447,7 +547,8 @@ class JoinScreen(_FormScreen):
                                   "Twój nick", "", placeholder=DEFAULT_NICKNAME,
                                   max_length=RULES.max_name_length)
         self.server = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
-                                "Serwer gry", network_config().server_url, max_length=80)
+                                "Serwer gry", network_config().server_url,
+                                placeholder=SERVER_PLACEHOLDER, max_length=80)
         self.inputs = [self.code, self.nickname, self.server]
         self.join = Button(pygame.Rect(0, 0, 280, 52), "Dołącz", radius=12,
                            primary=True)
@@ -464,6 +565,7 @@ class JoinScreen(_FormScreen):
             field.rect.size = (self.FIELD_W, self.FIELD_H)
             field.rect.topleft = (centre - self.FIELD_W // 2, y + self.LABEL_GAP)
             y = field.rect.bottom + self.ROW_GAP
+        self._place_copy_button(self.server)
 
         self.join.rect.midtop = (centre, y + 8)
         fit_buttons(r, [self.join, self.back], min_width=280,
@@ -510,6 +612,7 @@ class JoinScreen(_FormScreen):
         _title(r, layout, surface, "Dołącz do gry")
         for field in self.inputs:
             field.draw(r, surface)
+        self._draw_copy_button(surface, self.server)
         self.join.draw(r, surface)
         self.back.draw(r, surface)
         r.text("Kod pokoju podaje osoba, która ją założyła  ·  Tab przełącza pola",
@@ -552,6 +655,13 @@ class LobbyScreen(Screen):
         self.character = Dropdown(pygame.Rect(0, 0, 260, 34),
                                   [RANDOM_LABEL, *library.character_titles()])
         self.character.value = RANDOM_LABEL
+        #: Reading a six-character code aloud over a voice chat works, but
+        #: pasting it into a chat window is what people actually do.
+        self.copy_code = Button(pygame.Rect(0, 0, 200, 32), "Kopiuj kod pokoju",
+                                radius=8, text_size=14)
+        self.copied = CopyNotice()
+        #: Remembered once, when the room really exists — see :meth:`update`.
+        self._remembered = False
         self._lay_out()
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -608,11 +718,20 @@ class LobbyScreen(Screen):
         self.start.rect.midbottom = (centre, self.problem_y - 6)
         self.ready.rect.midbottom = self.start.rect.midbottom
 
-        # Top-down: heading, room code, seat list, character picker.
+        # Top-down: heading, room code, copy button, seat list, character picker.
         y = content_top(r, layout)
         self.info_y = y
         y += r.fonts.get(30, bold=True).get_height() + 4
-        y += r.fonts.get(14).get_height() + BLOCK_GAP
+        y += r.fonts.get(14).get_height() + 8
+        self.copy_code.fit(r, min_width=200,
+                           min_height=int(32 * r.fonts.scale),
+                           max_width=max(180, layout.win_w - 64))
+        self.copy_code.rect.midtop = (centre, y)
+        # The confirmation sits beside the button rather than under it, so the
+        # seat list below never moves when it appears and disappears.
+        self.copied_pos = (self.copy_code.rect.right + 12,
+                           self.copy_code.rect.centery)
+        y = self.copy_code.rect.bottom + BLOCK_GAP
 
         self.character_row_y = self.start.rect.top - BLOCK_GAP - 34
         self.character.rect.size = (260, 34)
@@ -663,6 +782,9 @@ class LobbyScreen(Screen):
             self.character.disabled_options = self._taken()
             self.character.open = True
             return
+        if self.lobby.code and self.copy_code.hit(mouse):
+            self._copy_code()
+            return
         if self.is_host and self.start.hit(mouse):
             self._start()
             return
@@ -672,6 +794,19 @@ class LobbyScreen(Screen):
             return
         if self.leave.hit(mouse):
             self._leave()
+
+    def _copy_code(self) -> None:
+        """Put ONLY the code on the clipboard.
+
+        Not the sentence around it: the person on the other end is going to
+        paste it straight into the join field, and "KOD POKOJU: K7M2QD" does
+        not join anything.
+        """
+        code = self.lobby.code
+        if not code:
+            return
+        clipboard.copy(code)
+        self.copied.show("✓ Skopiowano kod pokoju")
 
     def _start(self) -> None:
         """Ask the server to begin.  The answer arrives as a broadcast.
@@ -715,10 +850,20 @@ class LobbyScreen(Screen):
             self._enter_game()
             return
 
+        self.copied.update(dt)
+        if self.lobby.code and not self._remembered:
+            # A room exists, so this address demonstrably works.  Remembering
+            # it on connection instead would helpfully re-fill the field with
+            # whatever typo failed.
+            self._remembered = True
+            remember_server_url(self.service.server_url)
+
         notices = self.service.drain_notices()
         if notices:
             self.message = notices[-1]
         self._lay_out()
+        self.copy_code.enabled = bool(self.lobby.code)
+        self.copy_code.update(mouse, dt)
         self.start.enabled = self.lobby.can_start
         self.start.update(mouse, dt)
         self.ready.update(mouse, dt)
@@ -731,6 +876,12 @@ class LobbyScreen(Screen):
         _title(r, layout, surface, "Poczekalnia")
 
         self._draw_code(surface)
+        if self.lobby.code:
+            self.copy_code.draw(r, surface)
+            if self.copied.visible:
+                r.text(self.copied.text, r.fonts.get(14, bold=True),
+                       mix(theme.background, theme.valid, self.copied.fade()),
+                       surface, midleft=self.copied_pos)
         self._draw_seats(surface)
 
         r.text("Twoja postać:", r.fonts.get(17), theme.text_light, surface,
