@@ -46,9 +46,22 @@ def config() -> SessionConfig:
 
 # ── configuration ────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("typed, expected", [
-    ("example.com", f"ws://example.com:{DEFAULT_PORT}"),
+    # A bare public domain is a DEPLOYED server behind a hosting proxy, which
+    # only ever answers wss:// on 443.  Guessing ws:// on the game's port for
+    # these was silent and total: the address looked right and every single
+    # connection was refused.
+    ("example.com", "wss://example.com"),
+    ("piotrek-server.up.railway.app", "wss://piotrek-server.up.railway.app"),
+    ("piotrek-server.up.railway.app/", "wss://piotrek-server.up.railway.app"),
+    # A bare address on somebody's own network has no certificate, so it keeps
+    # plain ws:// and the game's own port.
+    ("127.0.0.1", f"ws://127.0.0.1:{DEFAULT_PORT}"),
+    ("localhost", f"ws://localhost:{DEFAULT_PORT}"),
+    ("192.168.0.14", f"ws://192.168.0.14:{DEFAULT_PORT}"),
+    # An explicit port or scheme is always obeyed, whatever the host looks like.
     ("example.com:9000", "ws://example.com:9000"),
     ("ws://example.com:9000", "ws://example.com:9000"),
+    ("ws://example.com", f"ws://example.com:{DEFAULT_PORT}"),
     ("wss://piotrek.example.com", "wss://piotrek.example.com"),
     ("https://piotrek.example.com", "wss://piotrek.example.com"),
     ("ws://example.com:9000/", "ws://example.com:9000"),

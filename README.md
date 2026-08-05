@@ -32,7 +32,9 @@ Adres serwera ustawia się raz w `pedzacy_piotrek/data/network.json` (albo
 działania internetu w domach: komputer za NAT-em nie przyjmuje połączeń
 przychodzących, więc żaden gracz nie może być serwerem dla kogoś z zewnątrz.
 Uruchomienie to jedno polecenie, a darmowe plany hostingowe w zupełności
-wystarczają — całość opisuje **[docs/SERWER.md](docs/SERWER.md)**.
+wystarczają — krok po kroku opisuje to **[SERVER_SETUP.md](SERVER_SETUP.md)**
+(instrukcja od zera: Railway, adres, kod pokoju, co robić gdy nie działa).
+Krótsze tło techniczne jest w [docs/SERWER.md](docs/SERWER.md).
 
 ```bash
 python -m pedzacy_piotrek.server          # serwer (bez okna, bez pygame)

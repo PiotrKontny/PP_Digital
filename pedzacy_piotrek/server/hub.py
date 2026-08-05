@@ -126,8 +126,16 @@ class ServerHub:
         if message.type is MessageType.PONG:
             return []
         if connection.peer_id is None:
+            # A message that overtook the handshake.  The client is supposed to
+            # make this impossible (net/client._send holds everything until it
+            # has been welcomed), so reaching here means an old build or a bug —
+            # neither of which is worth throwing a player out of the game for.
+            # It used to be fatal, which turned one mis-ordered message into
+            # "you are disconnected" and showed the player the raw protocol
+            # text.  Dropping the message costs one action; dropping the player
+            # costs the match.
             return self._out([(cid, Message.error(
-                "Najpierw przywitanie (hello)", fatal=True))])
+                "Trwa łączenie z serwerem — spróbuj jeszcze raz"))])
 
         identity = self.identities[connection.peer_id]
         identity.last_seen = self._clock()

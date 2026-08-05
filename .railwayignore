@@ -1,0 +1,13 @@
+# Nothing here is needed to RUN the server, and every megabyte is build time.
+# The server needs pedzacy_piotrek/{server,net,engine,cards,board,players,
+# config,data} and nothing else — see SERVER_SETUP.md.
+pedzacy_piotrek/ui/
+pedzacy_piotrek/render/
+pedzacy_piotrek/assets/
+tests/
+tools/
+docs/
+shots/
+*.md
+run_game.py
+requirements-dev.txt

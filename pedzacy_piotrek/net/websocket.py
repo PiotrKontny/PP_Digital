@@ -47,6 +47,9 @@ import time
 from typing import List, Optional
 
 from .config import NetworkConfig
+from .messages import (BAD_ADDRESS, CANNOT_CONNECT, CONNECTION_LOST,
+                       NO_ADDRESS, SERVER_NOT_FOUND, SERVER_UNAVAILABLE,
+                       friendly)
 from .protocol import Message, MessageType, ProtocolError
 from .transport import ConnectionState, Transport, TransportError
 
@@ -99,7 +102,7 @@ class WebSocketTransport(Transport):
                 "pip install websockets"
             )
         if not url:
-            raise TransportError("Nie podano adresu serwera")
+            raise TransportError(NO_ADDRESS)
 
         self.config = config or NetworkConfig()
         self.url = url
@@ -188,7 +191,7 @@ class WebSocketTransport(Transport):
         if not policy.enabled or self.state is not ConnectionState.CONNECTED:
             return
         if time.monotonic() - self.last_message_at > policy.timeout:
-            self._fail("Serwer przestał odpowiadać")
+            self._fail(SERVER_UNAVAILABLE)
             self.state = ConnectionState.RECONNECTING
             self.last_message_at = time.monotonic()
             loop, self._loop = self._loop, self._loop
@@ -211,7 +214,7 @@ class WebSocketTransport(Transport):
         try:
             loop.run_until_complete(self._supervise())
         except Exception as exc:  # pragma: no cover - defensive
-            self._fail(f"Błąd sieci: {exc}")
+            self._fail(friendly(str(exc), default=CONNECTION_LOST))
             self.state = ConnectionState.CLOSED
         finally:
             try:
@@ -232,7 +235,7 @@ class WebSocketTransport(Transport):
             except (_ConnectionClosed, _WebSocketException, OSError) as exc:
                 self._fail(_readable(exc, self.url))
             except Exception as exc:  # pragma: no cover - defensive
-                self._fail(f"Błąd połączenia: {exc}")
+                self._fail(friendly(str(exc), default=CANNOT_CONNECT))
 
             if self._stop.is_set():
                 break
@@ -241,7 +244,7 @@ class WebSocketTransport(Transport):
                 return
             self.attempt += 1
             if policy.max_attempts and self.attempt > policy.max_attempts:
-                self._fail(self.error or "Nie udało się połączyć z serwerem")
+                self._fail(self.error or CANNOT_CONNECT)
                 self.state = ConnectionState.CLOSED
                 return
             self.state = ConnectionState.RECONNECTING
@@ -263,7 +266,7 @@ class WebSocketTransport(Transport):
         try:
             connection = await _ws_connect(self.url, **kwargs)
         except _InvalidURI:
-            self._fail(f"Nieprawidłowy adres serwera: {self.url}")
+            self._fail(BAD_ADDRESS)
             self._stop.set()
             self.state = ConnectionState.CLOSED
             return
@@ -361,13 +364,18 @@ class WebSocketTransport(Transport):
 
 
 def _readable(exc: Exception, url: str) -> str:
-    """Turn a networking exception into something a player can act on."""
+    """Turn a networking exception into something a player can act on.
+
+    The URL is deliberately NOT interpolated any more.  It was, and the result
+    was a player being shown ``ws://piotrek-server.up.railway.app:51337`` in a
+    red error line, which tells them nothing they can act on and looks like a
+    crash.  The address is on the screen they just came from and in the debug
+    panel; the error line gets the sentence.
+    """
     if isinstance(exc, ConnectionRefusedError):
-        return f"Serwer {url} odrzucił połączenie — czy jest uruchomiony?"
+        return CANNOT_CONNECT
     if isinstance(exc, asyncio.TimeoutError):
-        return f"Serwer {url} nie odpowiada"
+        return SERVER_UNAVAILABLE
     if isinstance(exc, OSError) and getattr(exc, "errno", None) in (-2, -3, -5):
-        return f"Nie znaleziono serwera {url}"
-    text = str(exc).strip()
-    return f"Utracono połączenie z serwerem ({text})" if text else \
-        "Utracono połączenie z serwerem"
+        return SERVER_NOT_FOUND
+    return friendly(str(exc), default=CONNECTION_LOST)

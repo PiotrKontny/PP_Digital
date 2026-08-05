@@ -46,9 +46,19 @@ from ..engine.game_state import GameState
 from ..engine.setup import create_game
 from .config import NetworkConfig
 from .lobby import DEFAULT_NICKNAME, LobbyState, clean_room_code
+from .messages import CONNECTION_LOST, friendly
 from .protocol import Message, MessageType, fingerprint_of
 from .session import NetworkSession, NetworkStats
 from .transport import ConnectionState, Transport
+
+#: The only messages allowed out before the server has greeted the connection.
+#: ``HELLO`` *is* the handshake; the keepalives are answered by the socket layer
+#: on both sides and carry no identity, so they are safe at any moment.
+_HANDSHAKE_EXEMPT = frozenset({
+    MessageType.HELLO,
+    MessageType.PING,
+    MessageType.PONG,
+})
 
 
 class GameClient:
@@ -81,6 +91,14 @@ class GameClient:
         #: reconnection so a click that happened during a drop is not lost.
         self._intent: Optional[Message] = None
         self._greeted_generation: int = 0
+        #: The connection generation the server has actually greeted.  A socket
+        #: being up is NOT the same as the server knowing who we are, and every
+        #: message except the handshake itself is refused until it does.
+        self._welcomed_generation: int = 0
+        #: Anything the player did before the handshake finished, in order.
+        #: See :meth:`_send` — this queue is why a click that lands during
+        #: connection or reconnection is honoured instead of being rejected.
+        self._pending: List[Message] = []
         self._sequence: int = 0
         self._sent_counter: int = 0
         self._last_sync_request: float = 0.0
@@ -120,9 +138,46 @@ class GameClient:
         return notices
 
     # ── outgoing ─────────────────────────────────────────────────────────────
+    @property
+    def handshaken(self) -> bool:
+        """Has the server greeted *this* connection?
+
+        Not "are we connected": a fresh socket after a drop is connected and
+        completely unknown to the server until it has seen a ``HELLO`` on it.
+        """
+        return (self.peer_id is not None
+                and self._welcomed_generation == self.transport.generation
+                and self._welcomed_generation != 0)
+
     def _send(self, message: Message) -> None:
-        self.transport.send(message)
-        self.stats.note_sent(message.type.value)
+        """Put a message on the wire, or hold it until the handshake is done.
+
+        THE RULE: nothing but the handshake itself may overtake ``HELLO``.
+
+        The screens act the moment the player clicks, which is routinely before
+        the socket has finished connecting — ``HostSetupScreen`` sends the table
+        settings in the same function that opens the connection.  The transport
+        queues whatever it is given and flushes it as soon as the socket opens,
+        so without this gate those messages arrive *first*, the server quite
+        correctly answers "no handshake yet", and the player is thrown out of a
+        room they never managed to create.  That was a certainty, not a race:
+        it happened on every single attempt to host a game.
+
+        Holding them here means the click is honoured either way, and the same
+        queue replays anything the player did during a reconnection.
+        """
+        if message.type in _HANDSHAKE_EXEMPT or self.handshaken:
+            self.transport.send(message)
+            self.stats.note_sent(message.type.value)
+            return
+        self._pending.append(message)
+
+    def _flush_pending(self) -> None:
+        """Send everything held during the handshake, in the original order."""
+        held, self._pending = self._pending, []
+        for message in held:
+            self.transport.send(message)
+            self.stats.note_sent(message.type.value)
 
     def create_lobby(self) -> None:
         self._intent = Message.create_lobby(self.nickname)
@@ -136,15 +191,13 @@ class GameClient:
     def _flush_intent(self) -> None:
         """Send the pending create/join, but only once the server knows us.
 
-        A screen calls ``create_lobby`` the moment the player clicks, which is
-        usually before the connection has finished its handshake — and a room
-        request from a peer the server has not greeted is refused, not queued.
-        Holding the intent here means the click is honoured either way, and it
-        is the same mechanism that replays it after a reconnection.
+        Kept separate from :attr:`_pending` rather than queued with it, because
+        it has to go **first**: the table settings the host screen sends
+        immediately afterwards are meaningless until there is a room to apply
+        them to.  It is also the one message that is re-sent after a
+        reconnection, which is why it is held rather than consumed.
         """
-        if self._intent is None or self.peer_id is None:
-            return
-        if not self.transport.connected:
+        if self._intent is None or not self.handshaken:
             return
         self._send(self._intent)
 
@@ -194,8 +247,10 @@ class GameClient:
         for message in self.transport.poll():
             try:
                 self._handle(message)
-            except Exception as exc:  # pragma: no cover - defensive
-                self.notify(f"Błąd przetwarzania wiadomości: {exc}")
+            except Exception:  # pragma: no cover - defensive
+                # The text of the exception is for the debug panel, never for
+                # the player; one unreadable message is not worth a scare.
+                self.stats.dropped_messages += 1
         self._refresh_stats()
 
     def _check_connection(self) -> None:
@@ -212,13 +267,19 @@ class GameClient:
             if not first:
                 self.stats.reconnects += 1
                 self.notify("Połączenie odzyskane — synchronizuję…")
+            # A new socket is a stranger to the server until it says HELLO, so
+            # the gate closes again here and everything the player does in the
+            # meantime waits in ``_pending`` rather than being refused.
+            self._welcomed_generation = 0
             # The intent is replayed from ``_on_welcome`` once the server has
             # greeted this connection; sending it now would race the handshake.
             self._send(Message.hello(self.nickname, self.resume_token))
             return
 
         if transport.state is ConnectionState.CLOSED and self.disconnected is None:
-            self._drop(transport.error or "Utracono połączenie z serwerem")
+            # The transport's own text comes from ``websockets`` and Python's
+            # socket layer, so it is exactly the kind that must not be shown.
+            self._drop(friendly(transport.error, default=CONNECTION_LOST))
 
     def _refresh_stats(self) -> None:
         stats, transport = self.stats, self.transport
@@ -228,6 +289,7 @@ class GameClient:
         stats.seat = self.seat
         stats.players = self.lobby_state.player_count
         stats.sequence = self._sequence
+        stats.held = len(self._pending)
         stats.mode = "host" if self.is_host else "client"
 
     # ── incoming ─────────────────────────────────────────────────────────────
@@ -242,9 +304,13 @@ class GameClient:
         token = str(message.payload.get("resume_token", ""))
         if token:
             self.resume_token = token
-        # Whatever the player asked for while the handshake was still in
-        # flight happens now, in the order they asked for it.
+        # The server now knows this connection, so the gate in ``_send`` opens.
+        self._welcomed_generation = self.transport.generation or 1
+        # Order matters and is the whole point: get into the room first, then
+        # replay whatever the player asked for while the handshake was in
+        # flight.  Settings sent before the room exists are simply discarded.
         self._flush_intent()
+        self._flush_pending()
 
     def _on_lobby_state(self, message: Message) -> None:
         self.lobby_state = LobbyState.from_dict(message.payload)
@@ -386,7 +452,13 @@ class GameClient:
         self.notify(f"{message.payload.get('name', 'Gracz')} wrócił do gry")
 
     def _on_error(self, message: Message) -> None:
-        reason = str(message.payload.get("reason", "Błąd"))
+        """The server refused something.  Translated before it is stored.
+
+        ``self.error`` is read straight onto a screen, so nothing may reach it
+        untranslated — that is how "Najpierw przywitanie (hello)" ended up in
+        front of a player.
+        """
+        reason = friendly(str(message.payload.get("reason", "")))
         self.error = reason
         if message.payload.get("fatal"):
             self._drop(reason)
@@ -394,15 +466,18 @@ class GameClient:
             self.notify(reason)
 
     def _on_bye(self, message: Message) -> None:
-        self._drop(str(message.payload.get("reason", "Serwer zakończył połączenie")))
+        self._drop(friendly(str(message.payload.get("reason", "")),
+                            default=CONNECTION_LOST))
 
     def _on_match_ended(self, message: Message) -> None:
-        self._drop(str(message.payload.get("reason", "Gra została zakończona")))
+        self._drop(friendly(str(message.payload.get("reason", "")),
+                            default="Gra została zakończona"))
 
     _HANDLERS: Dict[MessageType, Callable[["GameClient", Message], None]] = {}
 
     # ── shutting down ────────────────────────────────────────────────────────
     def _drop(self, reason: str) -> None:
+        reason = friendly(reason, default=CONNECTION_LOST)
         self.disconnected = reason
         self.error = reason
         self.stats.state = ConnectionState.CLOSED

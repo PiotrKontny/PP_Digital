@@ -35,6 +35,7 @@ from ..config import settings
 from ..config.settings import RULES
 from ..net.config import current as network_config
 from ..net.lobby import DEFAULT_NICKNAME, clean_room_code
+from ..net.messages import friendly
 from ..net.service import ClientService, HostService, NetworkService
 from ..net.transport import ConnectionState, TransportError
 from .app import App, Screen
@@ -361,7 +362,8 @@ class HostSetupScreen(_FormScreen):
 
             embedded = EmbeddedServer(network_config(), self.library)
             if not embedded.start():
-                self.error = embedded.error or "Nie udało się uruchomić serwera"
+                self.error = friendly(embedded.error,
+                                     default="Nie udało się uruchomić serwera")
                 return
             url = embedded.url
 
@@ -371,7 +373,7 @@ class HostSetupScreen(_FormScreen):
         except TransportError as failure:
             if embedded is not None:
                 embedded.stop()
-            self.error = str(failure)
+            self.error = friendly(str(failure))
             return
 
         service.set_settings(board_cells=self.board_cells,
@@ -495,7 +497,7 @@ class JoinScreen(_FormScreen):
                                     config=network_config(), library=self.library,
                                     url=self.server.value.strip())
         except TransportError as failure:
-            self.error = str(failure)
+            self.error = friendly(str(failure))
             return
         self._enter_lobby(service)
 
@@ -619,7 +621,10 @@ class LobbyScreen(Screen):
 
         self.seats_top = y
         available = self.character_row_y - BLOCK_GAP - y
-        rows = max(RULES.min_players, len(self.lobby.seats), 1)
+        # The lobby's OWN minimum, not RULES.min_players: with the debug
+        # version on, the table needs two seats and reserving space for three
+        # left a permanent empty row under a game that was ready to start.
+        rows = max(self.lobby.minimum_players, len(self.lobby.seats), 1)
         row_h = self.ROW_H + self.ROW_GAP
         if rows * row_h > available:
             # Shrink the rows rather than letting the list grow into the
@@ -679,7 +684,7 @@ class LobbyScreen(Screen):
         """
         self.error = ""
         if self.service.start_game(self.library) is None and self.service.error:
-            self.error = self.service.error
+            self.error = friendly(self.service.error)
 
     def _enter_game(self) -> None:
         from .game_screen import GameScreen

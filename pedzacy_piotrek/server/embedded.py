@@ -24,7 +24,7 @@ import asyncio
 import queue
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..cards.loader import ContentLibrary
 from ..net.config import NetworkConfig
@@ -182,6 +182,11 @@ class InProcessServer:
         self.hub = ServerHub(self.config, library, clock=clock)
         self._transports: Dict[str, _InProcessTransport] = {}
         self._next = 0
+        #: Every message the hub was handed, in arrival order, as
+        #: ``(cid, type)``.  ORDER is what several tests are actually about:
+        #: the handshake defect in stage 13 was entirely a question of which
+        #: message reached the server first, and nothing else could see it.
+        self.received: List[Tuple[str, str]] = []
 
     def transport(self) -> _InProcessTransport:
         """A fresh client connection."""
@@ -198,7 +203,13 @@ class InProcessServer:
         return cid
 
     def deliver(self, cid: str, message: Message) -> None:
+        self.received.append((cid, message.type.value))
         self._route(self.hub.receive(cid, message))
+
+    def received_from(self, transport) -> List[str]:
+        """The message types one client sent, in order."""
+        cid = getattr(transport, "cid", transport)
+        return [kind for sender, kind in self.received if sender == cid]
 
     def disconnect(self, cid: str) -> None:
         self._transports.pop(cid, None)

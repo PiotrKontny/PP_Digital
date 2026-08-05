@@ -53,6 +53,12 @@ class NetworkStats:
         self.pending: int = 0
         self.resyncs: int = 0
         self.reconnects: int = 0
+        #: Messages this build could not make sense of.  The player is never
+        #: told; this is where the detail goes instead (F3).
+        self.dropped_messages: int = 0
+        #: Outbound messages waiting for the handshake to finish.  Non-zero
+        #: here for more than a moment means the server is not answering.
+        self.held: int = 0
 
     @property
     def connected(self) -> bool:

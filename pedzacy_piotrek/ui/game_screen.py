@@ -124,7 +124,8 @@ class GameScreen(Screen):
         #: belongs to — a client must not answer somebody else's question.
         self.pending_choice: Optional[PendingChoice] = None
         self.pending_choice_seat: int = 0
-        self.rename = TextField(max_length=settings.RULES.max_name_length)
+        self.rename = TextField(max_length=settings.RULES.max_name_length,
+                                placeholder="wpisz nazwę")
         #: Frame time, kept so drawing can animate hovers without a second clock.
         self.dt = 0.0
         #: Title/text of the card currently being played, used as the opening

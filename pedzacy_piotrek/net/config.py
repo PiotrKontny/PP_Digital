@@ -22,6 +22,7 @@ it without pulling in a display library.
 from __future__ import annotations
 
 import json
+import re
 import os
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -269,26 +270,58 @@ def normalise_url(url: str, default_port: int = DEFAULT_PORT) -> str:
     and ``ws://example.com/`` interchangeably, and every one of them means the
     same thing.  Guessing correctly here is the difference between joining a
     game and reading a connection error.
+
+    THE ONE GUESS THAT MATTERS is what a bare hostname means, and it is not one
+    answer.  ``192.168.0.14`` or ``localhost`` is somebody's own machine on
+    their own network: plain ``ws://`` on the game's port, because nothing on a
+    home network has a certificate.  ``piotrek.up.railway.app`` is a deployed
+    server behind a hosting platform's proxy: ``wss://`` on 443, because that
+    is the only thing such a proxy answers.  Getting this backwards is silent
+    and total — the address looks right, and every connection is refused — so
+    the distinction is drawn here rather than left to the player to know.
     """
     url = (url or "").strip()
     if not url:
         return ""
-    if "://" not in url:
+    had_scheme = "://" in url
+    if not had_scheme:
         url = f"ws://{url}"
     parsed = urlparse(url)
     scheme = {"http": "ws", "https": "wss"}.get(parsed.scheme, parsed.scheme)
     if scheme not in ("ws", "wss"):
         scheme = "ws"
     netloc = parsed.netloc or parsed.path
-    path = "" if parsed.netloc else ""
-    if parsed.netloc:
-        path = parsed.path
-    if ":" not in netloc.rsplit("]", 1)[-1] and scheme == "ws":
+    path = parsed.path if parsed.netloc else ""
+
+    host = netloc.rsplit("]", 1)[-1]
+    has_port = ":" in host
+    if not had_scheme and not has_port and _is_public_hostname(netloc):
+        # A bare public domain name: a deployed server, reached through a proxy
+        # that terminates TLS on 443.
+        scheme = "wss"
+    if not has_port and scheme == "ws":
         # No port and no TLS: a bare hostname almost always means the game's
         # own port rather than 80, which is a web server's.
         netloc = f"{netloc}:{default_port}"
     path = path.rstrip("/")
     return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def _is_public_hostname(netloc: str) -> bool:
+    """Does this look like a name on the internet rather than a local machine?
+
+    A dotted name that is not an IP address and not a ``.local``/``localhost``
+    is something DNS resolved for us, which in this project means a deployed
+    server behind a hosting proxy.
+    """
+    host = netloc.split("@")[-1].split(":")[0].strip("[]").lower()
+    if not host or host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return False
+    if host.endswith(".local") or host.endswith(".localhost"):
+        return False
+    if re.fullmatch(r"[0-9.]+", host) or ":" in host:
+        return False        # IPv4 literal, or an IPv6 address
+    return "." in host
 
 
 #: The live configuration.  Private, and reached through :func:`current`.

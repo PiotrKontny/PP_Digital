@@ -608,7 +608,10 @@ class PlayerTiles(Panel):
                              pygame.Rect(stripe.left, stripe.top, 5, 4),
                              border_radius=2)
 
-            name = (rename.buffer + rename.caret()) if is_renaming else player.name  # type: ignore[union-attr]
+            # ``display_text`` puts the caret where the caret actually is, so
+            # arrow keys and Home/End are visible while renaming.  Appending it
+            # was only ever correct while the caret could not move.
+            name = rename.display_text() if is_renaming else player.name  # type: ignore[union-attr]
             if is_owned:
                 name = f"{name} (Ty)"
             text_colour = (

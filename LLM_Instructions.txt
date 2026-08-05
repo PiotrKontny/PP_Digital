@@ -1,6 +1,7 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 12 — one highlight system, UI consistency (see CHANGELOG_LLM.md)
+Last updated: stage 13 — the handshake gate, friendly errors, deployment
+              (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -46,8 +47,12 @@ LONG TERM GOALS
 ================================================================================
 
 1. A polished digital board game that feels like a board game, not a debug tool.
-2. Online play with friends: one player hosts, others connect directly. No
-   matchmaking, no dedicated server, host-authoritative.
+2. Online play with friends anywhere: everyone connects OUTWARDS to one small
+   dedicated server, found by a six-character room code. No matchmaking, no
+   accounts, no database, one lobby at a time. The "host" is a player with the
+   Start button, not a machine anyone connects to. (This entry used to say
+   "host-authoritative, no dedicated server"; that model cannot cross NAT and
+   was abandoned in stage 11 — see N37.)
 3. Distributable from GitHub, launchable as a .exe (PyInstaller).
 4. Content (cards, characters, board themes) editable in JSON without touching
    Python, because balancing means hundreds of small content changes.
@@ -130,7 +135,20 @@ WORKING:
   every screen, dialog, panel, tile, slot and button (stage 12). Highlights
   follow the shape of what they highlight; buttons and steppers measure their
   own captions instead of being given a width.
-- 450 automated tests.
+- HOSTING A GAME ACTUALLY WORKS (stage 13). It did not before: the host screen
+  sent the table settings before the handshake finished, the server refused
+  them, and the fatal refusal threw the host out of a room they never created.
+  Every outbound message now waits for the server's WELCOME.
+- ONE TEXT EDITOR behind every text field (stage 13). Selection, caret
+  placement, word jumps, placeholder and Ctrl+A/C/X/V work in the menus AND in
+  the in-game rename box, which previously had none of it.
+- NO PROTOCOL TEXT REACHES A PLAYER (stage 13). net/messages.py translates
+  anything technical into a Polish sentence; the server's own prose survives.
+- DEPLOYABLE IN A BROWSER-VERIFIABLE WAY (stage 13): SERVER_SETUP.md,
+  railway.json, requirements-server.txt (websockets only, no pygame),
+  .railwayignore, and an HTTP health page at / so a first-time deployer can
+  tell "server down" from "address wrong".
+- 496 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - Cards whose effect requires a player decision (14 of 69 movement cards, all
@@ -221,8 +239,9 @@ pedzacy_piotrek/
     app.py           App shell, window, screen stack, main loop, resizing.
     layout.py        EVERY rectangle, computed from window size.
     widgets.py       Button (measures its own label), Stepper, Checkbox,
-                     Dropdown, Slider, ScrollBar, TextField, TextInput,
-                     fit_buttons.
+                     Dropdown, Slider, ScrollBar, fit_buttons, and
+                     TextEditor — THE editing behaviour — wrapped by
+                     TextInput (form boxes) and TextField (inline rename).
     board_view.py    Board viewport: camera, pawn animation, walks, stacks.
     hand_fan.py      The hand fan and the card-play gesture.
     overlays.py      ChoicePrompt (the engine asking a question), RevealOverlay
@@ -238,6 +257,8 @@ pedzacy_piotrek/
     network_screens.py  MainMenuScreen, HostSetupScreen, JoinScreen, LobbyScreen.
     debug_panel.py   NetworkDebugPanel (F3).
   net/
+    messages.py      EVERY sentence a player reads about the network, plus the
+                     pattern table that catches text written for a machine.
     protocol.py      Message types, JSON-line framing, LineBuffer.
     transport.py     Transport ABC, LoopbackTransport, NullTransport.
     tcp.py           TcpTransport, TcpListener, connect(), local_ip_addresses().
@@ -906,7 +927,8 @@ L10. The right column is sized for its tallest case (Piotrek); a hunter's panel
 PLANNED FUTURE FEATURES
 ================================================================================
 
-- Socket transport + lobby (Host / Join) + host-side hidden-info filtering.
+- SERVER-side hidden-information filtering (the transport, the lobby and the
+  Host/Join screens all shipped in stage 11; only the filtering is left).
 - Cards that need a choice: a target-selection mode where the board asks for a
   pawn and the chosen pawn goes into PlayCard.target_pawn (the field exists).
 - Chest and mod card effects.
@@ -955,6 +977,37 @@ LAYERS (and they do not leak)
 
   server/hub, room and registry are SYNCHRONOUS AND FREE OF I/O on purpose:
   all of multiplayer is testable in milliseconds without a network. Keep it so.
+
+THE HANDSHAKE GATE (stage 13 — read this before touching net/client.py)
+  Nothing but HELLO, PING and PONG may leave the client until the server has
+  greeted THIS CONNECTION.  ``GameClient._send`` holds everything else in
+  ``_pending``; ``_on_welcome`` releases it, intent first.
+
+  Why it has to be a gate and not care: the screens act the moment the player
+  clicks, and ``HostSetupScreen.confirm`` sends the table settings in the same
+  function that opens the connection — before the game loop has polled once, so
+  before HELLO has been sent at all.  The transport flushes its queue as soon as
+  the socket opens, so those settings arrived FIRST.  The server refused them
+  (correctly), the refusal was fatal (wrongly), and hosting failed 100% of the
+  time with "Najpierw przywitanie (hello)" on screen.  The lost message also
+  carried ``debug_version``, which is why Debug Mode never gave 2-player games.
+
+  The gate is keyed on ``Transport.generation``, not on "are we connected": a
+  fresh socket after a drop is connected and completely unknown to the server.
+  That is also what makes a click during a reconnection get replayed instead of
+  refused.
+
+FRIENDLY ERRORS (stage 13 — net/messages.py)
+  Three sources of failure text and only one of them is ours: the server writes
+  Polish sentences, ``websockets`` writes English with socket jargon, and Python
+  writes ``ConnectionRefusedError(111)``.  A raise site cannot know which it is
+  passing on, so all three go through ``friendly()``.
+
+  It is deliberately NARROW.  The server's own prose is more specific than any
+  constant could be — "Nie ma pokoju o kodzie ZZZZZZ" names the code the player
+  typed — so it passes through untouched.  The table catches only text that was
+  never written for a player.  Three tests failed when this was got wrong; if
+  you add a pattern, check you are not replacing a better sentence.
 
 TWO IDENTITIES, AND THEY ARE NOT THE SAME
   * connection id = one socket.  Dies with the WiFi.
@@ -1031,15 +1084,34 @@ sent/received counters and last action each way, in-flight actions, sequence
 number, reconnect/resync counts, turn/round, and a SHA-1 fingerprint of the
 snapshot — two machines showing the same fingerprint are in sync.
 
-RUNNING A SERVER
+RUNNING A SERVER  (the owner's copy of this is SERVER_SETUP.md — send them there)
     python -m pedzacy_piotrek.server               # 0.0.0.0:51337
     python -m pedzacy_piotrek.server --rooms 20    # many lobbies
     python run_game.py --serve                     # same, from the game
   Reads PORT from the environment (every PaaS injects it; ignoring it is the
-  single most common reason a deployment answers nothing). Dockerfile and
-  Procfile are in the repo root. The server does NOT need pygame and there is a
-  test that it imports without it. TLS is terminated by a proxy in front, never
-  here.
+  single most common reason a deployment answers nothing). TLS is terminated by
+  a proxy in front, never here.
+
+  DEPLOYMENT FILES (stage 13), and why each exists:
+    SERVER_SETUP.md          the owner's guide; assumes no backend experience
+    railway.json             start command, /health check, restart policy
+    requirements-server.txt  websockets ONLY.  requirements.txt pins pygame,
+                             and installing it on a host drags in SDL to run a
+                             process that never opens a window
+    .railwayignore           omits ui/, render/, assets/, tests, tools, docs
+    Procfile, Dockerfile     for platforms that read those instead
+
+  THE HEALTH PAGE.  GET / (also /health, /healthz, /status) answers plain Polish
+  text.  Without it the address returns ``426 Upgrade Required``, which is
+  correct and reads exactly like a broken deployment to somebody who does not
+  know what a WebSocket handshake is.  It is the only diagnosis tool a beginner
+  reliably has, and it is what tells "server down" from "address wrong".
+  Handles BOTH ``process_request`` signatures — websockets changed it at v14.
+
+  THE SERVER IS A SEPARATE APPLICATION, and it is asserted, not merely claimed:
+  ``test_the_server_needs_neither_pygame_nor_the_client_packages`` constructs it
+  with pygame, ui/ and render/ all made unimportable.  Keep that test green and
+  the lean deployment stays honest.
 
 ================================================================================
 FILES THAT SHOULD NEVER BE REMOVED
@@ -1051,7 +1123,12 @@ FILES THAT SHOULD NEVER BE REMOVED
 - board/path.py — arc-length parametrisation; without it fields bunch in curves.
 - config/settings.py BoardLayout spacing properties — the overlap fix.
 - players/player.py public/private split — the multiplayer hidden-info seam.
-- net/* — a working, tested networking layer even though the UI is missing.
+- net/* — the networking layer. net/messages.py in particular: it is the only
+  thing standing between a player and a stack trace.
+- server/* — the authoritative server. Its freedom from pygame and from ui/ is
+  what makes deployment small, and a test asserts it.
+- SERVER_SETUP.md, railway.json, requirements-server.txt, .railwayignore — the
+  owner cannot redeploy without them.
 - data/*.json — the actual game content.
 - tests/* — the only proof that a refactor preserved behaviour.
 - This file and CHANGELOG_LLM.md.
@@ -1187,6 +1264,33 @@ N46. Never quote a button's width or height. Call ``Button.fit`` (or
 N47. Never size a control that swaps captions to the caption showing at layout
      time. Measure the longest one it can hold.
 
+N48. Never send anything to the server before it has said WELCOME on the
+     CURRENT connection. Use GameClient._send, which gates it; do not reach
+     past it to transport.send. A screen acts before the first poll, so the
+     handshake has not happened yet, and the transport flushes in order — this
+     is how hosting was broken 100% of the time for two stages.
+N49. Never make a protocol violation fatal. Dropping the message costs one
+     action; dropping the player costs the match. The client is supposed to
+     make mis-ordering impossible, so reaching that branch means an old build.
+N50. Never put raw exception, library or protocol text where a player can read
+     it. Everything goes through net/messages.friendly(). The details belong in
+     the debug panel (F3), which is where somebody who wants them is looking.
+N51. Never widen net/messages._PATTERNS to match the server's own Polish. Those
+     sentences name the room code, the player and the action; a constant that
+     replaces them loses information. The table is for text written for a
+     machine, not for prose written for a person.
+N52. Never write a second text-editing implementation. TextEditor is the one;
+     wrap it as TextInput or TextField did. There were two, and only one of
+     them could paste.
+N53. Never assume a bare hostname means one thing. A dotted public name is a
+     deployed server on wss://443; an IP or localhost is a home machine on
+     ws://51337. normalise_url draws the line, and getting it backwards fails
+     silently on every connection.
+N54. Never import ui/ or render/ from server/ or net/, and never add pygame to
+     requirements-server.txt. A test constructs the server with all three made
+     unimportable; that test is what keeps the deployment small.
+N55. Never point a hosting platform at requirements.txt. It pins pygame.
+
 
 ================================================================================
 RECOMMENDED ORDER OF FUTURE DEVELOPMENT
@@ -1195,6 +1299,11 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
 0. NEXT: hidden-information filtering (L1) is now the biggest remaining gap and
    the last thing between this and a public release. It is a server-side change
    (server/room.py broadcast), and it is not free — see L1a.
+
+0a. BEFORE ANYTHING ELSE, someone should play a real match through a deployed
+   server. Stage 13 fixed the defect that made hosting impossible, and the fix
+   is covered by tests, but no human has yet completed a Poland↔UK game on a
+   Railway deployment. That is the one thing the test suite cannot tell us.
 
 0b. NOTE: two settings have now been silently dropped by config rebuilding
    (double_frequency, edit_mode).  Both normalised() and create_game() use
@@ -1222,7 +1331,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 450 tests, ~115 s
+    python -m pytest -q                     # 496 tests, ~120 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -1232,7 +1341,13 @@ HOW TO VERIFY A CHANGE
                                    one test over REAL WebSockets on a real port
       tests/test_session.py      — config, protocol, transports, sessions
       tests/test_network_ui.py   — menus, lobby screen, in-match ownership
-      tests/netkit.py            — the harness: InProcessServer + services
+      tests/netkit.py            — the harness: InProcessServer + services.
+                                   InProcessServer.received_from() gives the
+                                   ORDER messages reached the server, which is
+                                   the only way to see a handshake bug
+      tests/test_handshake.py    — the handshake gate, friendly errors, the
+                                   shared text editor, 2-player debug games,
+                                   and that the server runs without pygame
       tests/test_menu_layout.py  — text overlap at four resolutions, text entry
     python -m pedzacy_piotrek --selftest    # renders frames headlessly
     python tools/inspect_frame.py --window 2560x1440

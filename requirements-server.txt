@@ -1,0 +1,10 @@
+# Dependencies for the GAME SERVER only.
+#
+# Deliberately NOT requirements.txt: that one pins pygame, which the server
+# provably does not need (tests/test_multiplayer.py imports the whole server
+# with pygame blocked).  A hosting platform that installs the game's
+# requirements pulls in a graphics library, its SDL system packages and about
+# twenty megabytes, to run a process that never opens a window.
+#
+# Railway and every other platform-as-a-service is pointed at this file.
+websockets>=13

@@ -465,26 +465,258 @@ class ScrollBar(Widget):
         color = theme.prompt if self.dragging else theme.brass_light
         pygame.draw.rect(target, color, self.thumb_rect(), border_radius=3)
 
+class TextEditor:
+    """The editing behaviour behind every text field in the game.
 
-@dataclass
+    Pure state and pure operations: a string, a caret, a selection anchor, and
+    the verbs a desktop text box is expected to know.  It draws nothing and
+    owns no rectangle, which is what lets the two very different-looking fields
+    in this project — the standing form boxes on the menus and the inline
+    rename editor floating over a player tile — behave *identically* without
+    sharing a pixel of presentation.
+
+    They did not, before.  The form boxes grew selection, caret placement and
+    Ctrl+A/C/X/V, while the rename editor kept the implementation it started
+    with: type at the end, backspace, Enter.  Pasting a nickname into it did
+    nothing at all.  One editor means a fix to either is a fix to both, and
+    means there is a single answer to "what does Ctrl+Left do in this game".
+
+    Not a widget and deliberately not a dataclass: it is behaviour, not data.
+    """
+
+    def __init__(self, value: str = "", max_length: int = 32,
+                 numeric: bool = False) -> None:
+        self.max_length = max_length
+        self.numeric = numeric
+        self.value = value
+        self.caret = len(self.value)
+        #: Where a selection started, or ``None`` when nothing is selected.
+        self.anchor: Optional[int] = None
+
+    # ── selection ────────────────────────────────────────────────────────────
+    @property
+    def selection(self) -> Optional[Tuple[int, int]]:
+        if self.anchor is None or self.anchor == self.caret:
+            return None
+        return (min(self.anchor, self.caret), max(self.anchor, self.caret))
+
+    @property
+    def selected_text(self) -> str:
+        span = self.selection
+        return self.value[span[0]:span[1]] if span else ""
+
+    def select_all(self) -> None:
+        self.anchor = 0
+        self.caret = len(self.value)
+
+    def clear_selection(self) -> None:
+        self.anchor = None
+
+    def delete_selection(self) -> bool:
+        span = self.selection
+        if span is None:
+            return False
+        self.value = self.value[:span[0]] + self.value[span[1]:]
+        self.caret = span[0]
+        self.anchor = None
+        return True
+
+    def move_caret(self, position: int, extend: bool = False) -> None:
+        position = max(0, min(len(self.value), position))
+        if extend:
+            if self.anchor is None:
+                self.anchor = self.caret
+        else:
+            self.anchor = None
+        self.caret = position
+
+    # ── word motion ──────────────────────────────────────────────────────────
+    def word_left(self) -> int:
+        """Start of the word to the left, the way Ctrl+Left is expected to go.
+
+        Skips the run of separators first and then the word, so pressing it in
+        the middle of "Kuba  Nowak" lands on the K rather than stopping on
+        every space along the way.
+        """
+        index = self.caret
+        while index > 0 and not self.value[index - 1].isalnum():
+            index -= 1
+        while index > 0 and self.value[index - 1].isalnum():
+            index -= 1
+        return index
+
+    def word_right(self) -> int:
+        index, length = self.caret, len(self.value)
+        while index < length and not self.value[index].isalnum():
+            index += 1
+        while index < length and self.value[index].isalnum():
+            index += 1
+        return index
+
+    # ── editing ──────────────────────────────────────────────────────────────
+    def insert(self, text: str) -> None:
+        """Type text in, replacing whatever is selected."""
+        cleaned = "".join(
+            c for c in text
+            if c.isprintable() and (c.isdigit() or not self.numeric)
+        )
+        if not cleaned:
+            return
+        self.delete_selection()
+        room = self.max_length - len(self.value)
+        if room <= 0:
+            return
+        cleaned = cleaned[:room]
+        self.value = self.value[:self.caret] + cleaned + self.value[self.caret:]
+        self.caret += len(cleaned)
+        self.anchor = None
+
+    def backspace(self) -> None:
+        if self.delete_selection():
+            return
+        if self.caret > 0:
+            self.value = self.value[:self.caret - 1] + self.value[self.caret:]
+            self.caret -= 1
+
+    def delete_forward(self) -> None:
+        if self.delete_selection():
+            return
+        if self.caret < len(self.value):
+            self.value = self.value[:self.caret] + self.value[self.caret + 1:]
+
+    def copy_selection(self) -> None:
+        if self.selected_text:
+            clipboard.copy(self.selected_text)
+
+    def cut_selection(self) -> None:
+        if self.selected_text:
+            clipboard.copy(self.selected_text)
+            self.delete_selection()
+
+    def paste(self) -> None:
+        self.insert(clipboard.paste())
+
+    def set_value(self, text: str) -> None:
+        """Replace the contents outright, as code rather than as typing.
+
+        Deliberately NOT truncated to ``max_length``: that limit governs what a
+        player may type, not what the program may put in the box.  A field
+        pre-filled with a long server address has to show all of it, and
+        clipping it here would silently corrupt a value the player never
+        entered.  :meth:`insert` is where the limit is enforced.
+        """
+        self.value = text
+        self.caret = len(self.value)
+        self.anchor = None
+
+    # ── keys ─────────────────────────────────────────────────────────────────
+    def handle_key(self, event: pygame.event.Event) -> bool:
+        """Apply one KEYDOWN.  Returns True when the editor consumed it.
+
+        Enter and Tab are deliberately NOT consumed: they mean "confirm" and
+        "next field", and only the screen knows what those should do.
+        """
+        mods = pygame.key.get_mods()
+        ctrl = bool(mods & pygame.KMOD_CTRL)
+        shift = bool(mods & pygame.KMOD_SHIFT)
+        key = event.key
+
+        if ctrl and key == pygame.K_a:
+            self.select_all()
+            return True
+        if ctrl and key == pygame.K_c:
+            self.copy_selection()
+            return True
+        if ctrl and key == pygame.K_x:
+            self.cut_selection()
+            return True
+        if ctrl and key == pygame.K_v:
+            self.paste()
+            return True
+        # The other pair of clipboard shortcuts, which older Windows software
+        # taught a generation of people and which cost nothing to support.
+        if ctrl and key == pygame.K_INSERT:
+            self.copy_selection()
+            return True
+        if shift and key == pygame.K_INSERT:
+            self.paste()
+            return True
+        if shift and key == pygame.K_DELETE:
+            self.cut_selection()
+            return True
+
+        if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_TAB):
+            return False
+        if key == pygame.K_BACKSPACE:
+            self.backspace()
+        elif key == pygame.K_DELETE:
+            self.delete_forward()
+        elif key == pygame.K_LEFT:
+            self.move_caret(self.word_left() if ctrl else self.caret - 1, shift)
+        elif key == pygame.K_RIGHT:
+            self.move_caret(self.word_right() if ctrl else self.caret + 1, shift)
+        elif key == pygame.K_HOME:
+            self.move_caret(0, shift)
+        elif key == pygame.K_END:
+            self.move_caret(len(self.value), shift)
+        else:
+            # Everything printable arrives as TEXTINPUT.  Consuming it here as
+            # well is the double-insertion bug this branch guards against.
+            return True
+        return True
+
+
 class TextField:
-    """Inline editing state for renaming a player."""
+    """Inline editing state for renaming a player.
 
-    buffer: str = ""
-    active: bool = False
-    max_length: int = 16
-    target_index: Optional[int] = None
+    The HUD (``hud.PlayerTiles``) draws it; this holds the text and the caret
+    and delegates every edit to :class:`TextEditor`, so renaming supports
+    exactly what the menu fields do — selection, caret movement, word jumps and
+    Ctrl+A/C/X/V.  Before it shared that core it accepted typing and backspace
+    and nothing else, so a nickname sitting on the clipboard could not be
+    pasted into it.
+    """
+
+    def __init__(self, max_length: int = 16, placeholder: str = "") -> None:
+        self.max_length = max_length
+        self.placeholder = placeholder
+        self.active = False
+        self.target_index: Optional[int] = None
+        self.editor = TextEditor(max_length=max_length)
+
+    # ── the buffer, under the name the HUD and the screen already use ───────
+    @property
+    def buffer(self) -> str:
+        return self.editor.value
+
+    @buffer.setter
+    def buffer(self, value: str) -> None:
+        self.editor.set_value(value)
+
+    @property
+    def caret_index(self) -> int:
+        return self.editor.caret
+
+    @property
+    def selection(self) -> Optional[Tuple[int, int]]:
+        return self.editor.selection
 
     def start(self, index: int, initial: str = "") -> None:
         self.active = True
         self.target_index = index
-        self.buffer = initial[: self.max_length]
+        # Truncated here rather than in the editor: this one really is a
+        # nickname being adopted as the starting text, so the limit applies.
+        self.editor = TextEditor(initial[:self.max_length],
+                                 max_length=self.max_length)
+        # Everything starts selected, so "click the pencil and type" replaces
+        # the old name — which is what renaming almost always means.
+        self.editor.select_all()
         pygame.key.start_text_input()
 
     def stop(self) -> None:
         self.active = False
         self.target_index = None
-        self.buffer = ""
+        self.editor = TextEditor(max_length=self.max_length)
         pygame.key.stop_text_input()
 
     def handle(self, event: pygame.event.Event) -> Optional[str]:
@@ -492,20 +724,35 @@ class TextField:
         if not self.active:
             return None
         if event.type == pygame.TEXTINPUT:
-            if len(self.buffer) < self.max_length:
-                self.buffer += event.text
+            self.editor.insert(event.text)
             return None
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_BACKSPACE:
-                self.buffer = self.buffer[:-1]
-            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 return self.buffer.strip()
-            elif event.key == pygame.K_ESCAPE:
+            if event.key == pygame.K_ESCAPE:
                 self.stop()
+                return None
+            self.editor.handle_key(event)
         return None
 
     def caret(self) -> str:
+        """The blinking bar itself, blank on the off half of the cycle."""
         return "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+
+    def display_text(self) -> str:
+        """What the HUD draws: the text with the caret in it, or the hint.
+
+        The caret goes in at its real index rather than on the end, so moving
+        it with the arrow keys is actually visible.  Appending it was correct
+        only for as long as the caret could not move.
+        """
+        if not self.buffer:
+            return self.placeholder or self.caret()
+        bar = self.caret()
+        if not bar:
+            return self.buffer
+        index = self.caret_index
+        return self.buffer[:index] + bar + self.buffer[index:]
 
 
 class TextInput(Widget):
@@ -547,14 +794,10 @@ class TextInput(Widget):
     ) -> None:
         super().__init__(rect)
         self.label = label
-        self.value = value
         self.placeholder = placeholder
-        self.max_length = max_length
-        self.numeric = numeric
         self.focused = False
-        self.caret = len(value)
-        #: Where a selection started, or ``None`` when nothing is selected.
-        self.anchor: Optional[int] = None
+        #: All the editing lives here; this class is the box drawn around it.
+        self.editor = TextEditor(value, max_length=max_length, numeric=numeric)
         self._held_key: Optional[int] = None
         self._held_shift = False
         self._held_for = 0.0
@@ -562,6 +805,79 @@ class TextInput(Widget):
         self._dragging = False
         self._press_index = 0
         self._font: Optional[pygame.font.Font] = None
+
+    # ── the editor, surfaced under this widget's own attribute names ────────
+    # Properties rather than a rename: ``field.value``, ``field.caret`` and
+    # ``field.anchor`` are what the screens and the tests already say.
+    @property
+    def value(self) -> str:
+        return self.editor.value
+
+    @value.setter
+    def value(self, text: str) -> None:
+        self.editor.set_value(text)
+
+    @property
+    def caret(self) -> int:
+        return self.editor.caret
+
+    @caret.setter
+    def caret(self, index: int) -> None:
+        self.editor.caret = max(0, min(len(self.editor.value), index))
+
+    @property
+    def anchor(self) -> Optional[int]:
+        return self.editor.anchor
+
+    @anchor.setter
+    def anchor(self, index: Optional[int]) -> None:
+        self.editor.anchor = index
+
+    @property
+    def max_length(self) -> int:
+        return self.editor.max_length
+
+    @property
+    def numeric(self) -> bool:
+        return self.editor.numeric
+
+    @property
+    def selection(self) -> Optional[Tuple[int, int]]:
+        return self.editor.selection
+
+    @property
+    def selected_text(self) -> str:
+        return self.editor.selected_text
+
+    def select_all(self) -> None:
+        self.editor.select_all()
+
+    def clear_selection(self) -> None:
+        self.editor.clear_selection()
+
+    def insert(self, text: str) -> None:
+        self.editor.insert(text)
+
+    def backspace(self) -> None:
+        self.editor.backspace()
+
+    def delete_forward(self) -> None:
+        self.editor.delete_forward()
+
+    def copy_selection(self) -> None:
+        self.editor.copy_selection()
+
+    def cut_selection(self) -> None:
+        self.editor.cut_selection()
+
+    def paste(self) -> None:
+        self.editor.paste()
+
+    def _delete_selection(self) -> bool:
+        return self.editor.delete_selection()
+
+    def _move_caret(self, position: int, extend: bool) -> None:
+        self.editor.move_caret(position, extend)
 
     # ── focus ────────────────────────────────────────────────────────────────
     def focus(self, select_all: bool = False) -> None:
@@ -576,7 +892,7 @@ class TextInput(Widget):
         if self.focused:
             self.focused = False
             self._release()
-            self.anchor = None
+            self.editor.anchor = None
             self._dragging = False
             pygame.key.stop_text_input()
 
@@ -584,86 +900,6 @@ class TextInput(Widget):
         self._held_key = None
         self._held_for = 0.0
         self._repeats = 0
-
-    # ── selection ────────────────────────────────────────────────────────────
-    @property
-    def selection(self) -> Optional[Tuple[int, int]]:
-        if self.anchor is None or self.anchor == self.caret:
-            return None
-        return (min(self.anchor, self.caret), max(self.anchor, self.caret))
-
-    @property
-    def selected_text(self) -> str:
-        span = self.selection
-        return self.value[span[0]:span[1]] if span else ""
-
-    def select_all(self) -> None:
-        self.anchor = 0
-        self.caret = len(self.value)
-
-    def clear_selection(self) -> None:
-        self.anchor = None
-
-    def _delete_selection(self) -> bool:
-        span = self.selection
-        if span is None:
-            return False
-        self.value = self.value[:span[0]] + self.value[span[1]:]
-        self.caret = span[0]
-        self.anchor = None
-        return True
-
-    def _move_caret(self, position: int, extend: bool) -> None:
-        position = max(0, min(len(self.value), position))
-        if extend:
-            if self.anchor is None:
-                self.anchor = self.caret
-        else:
-            self.anchor = None
-        self.caret = position
-
-    # ── editing ──────────────────────────────────────────────────────────────
-    def insert(self, text: str) -> None:
-        """Type text in, replacing whatever is selected."""
-        cleaned = "".join(
-            c for c in text
-            if c.isprintable() and (c.isdigit() or not self.numeric)
-        )
-        if not cleaned:
-            return
-        self._delete_selection()
-        room = self.max_length - len(self.value)
-        if room <= 0:
-            return
-        cleaned = cleaned[:room]
-        self.value = self.value[:self.caret] + cleaned + self.value[self.caret:]
-        self.caret += len(cleaned)
-        self.anchor = None
-
-    def backspace(self) -> None:
-        if self._delete_selection():
-            return
-        if self.caret > 0:
-            self.value = self.value[:self.caret - 1] + self.value[self.caret:]
-            self.caret -= 1
-
-    def delete_forward(self) -> None:
-        if self._delete_selection():
-            return
-        if self.caret < len(self.value):
-            self.value = self.value[:self.caret] + self.value[self.caret + 1:]
-
-    def copy_selection(self) -> None:
-        if self.selected_text:
-            clipboard.copy(self.selected_text)
-
-    def cut_selection(self) -> None:
-        if self.selected_text:
-            clipboard.copy(self.selected_text)
-            self._delete_selection()
-
-    def paste(self) -> None:
-        self.insert(clipboard.paste())
 
     # ── events ───────────────────────────────────────────────────────────────
     def handle(self, event: pygame.event.Event) -> bool:
@@ -705,45 +941,16 @@ class TextInput(Widget):
         if event.type != pygame.KEYDOWN:
             return False
 
-        mods = pygame.key.get_mods()
-        ctrl = bool(mods & pygame.KMOD_CTRL)
-        shift = bool(mods & pygame.KMOD_SHIFT)
-
-        if ctrl and event.key == pygame.K_a:
-            self.select_all()
-            return True
-        if ctrl and event.key == pygame.K_c:
-            self.copy_selection()
-            return True
-        if ctrl and event.key == pygame.K_x:
-            self.cut_selection()
-            return True
-        if ctrl and event.key == pygame.K_v:
-            self.paste()
-            return True
-
-        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_TAB):
-            return False        # the screen decides what those mean
+        # Escape is the box's own business (it gives up focus); everything
+        # else about editing belongs to the shared editor, so there is exactly
+        # one implementation of what Ctrl+Left or Shift+Home does.
         if event.key == pygame.K_ESCAPE:
             self.blur()
             return True
 
-        if event.key == pygame.K_BACKSPACE:
-            self.backspace()
-        elif event.key == pygame.K_DELETE:
-            self.delete_forward()
-        elif event.key == pygame.K_LEFT:
-            self._move_caret(self.caret - 1, shift)
-        elif event.key == pygame.K_RIGHT:
-            self._move_caret(self.caret + 1, shift)
-        elif event.key == pygame.K_HOME:
-            self._move_caret(0, shift)
-        elif event.key == pygame.K_END:
-            self._move_caret(len(self.value), shift)
-        else:
-            # Everything printable arrives as TEXTINPUT; handling it here too is
-            # the double-insertion bug this comment guards.
-            return True
+        shift = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
+        if not self.editor.handle_key(event):
+            return False        # Enter and Tab: the screen decides
 
         if event.key in self.REPEATING:
             self._held_key = event.key

@@ -35,10 +35,11 @@ import asyncio
 import logging
 import signal
 import sys
+from http import HTTPStatus
 from typing import Dict, Optional
 
 from ..cards.loader import ContentLibrary
-from ..net.config import NetworkConfig
+from ..net.config import PROTOCOL_VERSION, NetworkConfig
 from ..net.protocol import Message
 from .hub import ServerHub
 
@@ -60,6 +61,9 @@ except ImportError:  # pragma: no cover - websockets < 14
 
 class GameServer:
     """A WebSocket endpoint in front of a :class:`ServerHub`."""
+
+    #: Paths that answer a plain HTTP GET instead of expecting a WebSocket.
+    HEALTH_PATHS = ("/", "/health", "/healthz", "/status")
 
     def __init__(self, config: Optional[NetworkConfig] = None,
                  library: Optional[ContentLibrary] = None) -> None:
@@ -85,6 +89,7 @@ class GameServer:
             "ping_interval": 20,
             "ping_timeout": 20,
             "max_size": server_config.max_message_bytes,
+            "process_request": self._process_request,
         }
         async with _ws_serve(self._handle, server_config.host,
                              server_config.port, **kwargs) as server:
@@ -102,6 +107,68 @@ class GameServer:
 
     def stop(self) -> None:
         self._stopping.set()
+
+    # ── health check ─────────────────────────────────────────────────────────
+    def health_report(self) -> str:
+        """One line of plain text, and it is the deployment's whole diagnosis.
+
+        Somebody who has never deployed anything needs a way to tell "my server
+        is running" from "my address is wrong", and the only tool they reliably
+        have is a browser.  Without this, opening the URL returns the bare
+        ``426 Upgrade Required`` that ``websockets`` produces for a request with
+        no ``Upgrade`` header, which reads exactly like a broken deployment to
+        someone who does not know what a WebSocket handshake is.
+
+        It also gives the hosting platform something to health-check, which is
+        what stops Railway restarting a perfectly healthy process.
+        """
+        summary = self.hub.describe()
+        rooms = summary.get("rooms") or []
+        codes = ", ".join(str(room.get("code")) for room in rooms) or "brak"
+        return (
+            "Pędzący Piotrek — serwer gry działa.\n"
+            f"Wersja protokołu: {PROTOCOL_VERSION}\n"
+            f"Otwarte pokoje: {len(rooms)} ({codes})\n"
+            f"Podłączeni gracze: {summary.get('players', 0)}\n"
+            "\n"
+            "To jest strona kontrolna. Gra łączy się z tym adresem przez "
+            "WebSocket —\nw grze wpisz ten sam adres, zaczynając od wss://\n"
+        )
+
+    def _process_request(self, *args):
+        """Answer plain HTTP, let WebSocket upgrades through untouched.
+
+        Two signatures to satisfy, because ``websockets`` changed its API at
+        version 14 and the game must work with whichever the owner's ``pip``
+        installed:
+
+        * new: ``(connection, request)`` → a ``Response`` or ``None``
+        * old: ``(path, request_headers)`` → an ``(status, headers, body)``
+          tuple or ``None``
+
+        Returning ``None`` in both means "carry on with the handshake", which
+        is what every real client gets.
+        """
+        try:
+            if len(args) == 2 and hasattr(args[0], "respond"):
+                connection, request = args
+                path = getattr(request, "path", "") or ""
+                if _strip_query(path) not in self.HEALTH_PATHS:
+                    return None
+                if "upgrade" in {k.lower() for k in _header_names(request)}:
+                    return None     # a real client that happened to ask for /
+                return connection.respond(HTTPStatus.OK, self.health_report())
+
+            path = _strip_query(str(args[0]) if args else "")
+            if path not in self.HEALTH_PATHS:
+                return None
+            body = self.health_report().encode("utf-8")
+            headers = [("Content-Type", "text/plain; charset=utf-8"),
+                       ("Content-Length", str(len(body)))]
+            return HTTPStatus.OK, headers, body
+        except Exception:  # pragma: no cover - never let a probe kill the server
+            LOGGER.exception("Błąd w obsłudze zapytania kontrolnego")
+            return None
 
     async def _housekeeping(self) -> None:
         """Grace periods and abandoned rooms, on a timer.
@@ -164,6 +231,21 @@ class GameServer:
                 LOGGER.debug("%s ← %s", cid, message.type.value)
         except Exception as exc:
             LOGGER.debug("Nie udało się wysłać do %s: %s", cid, exc)
+
+
+def _strip_query(path: str) -> str:
+    """``/health?probe=1`` is the health path; the query is the prober's."""
+    return (path.split("?", 1)[0] or "/").rstrip("/") or "/"
+
+
+def _header_names(request) -> list:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return []
+    try:
+        return list(headers.keys())
+    except Exception:  # pragma: no cover - defensive
+        return []
 
 
 def _bound_port(server) -> Optional[int]:

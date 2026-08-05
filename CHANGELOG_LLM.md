@@ -1140,3 +1140,163 @@ that insists on a small control still cannot clip a label.
 - The lobby's ready button is measured against the longer of the two captions it
   swaps between ("Czekam na hosta"), because sizing it to whichever one happened
   to be showing at layout time is the same class of bug in slow motion.
+
+---
+
+## Stage 13 — Online play that actually connects
+**Date:** 2026-08-05
+
+### Starting point
+The brief asked for the networking to be redesigned from scratch into a
+"production-ready architecture": dedicated server, WebSockets, room codes, one
+configurable URL, Railway deployment, no host-side listening.
+
+**Stage 11 had already built exactly that architecture**, and it was sound. What
+it did not do was work. Hosting a game failed on every single attempt, with the
+player being thrown back to the main menu reading `Najpierw przywitanie
+(hello)` — an internal protocol message. So the stage became: find out why a
+correct design fails in practice, fix it, and finish the deployment story.
+
+A rewrite was considered and rejected. It would have landed on the same
+architecture, discarded 450 passing tests and violated N1. The problem was one
+defect, not the design. This is recorded here because the brief did ask for a
+rewrite and a future reader deserves to know it was a deliberate refusal.
+
+### The bug, because it is worth understanding
+`HostSetupScreen.confirm()` opens the connection and sends the table settings in
+the same function:
+
+```python
+service = HostService(...)          # queues CREATE_LOBBY as an intent
+service.set_settings(..., debug_version=self.debug_version)   # sends NOW
+```
+
+`HELLO` is only sent from `GameClient.poll()`, on the next frame. But
+`WebSocketTransport.send()` puts messages in a queue that is flushed the instant
+the socket opens — so `SET_SETTINGS` arrived **before** `HELLO`. The server
+correctly answered "no handshake yet", and because that error was `fatal=True`,
+the host was disconnected from a room they never managed to create.
+
+Not a race: a certainty. Reproduced against a real server on a real port:
+
+```
+before:  disconnected="Najpierw przywitanie (hello)"  room_code=(none)  debug_version=False
+after:   disconnected=None                            room_code=7ZVEDX  debug_version=True
+```
+
+One defect caused three separate reported symptoms:
+1. the "Hello required" message on screen,
+2. hosting not working at all,
+3. **Debug Mode never giving 2-player games** — `debug_version=True` was in the
+   discarded message and never reached the server.
+
+The existing tests could not see it because `netkit.Table.host()` pumps the
+connection before touching any setting. The real screens have no opportunity to.
+
+### Implemented features
+- **The handshake gate** (`net/client.py`). `_send()` holds every message except
+  `HELLO`/`PING`/`PONG` until the server has greeted **this connection
+  generation**. `_on_welcome` flushes the create/join intent first, then the
+  held queue in order. On reconnection the gate closes again, so a click during
+  a drop is queued and replayed instead of refused.
+- **The server no longer kills a session over message order** (`server/hub.py`).
+  A pre-handshake message costs the message, not the player.
+- **One friendly-error layer** (`net/messages.py`, new). Named Polish sentences
+  plus a pattern table, applied at every point where a reason reaches the
+  player: `_on_error`, `_on_bye`, `_on_match_ended`, `_drop`, the transport's
+  `_readable`, and the three screens that showed `TransportError` text directly.
+  Deliberately narrow — see Notes.
+- **Bare hostnames resolve the way the deployment needs** (`net/config.py`).
+  `piotrek.up.railway.app` → `wss://…` (443); `192.168.0.14` and `localhost` →
+  `ws://…:51337`. Getting this backwards was silent and total: the address looks
+  right and every connection is refused.
+- **An HTTP health page** (`server/app.py`). `GET /`, `/health`, `/healthz`,
+  `/status` return plain Polish text saying the server is alive, how many rooms
+  are open and what to type in the game. Handles both the pre-14 and post-14
+  `websockets` `process_request` signatures. Railway health-checks `/health`.
+- **One text editor for every text field** (`ui/widgets.py`). New `TextEditor`
+  holds all editing behaviour; `TextInput` and `TextField` both use it.
+  The in-game rename box therefore gained selection, caret movement, word jumps
+  (Ctrl+←/→), placeholder text and Ctrl+A/C/X/V — it previously had typing,
+  backspace and Enter, so a nickname on the clipboard could not be pasted in.
+  Shift+Insert / Ctrl+Insert / Shift+Delete work too.
+- **The rename caret is drawn where it is** (`ui/hud.py`, `TextField.display_text`).
+  It used to be appended to the end, which was only correct while it could not
+  move.
+- **Renaming starts with everything selected**, so "click the pencil and type"
+  replaces the old name.
+- **The lobby reserves the right number of rows** (`ui/network_screens.py`).
+  Was `RULES.min_players` (3); now `lobby.minimum_players`, which is 2 with the
+  debug version on.
+
+### Deployment
+- `SERVER_SETUP.md` (new) — the deliverable. Eight sections, written for
+  somebody who has never deployed anything: why a server is needed at all,
+  running locally, Railway step by step, which files belong to which layer, the
+  one configuration value, creating a room, joining a room, and a symptom table
+  for when it does not work.
+- `requirements-server.txt` (new) — **only** `websockets`. The root
+  `requirements.txt` pins pygame, and a platform that installs it pulls in a
+  graphics library and its SDL system packages to run a process that never opens
+  a window.
+- `railway.json` (new) — start command, health-check path, restart policy, and
+  an install phase pointing at `requirements-server.txt`.
+- `.railwayignore` (new) — omits `ui/`, `render/`, `assets/`, tests, tools, docs.
+
+### Tests
+`tests/test_handshake.py` (new, 40 tests):
+- the exact `HostSetupScreen.confirm` sequence — construct, set settings,
+  **then** poll — and it must produce a room code and keep the settings;
+- `HELLO` is first on the wire whatever order the screen acts in;
+- no message, notice or disconnect reason ever contains "hello" or
+  "przywitanie";
+- a premature message is non-fatal and leaves the room intact;
+- an action taken while reconnecting is replayed after the new handshake;
+- a two-player debug game starts end to end and both machines agree on the
+  snapshot; without the debug version, two players are still refused;
+- twelve kinds of technical text never reach the player, and five kinds of the
+  server's own Polish prose survive untouched;
+- the rename box does select-all, copy, paste, cut, caret movement, placeholder,
+  Enter and Escape;
+- Ctrl+← word jumps; `max_length` limits typing but not assignment;
+- **the server imports and constructs with pygame blocked and `ui/`/`render/`
+  made invisible** — the `.railwayignore` claim, asserted rather than documented.
+
+`tests/netkit.py` / `server/embedded.py`: `InProcessServer` now records every
+message it is handed, in arrival order (`received_from`). Order was the whole
+bug and nothing could previously see it.
+
+`tests/test_session.py`: the `normalise_url` cases were updated for the
+deliberate `wss://` change, with both branches now covered explicitly.
+
+### Verification
+- **496 tests passing** (450 before, +40 new, +6 added URL cases).
+- Handshake reproduction against a real server on a real port: before/after
+  above.
+- Health page fetched over real HTTP on `/`, `/health` and `/healthz?probe=1`.
+- Server constructed with `pygame`, `pedzacy_piotrek.ui` and
+  `pedzacy_piotrek.render` all made unimportable.
+
+### Notes
+- **The error layer is narrower than it first was, and that was a test's doing.**
+  The first version matched the server's own Polish sentences too and replaced
+  them with blander constants — `"Nie ma pokoju o kodzie ZZZZZZ"` became
+  `"Nie ma pokoju o takim kodzie"`, losing the code the player typed, and
+  `"Tylko host może rozpocząć grę"` lost which action was refused. Three
+  existing tests failed and were right to. The table now catches only text that
+  was never written for a player; anything already in our own Polish prose
+  passes through. If you add a pattern, ask first whether the sentence you are
+  replacing is *more* specific than the one you are substituting.
+- `max_length` constrains typing, not programmatic assignment. This looks like
+  an oversight and is not: a field pre-filled with a long server address has to
+  show all of it, and a test encodes the behaviour.
+- The `client/ server/ shared/` directory split in the brief was **not** done.
+  The server is authoritative and builds real `GameState`, so it needs `engine/`,
+  `cards/`, `board/`, `players/`, `config/` and `data/`; a literal split means
+  rewriting imports across ~100 files for no behavioural gain. The separation is
+  instead made real where it counts — a lean requirements file, a build that
+  omits the client packages, and a test proving the server never reaches for a
+  screen. `SERVER_SETUP.md` §4 documents the three-way mapping.
+- Still unverified by eye: I cannot see rendered output. The rename caret's new
+  position and the lobby's row count were checked by measurement and by test,
+  not by looking.
