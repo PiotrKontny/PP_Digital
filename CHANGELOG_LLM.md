@@ -1445,3 +1445,119 @@ real success or failure is recorded.
 - The five `TextInput` fields have full mouse selection, including drag.
 - `CopyNotice` is deliberately not a general toast system. If a third kind of
   transient message appears, that is the moment to generalise it — not before.
+
+---
+
+## Stage 15 — The clipboard is the system clipboard
+**Date:** 2026-08-05
+
+### Starting point
+Stage 14 shipped copy buttons, Ctrl+C/X/V in every field, and 66 tests saying
+so. All of it worked — inside the game and nowhere else. Ctrl+C copied into a
+buffer belonging to the process, Ctrl+V read it back, and the room-code button
+put the code somewhere no chat window could see. Text could not leave the game
+and could not get in.
+
+### Root cause
+`ui/clipboard.py` called **`pygame.scrap.put_text()` and
+`pygame.scrap.get_text()`**. Those exist in **pygame-ce**. They do not exist in
+upstream pygame, which is what `requirements.txt` asks for (`pygame>=2.5,<3`,
+resolving to 2.6.1):
+
+```
+>>> pygame.scrap.put_text('x')
+AttributeError: module 'pygame.scrap' has no attribute 'put_text'
+```
+
+Both call sites sat inside `except Exception: pass`. So every copy raised,
+every raise was swallowed, and every operation quietly landed in `_fallback` —
+an in-process clipboard, exactly the behaviour the module's docstring said it
+was there to *avoid*. There was no log line, no failing test and no visible
+symptom short of trying to paste into Discord.
+
+A second trap was waiting behind the first: upstream pygame's SDL2 backend
+accepts exactly one type string, `"text/plain;charset=utf-8"`.
+`pygame.SCRAP_TEXT` is `"text/plain"`, which it refuses with *"content could
+not be placed in clipboard"*. The obvious one-line repair — swap `put_text` for
+`put(pygame.SCRAP_TEXT, ...)` — fails just as silently.
+
+### Fix
+`ui/clipboard.py` only. `TextEditor`, `TextInput`, `TextField` and every screen
+are untouched; `copy()`, `paste()` and `reset()` keep their signatures, so the
+copy buttons were fixed by repairing the thing underneath them.
+
+- **Both API shapes are tried.** `put_text`/`get_text` first for pygame-ce,
+  then `put`/`get` over a list of type strings with the SDL2 spelling first,
+  then `pygame.SCRAP_TEXT` (a platform constant, read at call time because on
+  Windows it is not necessarily a MIME string). The type that works is learnt
+  once and remembered, so steady-state copying is a single call.
+- **System first, always.** `_fallback` is consulted only when the clipboard
+  could not be *read* — not when it is empty. Previously an emptied system
+  clipboard would have been overruled by a stale in-process value, which is a
+  lie about what the user copied.
+- **Decoding**: UTF-8, Windows UTF-16 (detected by interleaved NULs), trailing
+  NULs stripped, latin-1 as a floor. Polish letters survive both directions.
+- **CRLF collapsed before flattening.** Text copied in a Windows application
+  arrived with a doubled space at every line break; these are single-line
+  fields, so a break becomes one space.
+- `_ensure_ready()` keeps N62 (a missing display is not a cached answer) and
+  extends it to a missing *window*: some backends need one before
+  `scrap.init()` succeeds, and a probe made between `display.init()` and
+  `display.set_mode()` must not pin availability off for the session.
+- `scrap.set_mode(SCRAP_CLIPBOARD)` on init — a no-op under SDL2, correct on
+  the backends that still separate the clipboard from the X11 primary
+  selection.
+- `reset()` (a test entry point) now blanks the system clipboard as well.
+  After the fix that is where the text actually is, and without this a value
+  copied by one test stayed readable in the next, making results depend on
+  order.
+
+### Why every existing test passed
+All 66 stage-14 clipboard tests went through `copy()` and `paste()`. Those two
+agreed with each other perfectly — via `_fallback`. A test that only asks a
+module whether it agrees with itself cannot see a missing operating system.
+
+The 14 new tests reach **past** the module: they put text with
+`pygame.scrap.put` and read it with `clipboard.paste()`, and copy with
+`clipboard.copy()` and read it with `pygame.scrap.get`.
+
+- copy reaches the system clipboard; paste reads it, with nothing ever copied
+  in-game;
+- the outside world beats the internal buffer;
+- an emptied system clipboard is not papered over with stale text;
+- Polish letters round-trip; a pasted paragraph becomes one line;
+- both copy buttons and a menu field land in the system clipboard, and a field
+  pastes what another application copied;
+- a pygame-ce-shaped `scrap` uses `put_text`; an upstream-shaped one that
+  rejects every type but `text/plain;charset=utf-8` still works; a `scrap` that
+  raises on everything falls back and copy/paste still works inside the game.
+
+### Added
+`tools/clipboard_check.py` — interactive, for a real desktop. Reports the
+pygame/SDL version, the video driver, which backend was found and whether the
+clipboard is available; copies a marker and holds a window open for 30 s (on
+X11 the copying program serves the text on request, so it has to stay alive);
+then watches for something copied in another application.
+
+### Verification
+- **576 tests passing** (562 before, +14). ~90 s.
+- The bug was reproduced against the shipped code first, then again after the
+  fix, at the `pygame.scrap` level in both directions.
+- **NOT verified: an actual transfer to another application.** This container's
+  pygame wheel has no X11 video driver at all (`dummy`, `offscreen`, `wayland`
+  only), so a two-process test over a real X server could not be run — Xvfb was
+  set up and the attempt failed on that. Under the dummy driver SDL keeps
+  clipboard text inside the process, which is exactly the condition that hid
+  the original bug, so the green run must not be read as proof of the last
+  mile. `tools/clipboard_check.py` on a real desktop is the proof; it has not
+  been run by anyone yet.
+
+### Notes
+- The in-process buffer stays, and stays load-bearing: it is what keeps the
+  game editable on a machine with no clipboard, and one test holds it in place.
+- Not attempted, deliberately: ⌘C/⌘V on macOS (`KMOD_META`) is not wired, only
+  Ctrl. That is a `TextEditor` key-handling change, and this stage was told to
+  fix the clipboard and leave the editor alone. It is a real gap on macOS.
+- On X11, clipboard contents vanish when the game exits unless a clipboard
+  manager is running. That is how SDL applications behave and is not something
+  this module can fix.

@@ -250,8 +250,11 @@ pedzacy_piotrek/
                      TextEditor — THE editing behaviour, including held-key
                      repeat — wrapped by TextInput (form boxes) and TextField
                      (inline rename).  See TEXT FIELDS.
-    clipboard.py     System clipboard with an in-process fallback, so copy and
-                     paste still work where SDL has no clipboard at all.
+    clipboard.py     THE OPERATING SYSTEM clipboard, with an in-process
+                     fallback for machines where SDL has none.  Tries both
+                     shapes of pygame.scrap (put_text/get_text, and put/get
+                     with a type it discovers) because upstream pygame and
+                     pygame-ce do not offer the same one.  See CLIPBOARD.
     board_view.py    Board viewport: camera, pawn animation, walks, stacks.
     hand_fan.py      The hand fan and the card-play gesture.
     overlays.py      ChoicePrompt (the engine asking a question), RevealOverlay
@@ -697,10 +700,65 @@ TEXT ENTRY (``ui/widgets.py``, class TextInput).  Two traps, both hit once:
 
 TextInput supports what a native box does: caret placement by clicking, drag to
 select, Shift+arrows, Home/End, Ctrl+A/C/X/V, and typing or Backspace replacing
-a selection.  ``ui/clipboard.py`` wraps ``pygame.scrap`` and falls back to an
-internal buffer when the system clipboard is unavailable — it never raises.
+a selection.  ``ui/clipboard.py`` reaches the real system clipboard and falls
+back to an internal buffer only where that is impossible — it never raises.
+See CLIPBOARD below; it is not the thin wrapper it looks like, and it must not
+be simplified back into one.
 Placeholder text is drawn in a dimmer grey than anything the player can type and
 is never part of ``value``.
+
+
+================================================================================
+CLIPBOARD
+================================================================================
+
+``ui/clipboard.py``.  Three functions — ``copy``, ``paste``, ``reset`` — and a
+lot of comment, for a reason.
+
+THE SYSTEM CLIPBOARD IS THE CLIPBOARD.  Copying in the game lands in Discord, a
+browser or Notepad; anything copied there pastes into the game.  The in-process
+buffer exists ONLY for a machine where the system clipboard genuinely cannot be
+reached, and it must stay invisible.
+
+Why the module is not three lines:
+
+* ``pygame.scrap`` is two different APIs.  ``put_text`` / ``get_text`` exist in
+  pygame-ce only.  Upstream pygame 2.6 — what ``requirements.txt`` asks for —
+  has neither, and calling them raises ``AttributeError``;
+* the ``put`` / ``get`` pair takes a type string, and upstream pygame's SDL2
+  backend accepts exactly one: ``"text/plain;charset=utf-8"``.
+  ``pygame.SCRAP_TEXT`` is ``"text/plain"`` and is refused with "content could
+  not be placed in clipboard"; other backends and older builds want
+  ``UTF8_STRING`` or ``TEXT``.
+
+So both call styles are tried, the type is discovered on first use and then
+remembered.  Delete either branch and the game works on one installation and
+silently stops talking to the desktop on another.
+
+Rules the code depends on:
+
+* the system is attempted FIRST, every time.  ``_fallback`` is consulted only
+  when the clipboard could not be READ at all — not when it is empty, because
+  an empty clipboard is an answer (N67);
+* ``_ensure_ready()`` caches only a definite answer.  "No display yet" and "no
+  window yet" leave the question open (N62) — some backends need a window
+  before ``scrap.init()`` succeeds, and a probe made in between must not decide
+  the session;
+* nothing raises.  A clipboard is not worth a stack trace in a menu;
+* pasted text is flattened to one line (CRLF first, or Windows text arrives
+  with doubled spaces).  These are single-line fields;
+* ``reset()`` is a TEST entry point and it blanks the system clipboard too —
+  otherwise a value copied by one test is still readable in the next and tests
+  pass or fail by order.
+
+Testing it is the subtle part.  Every clipboard test written before stage 15
+went through ``copy()`` and ``paste()``, which agreed with each other perfectly
+while nothing reached the operating system.  A test proves something here only
+if it reaches PAST the module — put with ``pygame.scrap.put``, read back with
+``clipboard.paste()``, and the other way round (N66).  Even then, SDL's dummy
+driver keeps clipboard text inside the process, so the last mile — a real
+window manager, a real other application — is ``tools/clipboard_check.py``, by
+hand, on a desktop.
 
 
 ================================================================================
@@ -1211,7 +1269,8 @@ FILES THAT SHOULD NEVER BE REMOVED
 - net/* — the networking layer. net/messages.py in particular: it is the only
   thing standing between a player and a stack trace.
 - ui/widgets.TextEditor — every text field in the application is a wrapper
-  round it, and ui/clipboard.py is what makes Ctrl+V reach the system.
+  round it, and ui/clipboard.py is what makes Ctrl+V reach the system.  The
+  two-backend dance in clipboard.py is load-bearing, not defensive clutter.
 - server/* — the authoritative server. Its freedom from pygame and from ui/ is
   what makes deployment small, and a test asserts it.
 - SERVER_SETUP.md, railway.json, requirements-server.txt, .railwayignore — the
@@ -1401,6 +1460,21 @@ N62. Never cache "no display yet" as a clipboard answer. It pins the system
 N63. Never copy decoration along with the payload. The room-code button copies
      K7M2QD, not "KOD POKOJU: K7M2QD" — it is going straight into a join
      field at the other end.
+N64. Never assume which pygame.scrap API is present. put_text/get_text exist
+     only in pygame-ce; upstream pygame 2.6 (what requirements.txt asks for)
+     has neither, and calling them raises AttributeError. Stage 14 called
+     exactly those, inside `except Exception: pass`, and the game spent a whole
+     stage with a clipboard nothing outside it could see.
+N65. Never pass pygame.SCRAP_TEXT and assume it works. It is "text/plain",
+     which upstream pygame's SDL2 backend rejects; the only string that backend
+     accepts is "text/plain;charset=utf-8". Try a list, remember what worked.
+N66. Never swallow an exception around a clipboard call without a test that
+     reaches past the module to pygame.scrap itself. Every clipboard test in
+     the suite passed while nothing reached the operating system, because they
+     all went through copy() and paste() — which agreed with each other.
+N67. Never let the internal fallback answer when the system clipboard could be
+     read. An empty system clipboard is an answer; pasting a stale in-process
+     value over it is a lie about what the user copied.
 
 
 ================================================================================
@@ -1411,13 +1485,22 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    the last thing between this and a public release. It is a server-side change
    (server/room.py broadcast), and it is not free — see L1a.
 
+0aa. FIRST, five minutes: run tools/clipboard_check.py on the real desktop and
+   confirm copy and paste cross into another application. Stage 15 fixed the
+   clipboard, and the fix is covered by tests, but this environment's SDL had
+   no X11 driver, so no human or machine has yet seen text travel between this
+   game and Discord. It is the one claim in the stage that rests on reasoning
+   rather than observation.
+
 0a. BEFORE ANYTHING ELSE, someone should play a real match through a deployed
    server. Stage 13 fixed the defect that made hosting impossible, and the fix
    is covered by tests, but no human has yet completed a Poland↔UK game on a
    Railway deployment. That is the one thing the test suite cannot tell us.
    Stage 14 makes that first attempt considerably less painful — the address is
    typed once and the room code is one click away from a chat window — but it
-   does not substitute for doing it.
+   does not substitute for doing it. Stage 15 is what makes "one click away
+   from a chat window" true: until it, the copy buttons copied into the game
+   and nowhere else.
 
 0b. NOTE: two settings have now been silently dropped by config rebuilding
    (double_frequency, edit_mode).  Both normalised() and create_game() use
@@ -1445,7 +1528,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 562 tests, ~100 s
+    python -m pytest -q                     # 576 tests, ~100 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -1464,10 +1547,24 @@ HOW TO VERIFY A CHANGE
                                    and that the server runs without pygame
       tests/test_usability.py    — every editable field, held-key repeat, the
                                    copy buttons and their placement at four
-                                   resolutions, and the remembered address
+                                   resolutions, the remembered address, and
+                                   (stage 15) that copy and paste really reach
+                                   pygame.scrap rather than a buffer inside the
+                                   process — those tests bypass ui/clipboard on
+                                   purpose
       tests/test_menu_layout.py  — text overlap at four resolutions, text entry
     python -m pedzacy_piotrek --selftest    # renders frames headlessly
     python tools/inspect_frame.py --window 2560x1440
+    python tools/clipboard_check.py         # ON A REAL DESKTOP, by hand:
+                                            # copies a marker, waits for you to
+                                            # paste it into another program,
+                                            # then reads back what you copied
+                                            # there.  No test suite can do this
+                                            # — a CI box has no Discord, and
+                                            # SDL's dummy driver keeps the
+                                            # clipboard inside the process, so
+                                            # a green run cannot tell a working
+                                            # clipboard from a broken one.
                                             # per-region paint + overlap report
     python tools/screenshot.py --cells 30   # writes shots/ui.png, shots/board.png
 

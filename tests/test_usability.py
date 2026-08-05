@@ -515,3 +515,206 @@ def test_copying_survives_a_platform_with_no_clipboard(monkeypatch):
                         lambda: (_ for _ in ()).throw(pygame.error("nope")))
     clipboard.copy("K7M2QD")
     assert clipboard.paste() == "K7M2QD"
+
+
+# ── the clipboard is the OPERATING SYSTEM's clipboard ────────────────────────
+# Every test above this line goes through ui/clipboard, so all of them passed
+# happily while the module was talking to nothing but its own buffer: copying
+# from the game into Discord did not work, and neither did pasting back. These
+# reach around the module and touch pygame.scrap directly, which is the only
+# way to tell the two apart.
+def _outside_world_puts(text: str) -> None:
+    """Stand in for Discord, a browser or Notepad putting text on the clipboard."""
+    pygame.scrap.init()
+    for text_type in clipboard._TEXT_TYPES:
+        try:
+            pygame.scrap.put(text_type, text.encode("utf-8"))
+            return
+        except Exception:
+            continue
+    pytest.skip("no usable system clipboard type on this platform")
+
+
+def _outside_world_reads() -> str:
+    """What another application would find on the clipboard right now."""
+    pygame.scrap.init()
+    for text_type in clipboard._TEXT_TYPES:
+        try:
+            raw = pygame.scrap.get(text_type)
+        except Exception:
+            continue
+        if raw:
+            return bytes(raw).rstrip(b"\x00").decode("utf-8")
+    return ""
+
+
+def test_copying_reaches_the_system_clipboard():
+    """Game → Discord. The module used to keep this to itself entirely."""
+    clipboard.copy("K7M2QD")
+    assert _outside_world_reads() == "K7M2QD"
+
+
+def test_pasting_reads_the_system_clipboard():
+    """Discord → Game, with nothing ever copied inside the game."""
+    _outside_world_puts("wss://piotrek.up.railway.app")
+    assert clipboard.paste() == "wss://piotrek.up.railway.app"
+
+
+def test_the_outside_world_beats_the_internal_buffer():
+    """The fallback is a fallback. It must never shadow a working clipboard."""
+    clipboard.copy("kopia w grze")
+    _outside_world_puts("skopiowane w przeglądarce")
+    assert clipboard.paste() == "skopiowane w przeglądarce"
+
+
+def test_an_emptied_system_clipboard_is_not_papered_over():
+    """Stale internal text pasted after the user cleared the clipboard is a lie."""
+    clipboard.copy("K7M2QD")
+    _outside_world_puts("")
+    assert clipboard.paste() == ""
+
+
+def test_polish_letters_survive_the_round_trip():
+    clipboard.copy("Zażółć gęślą jaźń")
+    assert _outside_world_reads() == "Zażółć gęślą jaźń"
+    _outside_world_puts("Łódź")
+    assert clipboard.paste() == "Łódź"
+
+
+def test_a_pasted_paragraph_becomes_one_line():
+    """These are single-line fields; a chat window's line break is not an error."""
+    _outside_world_puts("wiersz\r\ndrugi")
+    assert clipboard.paste() == "wiersz drugi"
+
+
+def test_the_copy_code_button_reaches_the_system_clipboard(library):
+    """Copy Room Code → the friend's chat window."""
+    table = Table(library)
+    try:
+        host = table.host("Kuba")
+        screen = LobbyScreen(make_app(), library, host)
+        screen._copy_code()
+        assert _outside_world_reads() == host.room_code
+    finally:
+        table.close()
+
+
+@pytest.mark.parametrize("screen_class", [HostSetupScreen, JoinScreen])
+def test_the_copy_address_button_reaches_the_system_clipboard(screen_class, library):
+    screen = screen_class(make_app(), library)
+    screen.server.value = "wss://piotrek.up.railway.app"
+    screen._copy_server_address(screen.server)
+    assert _outside_world_reads() == "wss://piotrek.up.railway.app"
+
+
+def test_a_field_copies_into_the_system_clipboard(library):
+    """Ctrl+C in a menu box, then Ctrl+V in any other application."""
+    box = TextInput(pygame.Rect(100, 100, 300, 40), "Nick", "Kuba")
+    box.focus()
+    _key(box, pygame.K_a, pygame.KMOD_CTRL)
+    _key(box, pygame.K_c, pygame.KMOD_CTRL)
+    assert _outside_world_reads() == "Kuba"
+
+
+def test_a_field_pastes_what_another_application_copied():
+    box = TextInput(pygame.Rect(100, 100, 300, 40), "Nick", "")
+    box.focus()
+    _outside_world_puts("Kubasinski")
+    _key(box, pygame.K_v, pygame.KMOD_CTRL)
+    assert box.value == "Kubasinski"
+
+
+# ── the two shapes of pygame.scrap ───────────────────────────────────────────
+class _CeScrap:
+    """pygame-ce: put_text/get_text and nothing else worth having.
+
+    Upstream pygame 2.6 has neither, which is exactly what this module used to
+    call — every AttributeError swallowed by an `except Exception: pass`.
+    """
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def init(self) -> None:
+        pass
+
+    def get_init(self) -> bool:
+        return True
+
+    def set_mode(self, mode) -> None:
+        pass
+
+    def put_text(self, text: str) -> None:
+        self.text = text
+
+    def get_text(self) -> str:
+        return self.text
+
+
+def test_a_pygame_ce_style_clipboard_is_used(monkeypatch):
+    scrap = _CeScrap()
+    monkeypatch.setattr(pygame, "scrap", scrap)
+    clipboard.reset()
+    clipboard.copy("K7M2QD")
+    assert scrap.text == "K7M2QD", "put_text is there; it should have been used"
+    scrap.text = "z Discorda"
+    assert clipboard.paste() == "z Discorda"
+
+
+class _UpstreamScrap:
+    """Upstream pygame 2.6: put/get only, and only one type string is accepted.
+
+    ``pygame.SCRAP_TEXT`` is ``"text/plain"``, which this backend rejects — the
+    other half of what made every copy fall through to the internal buffer.
+    """
+
+    TYPE = "text/plain;charset=utf-8"
+
+    def __init__(self) -> None:
+        self.data = {}
+
+    def init(self) -> None:
+        pass
+
+    def get_init(self) -> bool:
+        return True
+
+    def set_mode(self, mode) -> None:
+        pass
+
+    def put(self, text_type, data):
+        if text_type != self.TYPE:
+            raise pygame.error("content could not be placed in clipboard.")
+        self.data[text_type] = data
+
+    def get(self, text_type):
+        return self.data.get(text_type)
+
+
+def test_a_clipboard_without_put_text_is_still_the_system_clipboard(monkeypatch):
+    """Guessing one call style is the whole of what Stage 15 had to undo."""
+    scrap = _UpstreamScrap()
+    assert not hasattr(scrap, "put_text"), "this stand-in is upstream pygame"
+    monkeypatch.setattr(pygame, "scrap", scrap)
+    clipboard.reset()
+    clipboard.copy("K7M2QD")
+    assert scrap.data.get(_UpstreamScrap.TYPE) == b"K7M2QD"
+    assert clipboard.paste() == "K7M2QD"
+
+
+def test_an_unreadable_clipboard_falls_back_but_a_readable_empty_one_does_not(monkeypatch):
+    """The fallback exists for machines that cannot read, not for empty ones."""
+    class _Broken(_CeScrap):
+        def get_text(self):
+            raise pygame.error("no clipboard here")
+
+        def get(self, text_type):
+            raise pygame.error("no clipboard here")
+
+        def put(self, text_type, data):
+            raise pygame.error("no clipboard here")
+
+    monkeypatch.setattr(pygame, "scrap", _Broken())
+    clipboard.reset()
+    clipboard.copy("K7M2QD")
+    assert clipboard.paste() == "K7M2QD", "the internal buffer has to save this one"
