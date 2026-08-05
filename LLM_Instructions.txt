@@ -1,0 +1,1270 @@
+================================================================================
+LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
+Last updated: stage 12 — one highlight system, UI consistency (see CHANGELOG_LLM.md)
+================================================================================
+
+Read this file together with the source tree before changing anything. It is
+written for whoever (human or model) picks the project up next, and it assumes
+no memory of previous conversations.
+
+Language convention: code, comments and docstrings are in ENGLISH. Everything
+the player sees — UI strings, card text, error messages — is in POLISH. Keep
+both. README.md and docs/ARCHITECTURE.md are in Polish because they are for the
+project owner; this file is in English because it is for models.
+
+
+================================================================================
+PROJECT OVERVIEW
+================================================================================
+
+"Pędzący Piotrek" is a digital board game in Python + pygame. It is a fan-made,
+non-commercial extension of the board game "Pędzące Żółwie" (Schildkrötenrennen
+/ Ribbit), built for one specific person's friend group.
+
+The base game: each player secretly owns one coloured pawn; movement cards move
+named colours forward or backward; a pawn landing on an occupied field STACKS on
+top of whoever is there, and moving the pawn at the BOTTOM of a tower carries
+the whole tower with it.
+
+The extension: one player is PIOTREK. He secretly owns one pawn colour and wins
+by getting it to the finish. Everyone else is a HUNTER. Hunters win by stacking
+ALL pawns onto one field and then checking whether the pawn at the BOTTOM of the
+resulting tower is Piotrek's. A wrong guess eliminates that colour from
+suspicion and play continues.
+
+Turn order is fixed and unusual: Piotrek acts on every third slot.
+    Piotrek → Hunter1 → Hunter2 → Piotrek → Hunter3 → Hunter1 → Piotrek → ...
+This is implemented in engine/turn_order.py and MUST NOT be "simplified" into a
+round robin.
+
+Two goals, in the owner's words: (1) make it easy to test and balance the
+mechanics, (2) eventually play online with friends.
+
+
+================================================================================
+LONG TERM GOALS
+================================================================================
+
+1. A polished digital board game that feels like a board game, not a debug tool.
+2. Online play with friends: one player hosts, others connect directly. No
+   matchmaking, no dedicated server, host-authoritative.
+3. Distributable from GitHub, launchable as a .exe (PyInstaller).
+4. Content (cards, characters, board themes) editable in JSON without touching
+   Python, because balancing means hundreds of small content changes.
+5. Room for external art, music and sound effects without a rewrite.
+
+
+================================================================================
+CURRENT IMPLEMENTATION (what actually works today)
+================================================================================
+
+WORKING:
+- Full game setup: 3–6 players, character dealing with a guaranteed Piotrek,
+  starting hands (5 for Piotrek, 3 for everyone else), secret pawn assignment.
+- Menu validation: if every seat picked a character by hand and none of them is
+  Piotrek, the game refuses to start and says so in red.
+- Five decks with draw/discard/reshuffle: movement, mods, chest, characters,
+  piotrek_skills.
+- Procedurally generated horizontal board with guaranteed field spacing,
+  rivers, bridges, villages, forest, rocks, a starting camp and a finish banner.
+- Board positions vs fields: a widened row is ONE position holding two fields
+  labelled 12a / 12b.  Landing there stops the move and asks which half.
+- Configurable frequency of widened rows (menu, SessionConfig, CLI, theme).
+- Surrounding countryside tiled behind the board so it never floats on panel
+  colour, with parallax as the camera moves.
+- Camera: smooth zoom, pan, scrollbars, zoom slider, and left-drag on empty
+  ground to grab the map (unsmoothed, so it tracks the cursor exactly).
+- Hand as an animated Hearthstone-style fan with hover, drag and drop.
+- A GENERIC EFFECT ENGINE (stage 4).  Cards and abilities declare an effect in
+  JSON; a registered handler turns it into a Plan of Operations; the executor
+  applies it.  No card-title branching anywhere.
+- PLAYABLE movement cards: 26 of 30 definitions.  Deterministic ones act at
+  once; select-a-token ones (Janek, Kolos z paki, Astral 2019, Astral 2022)
+  ask through the generic choice system, which shows the pawns themselves.
+- Thunderfuck draws a Mod Patusa straight into the first free rack slot.
+- Gamechanger really becomes Alter Ego / Kingmaker: the card in the hand is the
+  transformed one, and it goes back to the deck as a Gamechanger.
+- EDIT MODE: on (default) anybody at the keyboard plays every seat, as the
+  prototype did; off, only the local seat may act — enforced in the engine, so
+  it is the rule the network will need.
+- CHARACTER ABILITIES: Big D Randy, Lubin, Mitoman, Norbur, Dziad, Ondrej,
+  Dziubdziuch and Atencjusz all execute.  Glockboy reports that the checking
+  mechanic does not exist yet and spends nothing.
+- PIOTREK'S SKILLS: dealt at game start.  ChatGPT (passive: two movement cards
+  fewer and one chest slot; active: +1 range on the next movement card, five
+  times) and Dług u Tomasza (records its state) work; Ice Block reports the
+  missing checking mechanic.
+- PERSISTENT GAMEPLAY STATES: frozen, skip turn, linked, extra turn, movement
+  bonus, restricted movement, forbidden adjacency, check refusal.
+- CHEST HAND LIMIT with a keep/discard overlay (Piotrek 2, hunters 1).
+- SPECIAL PRESENTATIONS: Gamechanger transforms into Alter Ego or Kingmaker on
+  the way to the hand; Seks z pedałami announces itself, then reveals and plays
+  a random movement card.
+- "Recently played" strip: the last three played cards, held ~11 s, and
+  hovering one enlarges it above the whole interface and pauses its fade.
+- Two-slot "Mody Patusa" rack, character panel with abilities and Piotrek's
+  skills, hunters' colour-elimination notepad, manual round counter, player
+  renaming, free pawn dragging with snapping and stacking.
+- Responsive UI from 1280×760 to 4K.
+- MULTIPLAYER over the internet, CLIENT/SERVER: a dedicated server process
+  (``python -m pedzacy_piotrek.server``) owns the game; every player, the one
+  who opened the room included, is a WebSocket client that connects OUTWARDS.
+  Friends join with a six-character ROOM CODE — no address, no port, no router
+  configuration, so two people in different countries can play.
+- Reconnection: a dropped player keeps their seat for a grace period, comes back
+  on a new connection and is replayed up to date automatically.
+- Turn ownership: outside hot-seat games only the active player may move, and
+  only for their own seat; the interface says whose turn it is.
+- THE TURN LOOP RUNS ITSELF: playing (or discarding) a movement card refills the
+  hand to its proper size and hands the turn on, the round advances when its
+  slots run out, and the chest card for that round is dealt automatically.
+  There is also an explicit "Zakończ turę" button (bottom-right of the board).
+- RESOLUTION INDEPENDENT: type and cards are RENDERED at the size they are seen,
+  never enlarged after rasterising; the columns are measured from their contents
+  and everything left over goes to the board.
+- Each machine shows ITS OWN hand, whoever's turn it is.
+- Network debug panel (F3, off by default): server, room code, connection state,
+  ping, sent/received counters, in-flight actions, reconnect/resync counts, and a
+  state fingerprint for spotting desyncs.
+- ONE VISUAL LANGUAGE for hover, selection, focus, active and pressed, across
+  every screen, dialog, panel, tile, slot and button (stage 12). Highlights
+  follow the shape of what they highlight; buttons and steppers measure their
+  own captions instead of being given a width.
+- 450 automated tests.
+
+NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
+- Cards whose effect requires a player decision (14 of 69 movement cards, all
+  chest cards, all mods). They are inert: they can be drawn, discarded and put
+  in the mod rack, and their text tells players what to do manually.
+- Win conditions and the "check the bottom of the tower" action.
+- Turn enforcement: any player can act at any time (deliberate, for testing).
+- Sound and music.
+
+
+================================================================================
+PROJECT ARCHITECTURE
+================================================================================
+
+Strict one-way flow:
+
+    ui/ ──builds──> engine/commands ──applied by──> engine/game_state
+     ^                                                    |
+     └──────────── engine/events <────emitted by──────────┘
+
+RULES THAT MUST NOT BE BROKEN:
+
+R1. engine/ imports NO pygame. Verify with:
+        grep -rn "import pygame" pedzacy_piotrek/engine/   # must find nothing
+R2. The UI never mutates GameState. It builds a Command and calls submit().
+    If you find yourself writing `state.something = ...` in ui/, add a command.
+R3. Rendering contains no rules. render/ draws what it is told.
+R4. All randomness comes from SessionConfig.seed. Never call the module-level
+    random.* functions; use the injected random.Random. This is what makes
+    host and clients agree without transmitting state.
+R5. Every rectangle on screen comes from ui/layout.py. No coordinate literals
+    in panels.
+R6. Anything a player does that changes the game must be a Command, so that
+    multiplayer only has to synchronise Commands.
+
+
+================================================================================
+DIRECTORY STRUCTURE
+================================================================================
+
+pedzacy_piotrek/
+  config/
+    settings.py      Paths, deck ids, Rules, BoardLayout (incl. the derived
+                     spacing guarantees), camera limits, window sizes,
+                     feature switches, SessionConfig.
+    theme.py         Theme (all colours), colour helpers, FontBook.
+  data/
+    cards.json       All five decks. Cards may declare "badge" and "effect".
+    characters.json  Pawn palette, character deck, Piotrek skill deck.
+    board.json       Board themes (row pattern, wave params, decor counts).
+  cards/
+    base_card.py     Badge, EffectSpec (type + free-form params), Presentation,
+                     CardDef (immutable; effect, ability, uses, passive),
+                     Card (one copy, has uid and uses_left), DeckDef, Pawn.
+    loader.py        ContentLibrary.load() + validate(); fails loudly at start.
+    deck.py          Deck: draw pile, discard pile, reshuffle, find_discarded.
+  players/
+    roles.py         Role enum (PIOTREK / HUNTER), derived from JSON "role".
+    player.py        Player dataclass; to_public_dict / to_private_dict.
+  board/
+    path.py          catmull_rom, Path2D (arc-length parametrised), ProximityGrid.
+    tiles.py         TileKind, PropKind, Tile (has .stack, .slot, .variant,
+                     .label), BoardPosition, Prop, River, CampSlot.
+    board.py         BoardTheme, make_rows (pattern OR frequency), BoardGeometry,
+                     BoardModel: generation, validation, positions, pawn
+                     placement and stacking.
+  engine/
+    commands.py      All Commands + COMMAND_REGISTRY (wire names).
+    events.py        All GameEvents + EventBus.
+    effects.py       THE EFFECT ENGINE.  Handler registry, Operations, and the
+                     resolution results (Plan / Choice / Refusal / NotAvailable).
+    statuses.py      StatusKind, Status, StatusTracker — every persistent
+                     gameplay state and the queries the rules ask of them.
+    game_state.py    The whole rulebook. _HANDLERS maps Command -> method.
+    setup.py         create_game(), deck building, character dealing, hands.
+    turn_order.py    compute_round_turn_order, chest_recipient_for_round.
+    animation.py     Easing functions, Tween, Animator, approach helpers.
+  render/
+    renderer.py      Primitive drawing + text cache + shadows, shape/ring glows,
+                     premium_panel / interactive_panel, text fitting.
+    highlight.py     THE HIGHLIGHT SYSTEM.  Every number behind hover,
+                     selection, focus, active and pressed; Emphasis+emphasis().
+    camera.py        Camera: world<->screen, zoom, pan, clamping, set_viewport.
+    board_renderer.py Paints the static world once; blits the visible slice.
+    card_renderer.py Cached card faces at any size; rotated drawing for the fan.
+    particles.py     Dust, sparkle, trail, leaves.
+  ui/
+    app.py           App shell, window, screen stack, main loop, resizing.
+    layout.py        EVERY rectangle, computed from window size.
+    widgets.py       Button (measures its own label), Stepper, Checkbox,
+                     Dropdown, Slider, ScrollBar, TextField, TextInput,
+                     fit_buttons.
+    board_view.py    Board viewport: camera, pawn animation, walks, stacks.
+    hand_fan.py      The hand fan and the card-play gesture.
+    overlays.py      ChoicePrompt (the engine asking a question), RevealOverlay
+                     (Gamechanger, random reveals), ChestChoice (hand limit).
+    hud.py           HudContext + panels (RoundPanel, DeckPanel, ModPanel,
+                     CharacterPanel, PlayerTiles, RecentlyPlayed, StatusBar).
+                     RecentlyPlayed also has draw_overlay(), drawn last of all.
+    game_screen.py   Wires everything; routes input; owns no rules.
+    menu.py          Local pre-game settings screen -> SessionConfig.
+    headings.py      Shared title geometry, MEASURED from the fonts.  Every
+                     menu uses it; three separate guesses is how the settings
+                     subtitle ended up on top of the first row label.
+    network_screens.py  MainMenuScreen, HostSetupScreen, JoinScreen, LobbyScreen.
+    debug_panel.py   NetworkDebugPanel (F3).
+  net/
+    protocol.py      Message types, JSON-line framing, LineBuffer.
+    transport.py     Transport ABC, LoopbackTransport, NullTransport.
+    tcp.py           TcpTransport, TcpListener, connect(), local_ip_addresses().
+                     THE ONLY FILE THAT KNOWS SOCKETS EXIST.
+    lobby.py         LobbySeat, LobbyState (validation, to_config), HostLobby.
+    session.py       LocalSession, HostSession, ClientSession, NetworkStats.
+    service.py       HostService / ClientService — what the screens talk to.
+  assets/            Optional PNG/TTF/OGG overrides (see assets/README.md).
+  main.py            Entry point and CLI.
+
+tests/               test_engine, test_board, test_session, test_ui.
+tools/               screenshot.py, inspect_frame.py (headless verification).
+docs/ARCHITECTURE.md Polish design rationale for the owner.
+
+
+================================================================================
+HOW THE BOARD WORKS
+================================================================================
+
+BoardModel.generate(cell_count, seed) builds everything. The board is DATA
+DERIVED FROM TWO NUMBERS; it is never stored (to_dict emits cell_count, seed,
+theme and pawn placement only).
+
+Coordinate names: "along" = direction of travel, "across" = perpendicular.
+BoardLayout.orientation is "horizontal" (start on the left). _to_world() maps
+along/across to world x/y; switching to a vertical board is that one value.
+
+Generation steps:
+1. make_rows(): which rows hold one field and which hold two. Ported unchanged
+   from the prototype, including "the board always ends on a single field".
+2. _fit_path(): find a road of exactly the needed length that satisfies THREE
+   constraints (see IMPORTANT DESIGN DECISIONS D3). Returns BoardGeometry.
+3. _place_tiles(): fields at fixed arc-length intervals, single rows on the
+   centre line, double rows offset by ±lane_offset.
+4. _place_camp(): waiting slots behind the start.
+5. _carve_rivers(): rivers run ACROSS the road; the crossed field becomes a
+   BRIDGE tile.
+6. _scatter_decor(): rejection sampling with ProximityGrid; keeps clear of the
+   road, the water, the camp and the finish banner. HILL props are background
+   and may pass under everything.
+
+POSITIONS VS FIELDS (added stage 3, important):
+A widened row holds two fields that share one board position.  They are 12a and
+12b: both are twelve steps from the start.  Therefore:
+  * ``BoardModel.tiles``     — every field.  ``cell_count`` counts these.
+  * ``BoardModel.positions`` — logical steps.  MOVEMENT COUNTS THESE.
+  * ``Tile.number`` is the position number, ``Tile.variant`` is "a"/"b" or "",
+    and ``Tile.label`` is what players see.
+Queries: position(i), position_count, last_position, position_of_pawn(pawn),
+tiles_at_position(i), tile_by_label("12a").
+Never go back to numbering fields sequentially — the a/b pair is a rule, not a
+label, and effects.route_between() depends on it.
+
+Row types come either from ``BoardTheme.row_pattern`` (a fixed cycle) or from
+``double_frequency`` (probability per row, drawn from the seeded RNG).  The menu
+sets the frequency; ``--doubles N`` does the same from the command line.
+
+Stacking API on BoardModel: place_pawn, remove_pawn, pawn_tile, stack_depth,
+stack_position, pawn_position, carried_pawns, tower_of.
+carried_pawns() is the turtle-tower rule and is load-bearing.
+
+verify_spacing() returns None for a good board or a Polish description of the
+worst offending pair. Call it in any test that generates boards.
+
+
+================================================================================
+HOW THE EFFECT ENGINE WORKS  (stage 4 — read this before adding gameplay)
+================================================================================
+
+    card / ability
+        ↓  EffectSpec from JSON  {"type": "...", ...params}
+    handler registered with @effect("type")     ← engine/effects.py
+        ↓  returns one of:
+    Plan(operations)  |  Choice(key, kind, options)  |  Refusal  |  NotAvailable
+        ↓
+    GameState._execute() applies the operations   ← the ONLY mutation point
+        ↓
+    events  →  the view animates
+
+OPERATIONS (the vocabulary an effect may use):
+    MovePawn(pawn, route, tiles, carried, teleport)
+    GrantStatus(status) / ClearStatus(kind, subject) / SpendStatus(...)
+    PlayRandomCard(deck_id)      — resolved by the executor, needs the RNG
+    Announce(text)
+
+HANDLERS ARE PURE.  They read the state and return a description; they never
+mutate.  That is what lets the interface call resolve() while a card is being
+dragged and show exactly what will happen, using the same function the engine
+will use to do it.
+
+TARGET SELECTION.  A handler that needs a pawn returns Choice(kind="pawn"),
+and the interface renders the pawns as coloured tokens (ui/overlays.py,
+ChoicePrompt._draw_pawn_option) plus rings them on the board; the player may
+click either.  This is the ONE selection system — cards and abilities share it,
+and a new effect that needs a pawn needs no interface work at all.
+
+CHOICES.  A handler that needs a decision returns Choice(key, kind, options).
+The interface asks, then resubmits the same command with the answer added to
+``choices``.  ``kind`` is "pawn", "tile" or "option"; one modal handles all
+three.  An effect may ask several times (Dziad: which pawn → how far → which
+half of a doubled field); each answer accumulates in the same map.
+
+TO ADD A NEW CARD OR ABILITY:
+    1. add "effect" / "ability" to the JSON entry;
+    2. if its ``type`` already exists, you are done — no code at all;
+    3. otherwise add one @effect("type") handler that returns existing
+       Operations.  Only a genuinely new *kind* of mutation needs a new
+       Operation plus one entry in GameState._OPERATIONS.
+
+NEVER add a card-specific branch anywhere. tests/test_abilities.py asserts that
+every ability and effect in the data has a registered handler.
+
+
+================================================================================
+HOW GAMEPLAY STATES WORK
+================================================================================
+
+engine/statuses.py.  A status has a kind, a subject (PAWN / PLAYER / TABLE), a
+payload and an expiry measured in TURNS (GameState.turn_counter, which advances
+when the active seat changes).  "For one full turn" is duration_turns=1.
+
+Kinds: FROZEN, SKIP_TURN, LINKED, EXTRA_TURN, MOVEMENT_BONUS,
+RESTRICTED_MOVEMENT, FORBIDDEN_ADJACENCY, CHECK_REFUSAL.
+
+Rules read the tracker rather than testing flags:
+    statuses.pawn_has(FROZEN, pawn)          → movement refuses
+    statuses.linked_partners(pawn)           → they travel together
+    statuses.movement_range()                → Norbur's restriction
+    statuses.movement_bonus_for(player)      → ChatGPT's +1, spent by one card
+Statuses are in the snapshot, so they cross the network with everything else.
+NEVER add a one-off boolean to GameState for a new mechanic — add a StatusKind.
+
+
+================================================================================
+HOW THE CARD SYSTEM WORKS
+================================================================================
+
+cards.json -> CardDef (immutable, shared) -> Card (one physical copy, has uid).
+Decks are built by expanding "count" into that many Card objects.
+
+A card may declare:
+  "badge":  {"pawn": "żółty"|"rainbow", "sign": "+"|"++"|"-"|"--", "arrow": bool}
+            Purely visual. NOTE: the prototype inferred badges by string
+            matching the title. Never go back to that.
+  "effect": {"type": "move_pawn",
+             "target": "fixed"|"hindmost"|"choice",
+             "pawn": "<pawn id>",         (only for target=fixed)
+             "steps": 1, "direction": "forward"|"backward"}
+
+engine/effects.py turns a card + state into a Plan (tuple of PawnRoute) or a
+Refusal(reason). It is a PURE FUNCTION: the UI calls preview() while dragging
+and the engine calls resolve() when applying, so the highlight and the outcome
+cannot disagree. Card.is_playable is True when an effect exists and does not
+need a choice.
+
+A card may also declare:
+  "ability": {...}   an activated ability (character cards, Piotrek's skills)
+  "uses": N          how many times it may be used.  The description still says
+                     "2x" for humans; this is the number the rules use, and the
+                     counter lives on the Card (uses_left), so it travels with
+                     the physical card.
+  "passive": {...}   always-on modifiers granted by holding the card
+                     (ChatGPT: movement_cards_delta -2, chest_limit 1)
+  "presentation": {...}  how the card announces itself when drawn
+                     (Gamechanger's role_reveal)
+
+ADDING A NEW DETERMINISTIC CARD = one JSON entry. No Python.
+See HOW THE EFFECT ENGINE WORKS above for anything more involved.
+
+
+================================================================================
+HOW THE PLAYER SYSTEM WORKS
+================================================================================
+
+Player is a passive dataclass: name, hand, character card, skill card, marks
+(crossed-off colours), secret_pawn, owner_id (for future networking).
+
+Role comes from the character card's JSON "role": "piotrek" field, never from
+comparing titles.
+
+to_public_dict() / to_private_dict() exist from the start. Public data is safe
+to broadcast; private data is not. The whole game hinges on hidden information,
+so keep that split even while single-machine play makes it look pointless.
+
+
+================================================================================
+SEATS: OWNED, ACTIVE, VIEWED  (three different things — do not conflate them)
+================================================================================
+
+  OWNED   ``state.local_seat``            — the seat this machine plays.  Fixed
+                                            for the whole match.
+  ACTIVE  ``state.active_player_index``   — whose turn it is.  The same on every
+                                            machine.
+  VIEWED  ``GameScreen.view_seat``        — whose hand, character and notepad are
+                                            on screen.
+
+The multiplayer ownership bug came from having only the first two: every screen
+drew ``state.active_player``'s hand, so both machines believed they were playing
+the host's seat.  Rules for the third:
+
+  * a network game starts VIEWED = OWNED; a hot-seat game starts VIEWED = ACTIVE
+    and follows it, because the person at the keyboard really is playing it;
+  * ``GameScreen.may_view(seat)`` decides whether another seat may be looked at:
+    only in hot-seat (edit mode) or with the development option on.  NEVER in an
+    ordinary network match;
+  * looking is not playing.  ``controls_view`` is what gates the hand fan and
+    the ability button; the engine refuses anything that slips through anyway;
+  * there is ALWAYS a way back: the Home key and a button over the board, and
+    the tile marked "twoje miejsce".  If you add a way to change ``view_seat``,
+    make sure the way back still works.
+
+HudContext carries ``view_index`` and ``can_act``; panels use ``ctx.player``,
+never ``state.active_player``.
+
+
+================================================================================
+THE TURN LOOP  (stage 8)
+================================================================================
+
+A turn is "resolve one movement card".  ``GameState._after_play`` runs when one
+is played *or discarded* by the active player:
+
+    1. ``_refill_movement_hand`` — draw back up to ``setup.starting_hand_size``
+       (so Piotrek's bigger hand and ChatGPT's smaller one are respected);
+    2. ``_end_turn`` — hand the turn to ``next_seat()``;
+    3. if the round's slots ran out, ``_begin_round`` bumps the round and
+       ``_distribute_chest_card`` deals that round's chest card, through the
+       ordinary draw path so the hand limit and its prompt behave normally.
+
+Why it is all in one command: it stays atomic, so one action replays to the same
+table on every machine with no extra round trips and nothing to get out of
+order.  The view animates afterwards — the state does not wait for animation,
+because that would make the outcome depend on frame rate.
+
+ENDING A TURN BY HAND: ``cmd.EndTurn`` runs exactly ``_refill_movement_hand``
+then ``_end_turn`` — the same ending the automatic path reaches, so the two
+cannot drift apart.  It is refused when it is not your turn or while a chest
+choice is pending.
+
+DISCARDING IS HOW YOU PASS.  A hand where nothing is legal would otherwise leave
+the table stuck for ever.  Keep it that way.
+
+``RULES.auto_turn_flow`` switches the whole thing off for tests or a variant.
+
+THE ROUND COUNTER DEALS CHEST CARDS TOO.  ``_set_round`` steps through every
+round it crosses and calls ``_begin_round`` for each, because each of those
+rounds owes a hunter a card.  Jumping straight to the new number was why some
+players were fed and others never were.
+
+Seats, not names: ``seat_order()`` and ``chest_recipient_seat()`` wrap
+``turn_order.py``.  ``hunter_names`` holds *character titles*, and matching those
+against player names silently found nobody — which is why the chest card was
+promised for rounds and never handed out.
+
+The game now starts on whichever seat the cadence puts first (Piotrek), not
+always seat 0.  With a single hunter (the two-player development option) the
+cadence gives that hunter a round of their own, so the same seat can legitimately
+play twice running — assert that a turn was *consumed*, not that the seat changed.
+
+
+================================================================================
+VISUAL IDENTITY  (stage 10, extended in stage 12 — read before drawing anything)
+================================================================================
+
+The look comes from a concept image the owner supplied: a near-black table,
+panels of dark slate edged in worn brass, parchment cards, one warm gold for
+anything the eye should land on, and one green accent for "this is yours / this
+is now".  Everything on screen must belong to that one language.
+
+WHERE THE STYLE LIVES
+  * ``config/theme.py`` — every colour.  NOTHING outside it should contain a
+    literal RGB triple; ``tests/test_visual_style.py`` counts them and fails if
+    they creep back.  A second skin is a second ``Theme``, not a search.
+  * ``render/highlight.py`` — every NUMBER that says what an interaction looks
+    like: hover lighten amounts, the lift, the pressed drop, glow strengths,
+    shadow depths, and how far a bloom may reach.  See THE HIGHLIGHT SYSTEM
+    below; this file is the reason the interface has one hover and not five.
+  * ``render/renderer.py`` — the shared chrome:
+      ``table_background()``  the dark wash with its vignette, cached per size;
+      ``premium_panel()``     shadow + gradient body + top-edge bevel + brass
+                              border + corner brackets.  USE THIS, never a flat
+                              ``panel()``, for anything that holds content;
+      ``interactive_panel()`` the same, for anything the mouse can TOUCH — it
+                              takes an ``Emphasis`` and applies the lift, the
+                              press and the glow for you;
+      ``inset_well()``        the opposite bevel — empty slots, notepads, the
+                              recesses decks sit in;
+      ``section_heading()``   upper-case letter-spaced brass with rules and
+                              diamonds; every sidebar section uses it;
+      ``spaced_text()``       letter-spaced type (pygame has no tracking), cached
+                              per word;
+      ``fit_spaced_text()`` / ``fit_text()``  the same, shrunk to the box given;
+      ``circle_button()``     round brass-rimmed buttons.
+  * ``ui/widgets.py`` — ``Button`` has idle / hover / pressed states: hover
+    lightens and lifts, pressed drops and loses its shadow.  Depth, not a colour
+    swap.  ``primary=True`` is the one-per-screen call to action.  It also
+    MEASURES ITSELF: see BUTTONS SIZE THEMSELVES below.
+
+THE HIGHLIGHT SYSTEM  (stage 12 — the rule, and why it exists)
+
+    A HIGHLIGHT FOLLOWS THE SHAPE OF THE THING IT HIGHLIGHTS.
+
+There used to be one ``Renderer.glow(centre, radius, colour)`` drawing a RADIAL
+DISC, and each of its nine callers chose a radius by eye — from 1.15× to 2.6×
+the component.  The worst was inside ``premium_panel``, which meant every panel
+asking for emphasis got a disc 0.75 × its longest side: on a 300×70 player tile,
+a 225-pixel glowing circle lying across the whole panel behind it.  That single
+line is what made the interface look unfinished.
+
+``glow()` no longer exists.  Its replacements take the COMPONENT'S OWN GEOMETRY
+instead of a multiplier, so the old mistake cannot be written:
+
+  * ``shape_glow(rect, colour, radius=, strength=)`` — rounded-rect bloom for
+    anything rectangular.  Capped at ``BLOOM_MAX`` px past the edge however
+    large the panel;
+  * ``ring_glow(centre, radius, colour, strength=)`` — for things that really
+    ARE round: pawns, turn-order portraits, board fields, the slider knob.
+    ``radius`` is the COMPONENT's radius; the light reaches ``BLOOM`` of it
+    further out.  Passing a radius you already multiplied by 2.6 is exactly
+    what this signature exists to prevent.
+
+FIVE STATES, ONE LANGUAGE.  hover / selection / focus / active / pressed all
+come from ``highlight.emphasis(theme, ...)``, which returns an ``Emphasis``
+(fill, border, text, glow, glow strength, shadow, vertical offset).  Hand it to
+``interactive_panel``.  Do NOT work out your own hover colours in a panel — a
+line like ``lighten(fill, 0.18 if hovered else 0.0)`` is how the interface grew
+five slightly different hovers in the first place.
+
+BUTTONS SIZE THEMSELVES  (stage 12)
+  * ``Button.natural_size(r)`` measures the caption; ``Button.fit(r, ...)``
+    grows the box to hold it; ``fit_buttons(r, [...])`` sizes a GROUP to the
+    widest of them, so a menu column stays a column with no ragged edge.
+  * No screen quotes a button width any more.  "Gra lokalna (hot-seat)" needed
+    350 px of text in a hard-coded 320 px box at 1440p, and
+    "UŻYJ UMIEJĘTNOŚCI (1/1)" overflowed its button by 41 px at the same size.
+  * ``Stepper`` measures its own ± labels rather than assuming a 40 px square,
+    and keeps its row height when its width grows.
+  * A button that swaps captions is measured against the LONGER one (the
+    lobby's "Jestem gotowy" / "Czekam na hosta"), not whichever is showing when
+    the screen is laid out.
+  * ``fit_spaced_text`` / ``fit_text`` shrink type to its box as a last resort,
+    so even a layout that insists on a small control cannot clip a label.
+
+RULES
+  * a panel is never a filled rectangle: use ``premium_panel`` or ``inset_well``;
+  * anything the mouse can touch goes through ``interactive_panel``;
+  * headings are upper case, letter-spaced, brass — never sentence-case labels;
+  * one accent (``theme.accent``) marks the active player and legal drops; one
+    prompt colour (``theme.prompt``) marks anything the engine is asking about;
+  * the board keeps its own art.  Only its FRAME belongs to the interface.
+
+================================================================================
+RENDERING QUALITY  (stage 9 — read before drawing anything scalable)
+================================================================================
+
+THE RULE: never enlarge something that has already been rasterised.  Regenerate
+it at the size it will be seen.  Blurry text, blurry cards and blurry icons all
+come from breaking this in one place or another.
+
+  * ``CardRenderer.face(card, size)`` paints the card AT that size — text laid
+    out again, not scaled.  ``quantised(size, scale)`` gives the size to paint
+    at, rounded to ``SIZE_STEP`` so a smoothly growing card repaints a handful
+    of times rather than every frame.
+  * ``draw_transformed`` applies the scale BEFORE painting and only rotates
+    afterwards.  A hovered or dragged card therefore gets sharper as it grows.
+  * ``RecentlyPlayed`` does the same for its hover preview.  It used to
+    ``rotozoom`` a 95×137 face by 2.15 — which is exactly what made the one card
+    the player wanted to read the least readable thing on screen.
+  * ``FontBook.set_scale`` multiplies every requested size by
+    ``Layout.ui_scale`` (window height / 1080, clamped).  Bigger displays get
+    bigger GLYPHS, not stretched ones.  ``App._apply_font_scale`` sets it and
+    clears the renderer caches, because surfaces rasterised at the old scale
+    would otherwise share the screen with the new ones.
+  * The board's world surface is still scaled by the camera — that is a map
+    being zoomed, which is the one place where scaling is the right answer.
+
+LAYOUT AND SPACE
+  * ``Layout.ui_scale`` is the factor for anything quoted in pixels.  New
+    constants should be multiplied by it or derived from a measured font.
+  * Column widths are MEASURED, not guessed: ``_fit_left_column`` /
+    ``_fit_right_column`` size the cards from the height available, make the
+    column exactly wide enough to hold them (with a floor for the labels and a
+    ceiling of a card in hand), and everything left goes to the board.  The
+    board holds ~60-76% of the window width across supported resolutions.
+  * The right column is sized PER CASE: Piotrek has a skill row, a hunter has
+    the colour notepad instead.  Sizing both for the worst case left a hunter's
+    panel a third empty.
+  * ``tests/test_rendering_quality.py`` measures crispness by comparing the
+    contrast between neighbouring pixels of a redrawn card against a zoomed one.
+    Keep it: one stray ``rotozoom`` and everything is mush again.
+
+
+================================================================================
+MENU LAYOUT AND TEXT ENTRY  (read before touching a menu)
+================================================================================
+
+LAYOUT.  Every menu places its contents in ONE downward pass from measured font
+heights, not from fractions of the window.  Fractions were close enough at 1080p
+and wrong below it.  The rules:
+
+  * start from ``headings.content_top(r, layout)`` — never a magic fraction;
+  * measure text with ``r.fonts.get(size).get_height()`` rather than assuming;
+  * anchor the bottom block (buttons, error line) to the bottom margin and grow
+    the middle to fit;
+  * when it will not fit, SHRINK THE GAPS (host screen) or the row height
+    (lobby seats, character rows) — never let something fall off the screen.
+
+tests/test_menu_layout.py wraps ``Renderer.text``, records every string a screen
+draws, and asserts that no two overlap and none escapes the window, at four
+resolutions.  Add a screen, add it to that test.
+
+TEXT ENTRY (``ui/widgets.py``, class TextInput).  Two traps, both hit once:
+
+  * SDL sends BOTH a KEYDOWN carrying ``unicode`` and a TEXTINPUT for the same
+    keystroke.  Take the character from TEXTINPUT ONLY — handling both inserts
+    everything twice, and TEXTINPUT is the one that understands dead keys and
+    the Polish letters this game is full of;
+  * held keys do not repeat by themselves.  ``pygame.key.set_repeat`` would also
+    spam every in-game shortcut, so the field runs its own timer in ``update``:
+    one delete immediately, a pause, then a steady stream.  Screens MUST call
+    ``field.update(mouse, dt)`` every frame or held backspace does nothing;
+  * a click is NOT a selection.  Leaving a zero-length one behind made the first
+    character typed "selected", so the second replaced it.
+
+TextInput supports what a native box does: caret placement by clicking, drag to
+select, Shift+arrows, Home/End, Ctrl+A/C/X/V, and typing or Backspace replacing
+a selection.  ``ui/clipboard.py`` wraps ``pygame.scrap`` and falls back to an
+internal buffer when the system clipboard is unavailable — it never raises.
+Placeholder text is drawn in a dimmer grey than anything the player can type and
+is never part of ``value``.
+
+
+================================================================================
+HOW THE UI WORKS
+================================================================================
+
+Layout regions (ui/layout.py, everything derived from window size):
+
+  LEFT column   : active Mody Patusa rack, then the three table decks
+                  (Karty Ruchu, Mody Patusa, Karty Skrzyni), each as
+                  draw pile + discard pile.
+  CENTRE top    : turn-order ribbon, chest countdown, round counter.
+  CENTRE middle : player list (click = switch seat, pencil = rename).
+  CENTRE main   : the board (the visual focus of the app).
+  RIGHT column  : "Twoja Postać", ability card, character/skill decks,
+                  "Kolory Piotrka" notepad.
+  BOTTOM        : the hand fan, full width.
+  FLOATING      : "Ostatnio zagrane" over the board's top-right corner,
+                  status bar over the board's bottom-left corner.
+
+Input priority in game_screen.handle_event():
+  1. renaming (captures everything)
+  2. the chest limit overlay (fully modal until the player keeps/discards)
+  2b. a pending choice from the engine — which pawn, which field, how far
+     (modal: clicks answer it, wheel and middle-drag still work so the player
+     can look around, Esc or right-click cancels and costs nothing)
+  2c. a reveal overlay (presentation only: a click dismisses it, and a click
+     past it also does whatever was clicked)
+  3. hand fan
+  4. board view
+  5. round counter
+  6. right-click chain (cancel staging / stage a card / discard a mod)
+  7. left-click chain (player tiles, decks, character panel)
+
+Gestures:
+  hand card, left click ....... play it if playable, otherwise discard
+  hand card, drag to board .... play it (preview shown while dragging)
+  hand card, right click ...... stage for the mod rack, then click a slot
+  hand card, middle click ..... discard
+  mod slot, right click ....... discard the mod
+  pawn, drag .................. free move, snaps to a nearby field
+  pawn token in a prompt ...... answers a "which pawn?" question (so does
+                                clicking the pawn out on the board)
+  empty board, drag ........... pan the map (pawns win the gesture)
+  tower, hover ................ fans out so each pawn is clickable
+  played card, hover .......... enlarges above everything and stops fading
+  ability button .............. activates the character ability / Piotrek skill,
+                                showing remaining uses from the JSON "uses"
+  Ctrl+wheel / middle drag .... zoom / pan
+  S / F / Tab / Esc ........... snapping toggle / fit view / next player / cancel
+
+Panels implement draw(ctx) and optionally handle_click(ctx, button, ui) which
+returns a list of Commands. `ui` is the GameScreen (for pending_mod_uid and
+start_rename). HudContext carries everything a panel needs for one frame.
+
+
+================================================================================
+HOW THE RENDERER WORKS
+================================================================================
+
+- The static world (ground, road, rivers, bridges, props, fields, camp) is
+  painted ONCE into a world-sized surface by BoardRenderer.build(). Each frame
+  only the visible slice is scaled and blitted, so cost scales with the window,
+  not with board size. build() needs a live display surface — call it from
+  Screen.on_enter, not from __init__.
+- Card faces are painted at their FINAL size (not scaled up from 140×200) and
+  cached by (content, size, state). CardRenderer.clear_cache() on window resize.
+- The fan uses draw_transformed() = rotozoom of a cached face.  Its shadow is
+  the ROTATED silhouette (RGB multiplied to zero keeps the alpha), softened by
+  a scale-down/scale-up pass and cached by quantised angle and scale.
+- Deck hover brightens the top card of the pile itself (CardRenderer.back takes
+  a ``brightness``) instead of drawing a halo around it.
+- BoardRenderer draws a tiled countryside backdrop under the board so the
+  viewport is never bare panel colour, with 0.45 parallax.
+- Renderer caches text surfaces, drop shadows and glows by key.
+- All drawing helpers take an explicit `surface`; passing None uses the surface
+  from Renderer.begin(). Prefer passing it explicitly inside board_renderer.
+
+
+================================================================================
+HOW ANIMATIONS WORK
+================================================================================
+
+Two mechanisms, both frame-rate independent:
+
+1. engine/animation.py — Tween (start, end, duration, delay, easing, callbacks)
+   managed by Animator under a string key; adding the same key replaces the
+   running tween. Plus approach()/approach_point() for exponential chasing,
+   which is what the fan and the camera use.
+
+2. board_view.Walk — a pawn following a list of waypoints one segment at a
+   time, with a hop per field. Created from a TokenWalked event. This is what
+   makes a played card walk the pawn through every intermediate field instead
+   of sliding it. Riders get the same walk with a delay so a tower moves like
+   a tower.
+
+Rule: animation state lives in the VIEW (board_view.visual, hand_fan.slots),
+never in GameState. GameState positions are authoritative and instantaneous;
+the view lags behind them on purpose.
+
+
+================================================================================
+IMPORTANT DESIGN DECISIONS
+================================================================================
+
+D1. COMMANDS AND EVENTS. Every mutation is a serialisable Command; every
+    consequence is an Event. This gives multiplayer, replays, undo and testing
+    for free. Do not add "just this one" direct mutation.
+
+D2. ONE SEED. SessionConfig.seed drives board generation, every deck shuffle
+    (each deck gets random.Random(seed + n) so adding a movement card does not
+    change the chest shuffle) and character dealing. Two machines with the same
+    seed build identical games before any packet is sent.
+
+D3. THE BOARD SPACING GUARANTEE. Fields used to overlap on tight bends. The fix
+    is derived, not tuned:
+      - on a curve of radius R the inner lane's spacing is compressed by
+        (R - lane_offset)/R;
+      - requiring the compressed spacing to stay above
+        2*tile_radius + min_tile_gap gives BoardLayout.min_turn_radius;
+      - for a sine of amplitude A the tightest radius is L²/(4π²A), so the
+        wavelength is chosen from the amplitude, not the other way round.
+    The generated road is then MEASURED (curvature via circumscribed circles,
+    self-approach via resampled point pairs). If it fails, amplitude drops 12%
+    and it retries; amplitude 0 is a straight road, so the loop terminates.
+    DO NOT "fix" board looks by removing these checks.
+
+D4. ARC-LENGTH PARAMETRISATION. Path2D interpolates by DISTANCE, not by spline
+    parameter, so field spacing is constant however curvy the road is.
+
+D5. RESPONSIVE, NOT SCALED. The game draws at the window's real resolution and
+    Layout recomputes on resize. The old fixed-canvas-plus-scale approach made
+    big monitors blurry and gave the board no extra room.
+
+D6. EFFECTS AS DATA. Card behaviour lives in JSON. Balancing is the whole point
+    of the project, and balancing must not require editing Python.
+
+D7. THE ENGINE RESOLVES TARGETS. PlayCard carries the card uid, not the outcome.
+    A future client can say which card it played, never what that card does.
+
+D12. TRANSFORMATION IS REAL, NOT COSMETIC.  Card.transform() swaps the
+    definition and keeps the uid, so the hand, the animation and the played-card
+    strip all follow the same object.  Deck.return_card() restores the original,
+    which is what keeps a Gamechanger in the chest deck rather than slowly
+    turning the deck into Kingmakers.
+
+D13. EDIT MODE IS AN ENGINE RULE, NOT A UI ONE.  GameState.may_control() gates
+    every player-owned command.  Putting it in the interface would mean a
+    client could simply ask nicely; putting it here means the host decides.
+
+D9. THE ENGINE ASKS, THE INTERFACE ANSWERS.  A handler that needs a decision
+    returns a Choice describing it; the interface renders whatever it is given.
+    Adding an effect that needs three decisions needs no UI work at all.
+
+D10. A REFUSED ACTION COSTS NOTHING.  Abilities spend a use only after the plan
+    executes, so a refusal (wrong pawn, not enough gap) leaves the count alone.
+    NotAvailable is deliberately distinct from Refusal: "the rules for this do
+    not exist yet" is a different thing from "you cannot do that".
+
+D11. RANDOMNESS LIVES IN THE EXECUTOR.  Seks z pedałami draws from the seeded
+    RNG in the operation, not in the handler, because a preview must not
+    consume randomness — dragging a card over the board would otherwise change
+    what it does.
+
+D8a. A DOUBLED POSITION IS A DECISION, NOT A LABEL.  The engine refuses the
+    play until the choice arrives, rather than picking a half itself, because
+    which half a pawn stands on decides who is on top of whom in a tower — and
+    towers are how hunters win.  Intermediate positions are chosen
+    automatically (nearer half) since nothing depends on them.
+
+D8. HIDDEN INFORMATION SPLIT EXISTS ALREADY (to_public_dict / to_private_dict)
+    even though nothing uses it yet, because retrofitting it later would mean
+    auditing every send site.
+
+
+================================================================================
+KNOWN LIMITATIONS
+================================================================================
+
+L1. STILL OPEN. A client rebuilds the FULL state from the seed and the command
+    log, so a modified client could read another player's hand. The server now
+    checks *permissions* (whose seat, whose turn) but does not yet filter what
+    it broadcasts. Acceptable for friends on an unmodified build; must be fixed
+    before any public release. ``to_public_dict()`` / ``to_private_dict()`` on
+    Player exist for exactly this and are still unused.
+L1a. The fix is not free: filtering means the server can no longer broadcast one
+    command to everyone, and a client can no longer verify the fingerprint
+    against a state it does not fully have. Expect per-seat views and a
+    per-seat fingerprint.
+L2. FIXED IN STAGE 11 — reconnection works, seats are held for
+    ``reconnect.grace_period`` (180 s), and STATE_SYNC replays the log.
+L3. No "return to lobby" after a match starts; leaving returns that player to
+    the main menu. The others carry on, since the match lives on the server —
+    but there is no way to un-start a room.
+L3d. A player whose grace period expires leaves an EMPTY SEAT: their pawn stays
+    where it is and their turn is skipped by the ordinary turn rules. Nobody
+    takes over their hand. This is the least disruptive behaviour available, not
+    a designed rule.
+L3e. The server keeps the whole command log in memory for as long as a room
+    lives. A very long match on a very small host would grow; nothing prunes it,
+    because pruning would break the replay that reconnection depends on.
+L2a. The Debug Version option is a development aid: it only relaxes the player
+    minimum to two.  A two-player game is playable but not balanced — one hunter
+    against Piotrek is not the game the design document describes.
+L3b. Nothing ends the game yet: the loop will happily run for ever, because win
+    conditions are still unimplemented.
+L3c. A two-player game is playable end to end but not balanced, and its cadence
+    gives the single hunter a whole round of their own.
+L3a. (fixed in stage 8) The turn passes manually (any active player may hand it to anyone) — the
+    cadence in turn_order.py is displayed but not enforced.
+L4. Four movement cards remain inert, each needing a mechanic that does not
+    exist: Troll (forces a card out of a hand), Stańczyk (skips a future turn),
+    Spy (looks at another hand and steals), Plagiat! (its second half makes the
+    player to the left act).  All mods and chest cards are still inert too.
+L4a. Gamechanger, Alter Ego and Kingmaker are PRESENTATION ONLY — they have no
+    gameplay effect yet, as the stage brief specified.
+L4b. Statuses are recorded and shown but not all are enforced: SKIP_TURN and
+    EXTRA_TURN are informational because there is no turn enforcement, and
+    FORBIDDEN_ADJACENCY waits on the checking rules.
+L5. No win detection, no turn enforcement, no scoring.
+L6. Mods and chest cards have no mechanical effect; they are text for humans.
+L7. "hindmost" ties are broken by (position index, stack depth, pawn order).
+    This is deterministic but arbitrary; the paper game would have players
+    decide.
+L7a. A pending 12a/12b choice belongs to whoever is at the keyboard; there is
+    no notion yet of "the table is waiting for player 3". The ChoiceRequired
+    event carries player_index so a future networked build can say so.
+L8. Board generation costs ~30 ms and runs on the main thread at game start.
+    Fine now; would need a splash screen if it grows.
+L9. No sound. No save/load (though the command log makes both easy).
+L10. The right column is sized for its tallest case (Piotrek); a hunter's panel
+    is centred in the leftover space rather than growing to fill it.
+
+
+================================================================================
+PLANNED FUTURE FEATURES
+================================================================================
+
+- Socket transport + lobby (Host / Join) + host-side hidden-info filtering.
+- Cards that need a choice: a target-selection mode where the board asks for a
+  pawn and the chosen pawn goes into PlayCard.target_pawn (the field exists).
+- Chest and mod card effects.
+- Win conditions: Piotrek reaching the finish; hunters checking the bottom of a
+  full tower.
+- Turn enforcement driven by turn_order.py (optional switch, off for testing).
+- Sound and music; external card art.
+- Save / load and replays from the command log.
+- PyInstaller .exe build.
+
+
+================================================================================
+HOW MULTIPLAYER WORKS  (rewritten in stage 11)
+================================================================================
+
+Model: DEDICATED AUTHORITATIVE SERVER + DETERMINISTIC REPLICATION.
+
+WHY THE HOST IS NO LONGER THE SERVER.  A machine behind a home router does not
+accept incoming connections — that is NAT, not a bug — so "one player hosts"
+could only ever work on a LAN or with port forwarding. The requirement was two
+friends in different countries with no router configuration, and the only thing
+that satisfies it is: everybody connects OUTWARDS to a machine with a public
+address. No client-side trick avoids this. The server therefore has to be
+deployed somewhere (docs/SERWER.md); the game ships pointing at localhost.
+
+THE FLOW
+    MainMenuScreen ──► HostSetupScreen ──► LobbyScreen ──► GameScreen
+                   └─► JoinScreen      ──► LobbyScreen ──► GameScreen
+                   └─► local hot-seat  ──► MenuScreen  ──► GameScreen
+
+LAYERS (and they do not leak)
+    ui/  ──►  net/service  ──►  net/client  ──►  net/transport
+                                                       │  WebSocket
+    server/app (asyncio)  ──►  server/hub  ──►  server/room  ──►  engine/
+
+  * net/config.py    every networking number; data/network.json; env overrides
+  * net/protocol.py  message vocabulary + JSON.  WebSockets frame messages, so
+                     there is no line framing any more (LineBuffer is GONE)
+  * net/transport.py Transport ABC, ConnectionState, Loopback, Null
+  * net/websocket.py THE ONLY CLIENT FILE THAT KNOWS A SOCKET EXISTS
+  * net/client.py    GameClient: handshake, lobby mirror, resync, reconnection
+  * net/service.py   HostService / ClientService — all the UI is allowed to see
+  * server/hub.py    routing, identities, resume tokens.  NO asyncio, NO sockets
+  * server/room.py   the authoritative GameState, seats, command log
+  * server/app.py    ~200 lines of asyncio.  NO game rules.
+
+  server/hub, room and registry are SYNCHRONOUS AND FREE OF I/O on purpose:
+  all of multiplayer is testable in milliseconds without a network. Keep it so.
+
+TWO IDENTITIES, AND THEY ARE NOT THE SAME
+  * connection id = one socket.  Dies with the WiFi.
+  * peer id       = one player.  Survives a reconnection.
+  Joined by a RESUME TOKEN minted on the first HELLO. Without this split,
+  "reconnect" can only mean "join again as a stranger" — which is what stage 6
+  did and why a dropped player lost their hand.
+
+LOBBY (net/lobby.py, replicated whole — small, changes rarely)
+  * rooms are found by a six-character CODE from an unambiguous alphabet (no
+    0/O, no 1/I/L: it gets read aloud and typed by someone not looking at it);
+  * a client may *ask* for a nickname or character; the SERVER decides. Taken
+    characters are refused server-side, not merely hidden client-side;
+  * host-only: table settings and Start, both enforced by the server;
+  * if the host drops in the lobby, promote_new_host() hands the role on — a
+    room nobody can start is worse than mild unfairness;
+  * DEBUG VERSION drops the minimum to RULES.debug_min_players (2). Nothing else.
+
+STARTING (Room.start)
+  * the server builds a SessionConfig — CRUCIALLY INCLUDING THE SEED — and
+    broadcasts it with the seat map;
+  * every client then builds the game *itself*. No card ever crosses the wire.
+
+THE COMMAND PIPELINE (Room.submit) — the heart of it
+    seated?  →  authorise_remote(cmd, seat)  →  apply(cmd, local=False)
+       │                    │                         │
+       └── COMMAND_REJECTED ┘                         ├─ ActionRejected  → sender
+                                                      ├─ ChoiceRequired  → sender
+                                                      │    (NOT logged, NOT
+                                                      │     broadcast — nothing
+                                                      │     changed)
+                                                      └─ applied → log + broadcast
+                                                         COMMAND_ACCEPTED with a
+                                                         state FINGERPRINT
+  * clients apply broadcast commands with ``apply(command, local=False)``, which
+    skips local authorisation — re-judging somebody else's legal move against
+    this machine's seat would reject everything and desync;
+  * NO optimistic prediction. A wrong guess would have to be rolled back, and in
+    this game a rollback means having shown a hand that should have stayed
+    hidden. The animation covers the round trip instead.
+
+DESYNC IS SELF-HEALING
+  Every COMMAND_ACCEPTED carries the server's fingerprint. A client whose own
+  fingerprint differs, or which sees a gap in the sequence, asks for STATE_SYNC
+  (rate-limited to once a second) and rebuilds from seed + log. STATE_SYNC is
+  the ONLY message carrying a match's worth of data and is sent twice in a
+  normal game's life: on reconnection, and never otherwise.
+
+DISCONNECTION
+  * every failure is a *state*, not an exception. WebSocketTransport sets
+    ConnectionState and a readable Polish ``error``;
+  * the transport reconnects the SOCKET with exponential backoff; GameClient
+    reconnects the PLAYER by watching ``Transport.generation`` and re-sending
+    HELLO with the resume token;
+  * the game keeps drawing throughout — a banner, not a trip to the menu;
+  * the server holds the seat for reconnect.grace_period, then releases it and
+    the match carries on with an empty seat;
+  * a second connection claiming the same player wins; the older is told why.
+
+CARD UIDS ARE DETERMINISTIC (engine/setup.build_decks). A command names a card
+by uid, so the numbering has to match on every machine. Uids are assigned from
+deck position, not from the process-global counter they default to.
+
+OWNERSHIP AND TURNS (engine/game_state.py) — unchanged by stage 11
+  * ``may_control(seat)``   — edit mode, or your own seat;
+  * ``may_act(seat)``       — edit mode, or it is your turn;
+  * ``authorise_remote(command, seat)`` — what the SERVER runs for incoming
+    commands. ``_OWNED_BY_PLAYER`` and ``_TURN_BOUND`` say which rule covers
+    which command. Private bookkeeping (the colour notepad, renaming, answering
+    the chest limit) is deliberately NOT turn-bound.
+
+DEBUG PANEL (F3, ui/debug_panel.py): server, room code, connection state, ping,
+sent/received counters and last action each way, in-flight actions, sequence
+number, reconnect/resync counts, turn/round, and a SHA-1 fingerprint of the
+snapshot — two machines showing the same fingerprint are in sync.
+
+RUNNING A SERVER
+    python -m pedzacy_piotrek.server               # 0.0.0.0:51337
+    python -m pedzacy_piotrek.server --rooms 20    # many lobbies
+    python run_game.py --serve                     # same, from the game
+  Reads PORT from the environment (every PaaS injects it; ignoring it is the
+  single most common reason a deployment answers nothing). Dockerfile and
+  Procfile are in the repo root. The server does NOT need pygame and there is a
+  test that it imports without it. TLS is terminated by a proxy in front, never
+  here.
+
+================================================================================
+FILES THAT SHOULD NEVER BE REMOVED
+================================================================================
+
+- engine/turn_order.py — the Piotrek-every-third-slot cadence.
+- engine/commands.py, engine/events.py — the whole architecture rests on them.
+- engine/effects.py — the data-driven card behaviour.
+- board/path.py — arc-length parametrisation; without it fields bunch in curves.
+- config/settings.py BoardLayout spacing properties — the overlap fix.
+- players/player.py public/private split — the multiplayer hidden-info seam.
+- net/* — a working, tested networking layer even though the UI is missing.
+- data/*.json — the actual game content.
+- tests/* — the only proof that a refactor preserved behaviour.
+- This file and CHANGELOG_LLM.md.
+
+
+================================================================================
+CODING GUIDELINES
+================================================================================
+
+- Python 3.12, `from __future__ import annotations` at the top of every module.
+- Dataclasses for data; plain classes for behaviour.
+- Type hints everywhere. Keep them accurate.
+- Docstrings explain WHY, not what. If a decision looks odd, the docstring must
+  say what it prevents.
+- Polish for user-facing strings, English for code.
+- No global mutable state except the deliberate feature switches in settings.
+- Never call random.* directly; use an injected random.Random.
+- Never use browser-style shortcuts like magic numbers in ui/ — use Layout.
+- New user actions -> new Command + handler entry in GameState._HANDLERS +
+  a registry entry in COMMAND_REGISTRY + a test.
+- Run `python -m pytest -q` before declaring anything done. Add tests for new
+  behaviour; the suite is the safety net that made two large refactors safe.
+
+
+================================================================================
+THINGS FUTURE LLMS SHOULD NEVER DO
+================================================================================
+
+N1. Never rewrite the project from scratch or "modernise" the architecture.
+N2. Never import pygame into engine/ or put rules into render/ or ui/.
+N3. Never mutate GameState from the UI. Add a Command.
+N4. Never remove or simplify existing mechanics: the turn cadence, the two-slot
+    mod rack push/overflow, the stacking/tower rule, the colour notepad, the
+    manual round counter, renaming, free pawn dragging.
+N5. Never relax the board spacing checks to make a board look curvier.
+N6. Never replace the seeded RNG with global random.
+N7. Never infer card behaviour from card titles (the prototype did; it broke as
+    soon as a card was renamed).
+N8. Never hard-code screen coordinates; go through Layout.
+N9. Never implement multiplayer by broadcasting whole game states.
+N10. Never leave "implement later" stubs. Either build it properly or leave it
+     out and record it here under KNOWN LIMITATIONS.
+N11. Never add libraries beyond pygame without a strong reason; the project
+     must stay easy to package as a single .exe.
+N12. Do not delete tests to make a change pass.
+N13. Never number board fields sequentially again (1,2,3,...) — 12a/12b share a
+     number on purpose, and movement counts positions, not fields.
+N14. Never let a doubled destination pick its own half "to keep things simple".
+N15. Never rebuild SessionConfig field by field (use dataclasses.replace); the
+     old create_game did and silently dropped a setting between menu and board.
+N16. Never write `if card.title == "..."` or an if/else chain over effect names
+     outside the handler registry. That is the thing this architecture exists
+     to prevent.
+N17. Never parse gameplay numbers out of card descriptions ("2x", "dwa pola").
+     Descriptions are for humans; add a structured field instead.
+N18. Never add a boolean flag to GameState for a new mechanic — add a
+     StatusKind, so expiry, display and serialisation come for free.
+N19. Never spend a use, a card or a status before the plan has executed.
+N20. Never build a bespoke selection interface for one card.  Return a Choice
+     and let ChoicePrompt draw it.
+N21. Never let a card that was revealed or played stay in the draw pile — the
+     random reveal forgot to discard it and could turn the same card up twice.
+N22. Never gate "who may act" in the interface alone; use may_control() and
+     may_act(); the host must be able to refuse.
+N23. Never synchronise game state during a match. Actions only. STATE_SYNC
+     exists for reconnection and nothing else — if you reach for it during
+     normal play, the design has gone wrong. The seed plus
+     the command log is the state.
+N24. Never re-authorise a command that arrived from the network — apply it with
+     local=False. Re-judging it against the local seat desyncs instantly.
+N25. Never trust ``player_index`` in a message; the SERVER maps peer → seat.
+N26. Never import pygame into net/ or server/. The only client file allowed to
+     know a socket exists is net/websocket.py; on the server it is
+     server/app.py. server/hub.py, room.py and registry.py must stay
+     synchronous and I/O-free — that is what makes multiplayer testable.
+N27. Never let a network failure raise into the game loop; turn it into a state
+     and a readable message.
+N28. Never read typed characters from KEYDOWN.unicode — TEXTINPUT only.
+N29. Never place a menu element at a fraction of the window height; measure the
+     fonts and lay the screen out in one pass.
+N30. Never ship the Debug Version option enabled by default; it is a testing
+     aid and the real game needs RULES.min_players.
+N31. Never draw a player's hand from ``state.active_player``.  Use the screen's
+     ``view_seat`` / ``ctx.player``, or every client shows the host's cards.
+N32. Never match players by name against ``hunter_names`` or ``piotrek_name``:
+     those are CHARACTER titles.  Work in seats.
+N33. Never scale a rasterised card, panel or glyph up.  Repaint it at the size
+     it will be seen (``quantised``), or it will look like a stretched
+     screenshot — which is what the whole of stage 9 was spent undoing.
+N34. Never quote a new pixel size without ``ui_scale`` or a measured font.
+N34a. Never write a literal colour outside ``config/theme.py``.  Add a named
+     field instead — the style test counts the offenders.
+N34b. Never draw a plain rectangle where content lives; ``premium_panel`` and
+     ``inset_well`` are what make the interface look built rather than sketched.
+N35. Never widen a side column by hand; make its contents smaller or let
+     ``_fit_*_column`` do it.  Every pixel a column takes is one the board loses.
+N36. Never make the engine wait for an animation.  Apply the state change and
+     let the view catch up, or two machines will disagree at different frame
+     rates.
+
+N37. Never make the host authoritative again. Every player is a client; a
+     machine behind NAT cannot accept incoming connections, so a peer-hosted
+     game can never work across the internet. The host's only privileges are
+     the Start button and the table settings, and the SERVER enforces both.
+N38. Never hard-code a networking value. Address, port, timeout, heartbeat,
+     backoff, grace period, TLS — all of it lives in net/config.py and
+     data/network.json. Read PORT from the environment or hosting breaks.
+N39. Never block the game loop on the network. ``poll()`` returns immediately,
+     connecting happens in a background thread, and a failure is a state with a
+     Polish message — never an exception and never a wait.
+N40. Never log or broadcast a command that produced only a ChoiceRequired. It
+     changed nothing, so replaying it puts a modal on every screen asking a
+     question one player can answer. Send CHOICE_REQUIRED to the asker alone.
+N41. Never renumber seats once a match has started. The seat index is baked
+     into every command already in the log; renumbering rewrites history.
+N42. Never apply a command optimistically on a client. There is no rollback,
+     and in this game rolling back means having shown hidden information.
+N43. Never give a dataclass event a field that collides with a GameEvent
+     property (``name``). It generates an __init__ that assigns over the
+     property and every use of that event fails at runtime — this shipped
+     broken in PlayerRenamed and nothing caught it for four stages.
+N44. Never draw a highlight that does not follow the shape of what it
+     highlights. No ``glow(centre, radius * 2.4, ...)`` discs: rectangles get
+     ``shape_glow``, round things get ``ring_glow``, and both take the
+     component's OWN geometry. A test greps for the old call and fails.
+N45. Never write a control's hover colours by hand. Ask
+     ``render/highlight.emphasis()`` and draw with ``interactive_panel``, or
+     the interface goes back to having five slightly different hovers.
+N46. Never quote a button's width or height. Call ``Button.fit`` (or
+     ``fit_buttons`` for a group) and let the caption decide. A hard-coded
+     320 px clipped "Gra lokalna (hot-seat)" at 1440p, and the same mistake in
+     the right column clipped "UŻYJ UMIEJĘTNOŚCI (1/1)" by 41 px.
+N47. Never size a control that swaps captions to the caption showing at layout
+     time. Measure the longest one it can hold.
+
+
+================================================================================
+RECOMMENDED ORDER OF FUTURE DEVELOPMENT
+================================================================================
+
+0. NEXT: hidden-information filtering (L1) is now the biggest remaining gap and
+   the last thing between this and a public release. It is a server-side change
+   (server/room.py broadcast), and it is not free — see L1a.
+
+0b. NOTE: two settings have now been silently dropped by config rebuilding
+   (double_frequency, edit_mode).  Both normalised() and create_game() use
+   dataclasses.replace now, and a test walks every field — keep it that way.
+
+1. THE CHECKING MECHANIC. Several abilities are built and waiting on it
+   (Glockboy, Ice Block, and Ondrej's link already marks both pawns). It is
+   also what makes the game finishable.
+2. Effects for the remaining movement, mod and chest cards. Most are now a JSON
+   entry plus at most one handler: "move all pawns", "swap mods", "steal a
+   card". Check whether an existing effect type already covers it first.
+3. Server-side hidden-information filtering (L1). Transport, lobby and online
+   play are DONE (stage 11).
+4. Chest and mod effects (they interact with movement, so do them after 1–2).
+5. Turn enforcement as an optional rule switch.
+6. Sound, music, card art.
+7. Save / load / replay from the command log.
+8. PyInstaller packaging.
+
+Networking is no longer a blocker for anything: the protocol carries commands
+by name, so a new card or effect needs no networking work at all.
+
+
+================================================================================
+HOW TO VERIFY A CHANGE
+================================================================================
+
+    python -m pytest -q                     # 450 tests, ~115 s
+      tests/test_visual_style.py     — palette, panel bevels, button states,
+                                       and (stage 12) that no highlight is a
+                                       disc, that a bloom stays near its edge,
+                                       and that every button holds its caption
+      tests/test_rendering_quality.py — sharpness, type scaling, board share
+      tests/test_multiplayer.py  — rooms, seats, authority, reconnection, sync;
+                                   one test over REAL WebSockets on a real port
+      tests/test_session.py      — config, protocol, transports, sessions
+      tests/test_network_ui.py   — menus, lobby screen, in-match ownership
+      tests/netkit.py            — the harness: InProcessServer + services
+      tests/test_menu_layout.py  — text overlap at four resolutions, text entry
+    python -m pedzacy_piotrek --selftest    # renders frames headlessly
+    python tools/inspect_frame.py --window 2560x1440
+                                            # per-region paint + overlap report
+    python tools/screenshot.py --cells 30   # writes shots/ui.png, shots/board.png
+
+inspect_frame.py exits non-zero if a region is empty, overlapping or off-screen.
+It is the fastest way to catch a layout regression without looking at a picture.
+Run it at 1280×760 AND at 3840×2160: nearly every text-fitting bug this project
+has had showed up only at one end of that range.
+
+For a UI stage, also drive every screen and overlay with the cursor on every
+control (Main Menu, Host, Join, Setup with a dropdown open, Gameplay, both
+choice prompts, chest, reveal, pause, debug panel). Stage 12 did this at five
+resolutions; it is what proves a hover change did not break a screen nobody
+thought about.
+
+
+================================================================================
+HOW FUTURE PROMPTS SHOULD EXTEND THE PROJECT
+================================================================================
+
+A good prompt for this project:
+- names the stage goal and what is explicitly OUT of scope;
+- says which existing behaviour must be preserved;
+- asks for complete code, no placeholders;
+- asks for this file and CHANGELOG_LLM.md to be updated at the end.
+
+A model working on this project should:
+- read this file, then the modules it is about to touch (not the whole tree);
+- prefer extending the Command/Event vocabulary over adding side channels;
+- add tests alongside the feature;
+- update KNOWN LIMITATIONS honestly rather than claiming completeness;
+- append a new stage section to CHANGELOG_LLM.md and refresh the "CURRENT
+  IMPLEMENTATION" and "RECOMMENDED ORDER" sections here.

@@ -1,0 +1,2 @@
+pygame>=2.5,<3
+websockets>=13      # WebSocket transport for the client and the game server

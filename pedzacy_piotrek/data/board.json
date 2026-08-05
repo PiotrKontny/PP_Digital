@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "themes": [
+    {
+      "id": "forest",
+      "name": "Leśny Trakt",
+      "description": "Kręta droga przez las, rzeki z mostami, wioski przy rozstajach.",
+      "row_pattern": ["single", "double", "single", "single", "double", "single"],
+      "wave_length": 900.0,
+      "wave_amplitude": 300.0,
+      "wave_jitter": 0.22,
+      "rivers": {"min": 1, "max": 3, "width": 46.0},
+      "decor": {
+        "forest_clusters": 26,
+        "trees_per_cluster": [4, 11],
+        "rocks": 34,
+        "villages": 3,
+        "huts_per_village": [3, 5],
+        "grass_tufts": 220,
+        "hills": 9,
+        "road_clearance": 62.0
+      }
+    }
+  ],
+  "default_theme": "forest"
+}

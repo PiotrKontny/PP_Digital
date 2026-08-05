@@ -1,0 +1,333 @@
+"""
+Events — what the engine announces after something happened.
+
+The rendering layer never asks the state "did anything change?"; it is told.
+That is what makes animations, sounds and (later) network broadcasts possible
+without sprinkling calls to the renderer through the rules code: the engine
+emits ``TokenMoved`` and *something else* decides whether that means a tween,
+a puff of dust, a sound effect, or a packet.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Callable, DefaultDict, Dict, List, Optional, Tuple, Type
+
+
+@dataclass
+class GameEvent:
+    """Base class for everything the engine reports."""
+
+    @property
+    def name(self) -> str:
+        return type(self).__name__
+
+
+# ── card flow ────────────────────────────────────────────────────────────────
+@dataclass
+class CardDrawn(GameEvent):
+    player_index: int
+    deck_id: str
+    card_uid: int
+
+
+@dataclass
+class CardDiscarded(GameEvent):
+    player_index: int
+    deck_id: str
+    card_uid: int
+
+
+@dataclass
+class CardPlayed(GameEvent):
+    """A card was played and its effect carried out.
+
+    Carries enough to animate and to fill the 'ostatnio zagrane' strip without
+    the listener having to look anything up.
+    """
+
+    player_index: int
+    deck_id: str
+    card_uid: int
+    title: str
+    description: str = ""
+
+
+@dataclass
+class DeckReshuffled(GameEvent):
+    deck_id: str
+
+
+@dataclass
+class ModPlaced(GameEvent):
+    player_index: int
+    slot: int
+    card_uid: int
+    displaced_uid: Optional[int] = None
+
+
+@dataclass
+class ModDiscarded(GameEvent):
+    slot: int
+    card_uid: int
+
+
+@dataclass
+class CharacterChanged(GameEvent):
+    player_index: int
+    title: Optional[str]
+
+
+@dataclass
+class SkillChanged(GameEvent):
+    player_index: int
+    title: Optional[str]
+
+
+# ── board ────────────────────────────────────────────────────────────────────
+@dataclass
+class TokenMoved(GameEvent):
+    pawn_id: str
+    from_position: tuple[float, float]
+    to_position: tuple[float, float]
+    tile_index: Optional[int]
+    carried: List[str] = field(default_factory=list)
+    snapped: bool = False
+
+
+@dataclass
+class TokenWalked(GameEvent):
+    """A pawn travelled along the road, field by field.
+
+    ``waypoints`` are world positions in visiting order, so the view can walk
+    the pawn through every space instead of teleporting it.  ``carried`` are the
+    pawns riding on top, which follow the same waypoints.
+    """
+
+    pawn_id: str
+    from_index: int
+    #: Board positions visited, in order (a doubled position counts once).
+    route: List[int] = field(default_factory=list)
+    #: The concrete field visited at each of those positions.
+    tiles: List[int] = field(default_factory=list)
+    waypoints: List[tuple[float, float]] = field(default_factory=list)
+    carried: List[str] = field(default_factory=list)
+    backward: bool = False
+
+
+@dataclass
+class ChoiceRequired(GameEvent):
+    """An action is waiting for a decision: which pawn, which field, how far.
+
+    Emitted so the interface can put itself into choice mode from the event
+    stream rather than from the click that caused it — which is what will let a
+    spectator or a future remote client see that the table is waiting.
+
+    ``key`` is where the answer belongs in the action's ``choices`` map and
+    ``kind`` says what is being picked ("pawn", "tile" or "option"), so one
+    modal handles every effect that ever needs to ask something.
+    """
+
+    player_index: int
+    key: str
+    kind: str
+    prompt: str
+    #: (id, label) pairs — ids go straight back into ``choices``.
+    options: List[tuple] = field(default_factory=list)
+    #: Board fields to highlight, when the decision is about fields.
+    tiles: List[int] = field(default_factory=list)
+    #: Pawns to highlight, when the decision is about pawns.
+    pawns: List[str] = field(default_factory=list)
+    #: The action that is waiting, so the interface can resubmit it.
+    card_uid: Optional[int] = None
+    ability_source: Optional[str] = None
+    answered: Dict[str, str] = field(default_factory=dict)
+    description: str = ""
+
+
+@dataclass
+class StatusGranted(GameEvent):
+    """A persistent gameplay state started."""
+
+    kind: str
+    subject: str
+    subject_id: str
+    label: str
+    source: str = ""
+    expires_after_turn: Optional[int] = None
+
+
+@dataclass
+class StatusEnded(GameEvent):
+    kind: str
+    subject: str
+    subject_id: str
+    label: str = ""
+
+
+@dataclass
+class AbilityUsed(GameEvent):
+    """A character ability or Piotrek skill was activated."""
+
+    player_index: int
+    title: str
+    description: str
+    uses_left: Optional[int] = None
+    source: str = "character"
+
+
+@dataclass
+class AbilityUnavailable(GameEvent):
+    """An ability exists but the rules it needs do not."""
+
+    player_index: int
+    title: str
+    reason: str
+
+
+@dataclass
+class CardRevealed(GameEvent):
+    """A card was turned face up by another card (Seks z pedałami).
+
+    ``announce_seconds`` is how long the interface should dwell on the card
+    that caused it before showing this one.
+    """
+
+    player_index: int
+    deck_id: str
+    card_uid: int
+    title: str
+    text: str = ""
+    announce_seconds: float = 2.0
+
+
+@dataclass
+class CardTransformed(GameEvent):
+    """A drawn card becomes something else on its way to the hand (Gamechanger).
+
+    The interface plays the reveal; the card that lands in the hand is the one
+    named by ``title``.
+    """
+
+    player_index: int
+    card_uid: int
+    from_title: str
+    to_title: str
+    to_text: str
+    intro_text: str = ""
+    delay: float = 1.0
+
+
+@dataclass
+class ChestCardAwarded(GameEvent):
+    """A chest card was handed out automatically at the start of a round."""
+
+    player_index: int
+    card_uid: int
+    round_number: int
+
+
+@dataclass
+class ChestLimitReached(GameEvent):
+    """More chest cards than the player may hold: they must choose.
+
+    Carries every candidate so the interface can lay them out side by side.
+    """
+
+    player_index: int
+    limit: int
+    card_uids: List[int] = field(default_factory=list)
+    new_card_uid: Optional[int] = None
+
+
+@dataclass
+class TokenPickedUp(GameEvent):
+    pawn_id: str
+
+
+# ── flow ─────────────────────────────────────────────────────────────────────
+@dataclass
+class RoundChanged(GameEvent):
+    round_number: int
+
+
+@dataclass
+class ActivePlayerChanged(GameEvent):
+    player_index: int
+
+
+@dataclass
+class PlayerRenamed(GameEvent):
+    """A player changed their display name.
+
+    The field is ``new_name`` and not ``name`` because ``GameEvent.name`` is a
+    read-only property giving the event's class name.  A dataclass field called
+    ``name`` generates an ``__init__`` that assigns straight over it, so every
+    rename raised ``property 'name' has no setter`` and came back as a refusal.
+    Nothing caught it because renaming was the one player action with no test.
+    """
+
+    player_index: int
+    new_name: str
+
+
+@dataclass
+class MarkToggled(GameEvent):
+    player_index: int
+    pawn_id: str
+    marked: bool
+
+
+@dataclass
+class ActionRejected(GameEvent):
+    """A command could not be applied.  Carries a message fit for the status bar."""
+
+    reason: str
+    command: str = ""
+
+
+Listener = Callable[[GameEvent], None]
+
+
+class EventBus:
+    """Minimal synchronous pub/sub.
+
+    Subscribe to a concrete event class for targeted handling, or to
+    :class:`GameEvent` to receive everything (the network layer does that).
+    """
+
+    def __init__(self) -> None:
+        self._listeners: DefaultDict[Type[GameEvent], List[Listener]] = defaultdict(list)
+        self._history: List[GameEvent] = []
+        self.history_limit = 200
+
+    def subscribe(self, event_type: Type[GameEvent], listener: Listener) -> Callable[[], None]:
+        self._listeners[event_type].append(listener)
+
+        def unsubscribe() -> None:
+            if listener in self._listeners[event_type]:
+                self._listeners[event_type].remove(listener)
+
+        return unsubscribe
+
+    def emit(self, event: GameEvent) -> None:
+        self._history.append(event)
+        if len(self._history) > self.history_limit:
+            del self._history[: len(self._history) - self.history_limit]
+        for event_type, listeners in self._listeners.items():
+            if isinstance(event, event_type):
+                for listener in list(listeners):
+                    listener(event)
+
+    def emit_all(self, events: List[GameEvent]) -> None:
+        for event in events:
+            self.emit(event)
+
+    @property
+    def history(self) -> List[GameEvent]:
+        return list(self._history)
+
+    def clear(self) -> None:
+        self._listeners.clear()
+        self._history.clear()

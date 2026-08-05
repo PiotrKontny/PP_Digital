@@ -1,0 +1,30 @@
+{
+  "server_url": "ws://127.0.0.1:51337",
+  "public_server_url": "",
+  "connect_timeout": 8.0,
+  "action_timeout": 10.0,
+  "reconnect": {
+    "enabled": true,
+    "max_attempts": 0,
+    "initial_delay": 0.5,
+    "max_delay": 8.0,
+    "backoff": 1.8,
+    "grace_period": 180.0
+  },
+  "heartbeat": {
+    "interval": 5.0,
+    "timeout": 20.0
+  },
+  "tls": {
+    "verify": true,
+    "ca_file": null
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 51337,
+    "room_idle_timeout": 900.0,
+    "max_message_bytes": 1048576,
+    "max_rooms": 1,
+    "verbose": false
+  }
+}

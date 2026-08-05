@@ -1,0 +1,215 @@
+{
+  "schema": 1,
+  "pawns": [
+    {
+      "id": "czerwony",
+      "name": "czerwony",
+      "color": [
+        220,
+        55,
+        55
+      ]
+    },
+    {
+      "id": "zielony",
+      "name": "zielony",
+      "color": [
+        55,
+        175,
+        85
+      ]
+    },
+    {
+      "id": "niebieski",
+      "name": "niebieski",
+      "color": [
+        55,
+        125,
+        220
+      ]
+    },
+    {
+      "id": "żółty",
+      "name": "żółty",
+      "color": [
+        255,
+        255,
+        0
+      ]
+    },
+    {
+      "id": "różowy",
+      "name": "różowy",
+      "color": [
+        230,
+        90,
+        165
+      ]
+    },
+    {
+      "id": "pomarańczowy",
+      "name": "pomarańczowy",
+      "color": [
+        255,
+        120,
+        0
+      ]
+    }
+  ],
+  "decks": [
+    {
+      "id": "characters",
+      "name": "Karty Postaci",
+      "cards": [
+        {
+          "title": "Big D Randy",
+          "skill": "Granny Costume",
+          "text": "Freezuje wybrany pionek na pełną turę. Pionek musi stać samotnie. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "freeze_pawn",
+            "target": "choice",
+            "require_alone": true,
+            "duration_turns": 1
+          }
+        },
+        {
+          "title": "Lubin",
+          "skill": "Jazdy",
+          "text": "Freezuje Piotrka na jedną turę. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "freeze_player",
+            "target": "piotrek",
+            "duration_turns": 1
+          }
+        },
+        {
+          "title": "Mitoman",
+          "skill": "PAA",
+          "text": "Przenosi pionka najbardziej do przodu do pionka najbardziej do tyłu. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "stack_pawn",
+            "source": "foremost",
+            "destination": "hindmost"
+          }
+        },
+        {
+          "title": "Glockboy",
+          "skill": "Where are you Marcus?",
+          "text": "Sprawdza dowolnego pionka. Jeżeli nie trafi, odpada z gry. Co najmniej 3 pionki muszą być sprawdzone. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "check_pawn",
+            "target": "choice",
+            "min_checked": 3
+          }
+        },
+        {
+          "title": "Norbur",
+          "skill": "Plac",
+          "text": "Pionki mogą poruszać się tylko pomiędzy najdalszym i najbliższym pionkiem na jedną turę. Minimum 3 pola różnicy. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "restrict_movement",
+            "min_gap": 3,
+            "duration_turns": 1
+          }
+        },
+        {
+          "title": "Dziad",
+          "skill": "Skrypt",
+          "text": "Przesuwa wybranego pionka o dwa lub jedno pole, do przodu lub do tyłu. 2x",
+          "uses": 2,
+          "ability": {
+            "type": "move_pawn",
+            "target": "choice",
+            "step_options": [
+              1,
+              2
+            ],
+            "direction": "either"
+          }
+        },
+        {
+          "title": "Ondrej",
+          "skill": "Radar",
+          "text": "Skleja 2 pionki ze sobą na pełną turę. Przy checku oba pionki są sprawdzane. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "link_pawns",
+            "count": 2,
+            "duration_turns": 1
+          }
+        },
+        {
+          "title": "Dziubdziuch",
+          "skill": "Przerwanie Systemowe",
+          "text": "Blokuje ruch Piotrka w dowolnym momencie rozgrywki, spala użytą kartę. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "freeze_player",
+            "target": "piotrek",
+            "duration_turns": 1,
+            "burn_card": true
+          }
+        },
+        {
+          "title": "Atencjusz",
+          "skill": "Liskowy Konkurs",
+          "text": "Przyznaje sobie ruch po zakończeniu ruchu dowolnej osoby, w tym samego siebie. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "grant_extra_turn",
+            "target": "self"
+          }
+        },
+        {
+          "title": "Piotrek",
+          "skill": null,
+          "text": "Posiada jedną z umiejętności, którą losuje na początku gry z osobnej talii",
+          "role": "piotrek"
+        }
+      ]
+    },
+    {
+      "id": "piotrek_skills",
+      "name": "Umiejętności Piotrka",
+      "cards": [
+        {
+          "title": "ChatGPT",
+          "text": "Może zwiększyć zasięg każdej karty ruchu o jedno pole. Posiada dwie karty ruchu mniej. 5x",
+          "uses": 5,
+          "ability": {
+            "type": "movement_bonus",
+            "amount": 1,
+            "scope": "next_movement_card"
+          },
+          "passive": {
+            "movement_cards_delta": -2,
+            "chest_limit": 1
+          }
+        },
+        {
+          "title": "Ice Block",
+          "text": "Może odmówić sprawdzenia. Pionki muszą być rozdzielone przed kolejnym sprawdzeniem. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "refuse_check"
+          }
+        },
+        {
+          "title": "Dług u Tomasza",
+          "text": "Wybiera dwa pionki, które nie mogą ze sobą sąsiadować przez pełną turę. 1x",
+          "uses": 1,
+          "ability": {
+            "type": "forbid_adjacency",
+            "count": 2,
+            "duration_turns": 1
+          }
+        }
+      ]
+    }
+  ]
+}

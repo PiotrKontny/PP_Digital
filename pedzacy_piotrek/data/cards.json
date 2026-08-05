@@ -1,0 +1,541 @@
+{
+  "schema": 1,
+  "decks": [
+    {
+      "id": "movement",
+      "name": "Karty Ruchu",
+      "cards": [
+        {
+          "title": "Troll",
+          "text": "Od razu po dobraniu wymusza użycia losowej karty ze Skrzyni z ręki. Jeśli gracz nie posiada takiej karty to grana jest losowa karta ruchu",
+          "count": 2
+        },
+        {
+          "title": "Janek",
+          "text": "Porusz wybrany pionek bezpośrednio na różowy pionek",
+          "count": 1,
+          "effect": {
+            "type": "stack_pawn",
+            "source": "choice",
+            "destination": "różowy"
+          }
+        },
+        {
+          "title": "Stańczyk",
+          "text": "Kiedy dobierzesz tą kartę ruch w twojej następnej turze jest pominięty. Karta od razu odrzucana",
+          "count": 1
+        },
+        {
+          "title": "Spy",
+          "text": "Przejrzyj karty przeciwnika, wybierz kartę do zabrania",
+          "count": 1
+        },
+        {
+          "title": "Thunderfuck",
+          "text": "Dobierz nowy Mod Patusa",
+          "count": 1,
+          "effect": {
+            "type": "draw_into_mods",
+            "deck": "mods"
+          }
+        },
+        {
+          "title": "Seks z pedałami",
+          "text": "Daj Piotrkowi Kontnemu buziaka",
+          "count": 1,
+          "effect": {
+            "type": "random_movement_card",
+            "announce_seconds": 2.0
+          }
+        },
+        {
+          "title": "Przepis",
+          "text": "Porusz pionek najbardziej z tyłu jedno pole do przodu",
+          "count": 5,
+          "badge": {
+            "pawn": "rainbow",
+            "arrow": true,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "hindmost",
+            "steps": 1,
+            "direction": "forward"
+          }
+        },
+        {
+          "title": "Obniżenie progu",
+          "text": "Porusz pionek najbardziej z tyłu dwa pola do przodu",
+          "count": 2,
+          "badge": {
+            "pawn": "rainbow",
+            "arrow": true,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "hindmost",
+            "steps": 2,
+            "direction": "forward"
+          }
+        },
+        {
+          "title": "Plagiat!",
+          "text": "Porusz wybrany pionek jedno pole do tyłu, gracz po lewej porusza innego pionka jedno pole do tyłu",
+          "count": 2,
+          "badge": {
+            "pawn": "rainbow",
+            "arrow": false,
+            "sign": "-"
+          }
+        },
+        {
+          "title": "Kolos z paki",
+          "text": "Porusz wybrany pionek jedno pole do przodu",
+          "count": 3,
+          "badge": {
+            "pawn": "rainbow",
+            "arrow": false,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "choice",
+            "steps": 1,
+            "direction": "forward"
+          }
+        },
+        {
+          "title": "Astral 2019",
+          "text": "Porusz wybrany pionek dwa pola do przodu",
+          "count": 2,
+          "badge": {
+            "pawn": "rainbow",
+            "arrow": false,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "choice",
+            "steps": 2,
+            "direction": "forward"
+          }
+        },
+        {
+          "title": "Astral 2022",
+          "text": "Porusz wybrany pionek dwa pola do tyłu",
+          "count": 1,
+          "badge": {
+            "pawn": "rainbow",
+            "arrow": false,
+            "sign": "--"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "choice",
+            "steps": 2,
+            "direction": "backward"
+          }
+        },
+        {
+          "title": "Zerówka - czerwony",
+          "text": "Porusz czerwony pionek jedno pole do przodu",
+          "count": 5,
+          "badge": {
+            "pawn": "czerwony",
+            "arrow": false,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "forward",
+            "pawn": "czerwony"
+          }
+        },
+        {
+          "title": "Zerówka - zielony",
+          "text": "Porusz zielony pionek jedno pole do przodu",
+          "count": 5,
+          "badge": {
+            "pawn": "zielony",
+            "arrow": false,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "forward",
+            "pawn": "zielony"
+          }
+        },
+        {
+          "title": "Zerówka - żółty",
+          "text": "Porusz żółty pionek jedno pole do przodu",
+          "count": 5,
+          "badge": {
+            "pawn": "żółty",
+            "arrow": false,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "forward",
+            "pawn": "żółty"
+          }
+        },
+        {
+          "title": "Zerówka - niebieski",
+          "text": "Porusz niebieski pionek jedno pole do przodu",
+          "count": 5,
+          "badge": {
+            "pawn": "niebieski",
+            "arrow": false,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "forward",
+            "pawn": "niebieski"
+          }
+        },
+        {
+          "title": "Zerówka - różowy",
+          "text": "Porusz różowy pionek jedno pole do przodu",
+          "count": 5,
+          "badge": {
+            "pawn": "różowy",
+            "arrow": false,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "forward",
+            "pawn": "różowy"
+          }
+        },
+        {
+          "title": "Zerówka - pomarańczowy",
+          "text": "Porusz pomarańczowy pionek jedno pole do przodu",
+          "count": 5,
+          "badge": {
+            "pawn": "pomarańczowy",
+            "arrow": false,
+            "sign": "+"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "forward",
+            "pawn": "pomarańczowy"
+          }
+        },
+        {
+          "title": "Fillerski przedmiot - czerwony",
+          "text": "Porusz czerwony pionek dwa pola do przodu",
+          "count": 1,
+          "badge": {
+            "pawn": "czerwony",
+            "arrow": false,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 2,
+            "direction": "forward",
+            "pawn": "czerwony"
+          }
+        },
+        {
+          "title": "Fillerski przedmiot - zielony",
+          "text": "Porusz zielony pionek dwa pola do przodu",
+          "count": 1,
+          "badge": {
+            "pawn": "zielony",
+            "arrow": false,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 2,
+            "direction": "forward",
+            "pawn": "zielony"
+          }
+        },
+        {
+          "title": "Fillerski przedmiot - żółty",
+          "text": "Porusz żółty pionek dwa pola do przodu",
+          "count": 1,
+          "badge": {
+            "pawn": "żółty",
+            "arrow": false,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 2,
+            "direction": "forward",
+            "pawn": "żółty"
+          }
+        },
+        {
+          "title": "Fillerski przedmiot - niebieski",
+          "text": "Porusz niebieski pionek dwa pola do przodu",
+          "count": 1,
+          "badge": {
+            "pawn": "niebieski",
+            "arrow": false,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 2,
+            "direction": "forward",
+            "pawn": "niebieski"
+          }
+        },
+        {
+          "title": "Fillerski przedmiot - różowy",
+          "text": "Porusz różowy pionek dwa pola do przodu",
+          "count": 1,
+          "badge": {
+            "pawn": "różowy",
+            "arrow": false,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 2,
+            "direction": "forward",
+            "pawn": "różowy"
+          }
+        },
+        {
+          "title": "Fillerski przedmiot - pomarańczowy",
+          "text": "Porusz pomarańczowy pionek dwa pola do przodu",
+          "count": 1,
+          "badge": {
+            "pawn": "pomarańczowy",
+            "arrow": false,
+            "sign": "++"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 2,
+            "direction": "forward",
+            "pawn": "pomarańczowy"
+          }
+        },
+        {
+          "title": "Wejściówka - czerwony",
+          "text": "Porusz czerwony pionek jedno pole do tyłu",
+          "count": 2,
+          "badge": {
+            "pawn": "czerwony",
+            "arrow": false,
+            "sign": "-"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "backward",
+            "pawn": "czerwony"
+          }
+        },
+        {
+          "title": "Wejściówka - zielony",
+          "text": "Porusz zielony pionek jedno pole do tyłu",
+          "count": 2,
+          "badge": {
+            "pawn": "zielony",
+            "arrow": false,
+            "sign": "-"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "backward",
+            "pawn": "zielony"
+          }
+        },
+        {
+          "title": "Wejściówka - żółty",
+          "text": "Porusz żółty pionek jedno pole do tyłu",
+          "count": 2,
+          "badge": {
+            "pawn": "żółty",
+            "arrow": false,
+            "sign": "-"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "backward",
+            "pawn": "żółty"
+          }
+        },
+        {
+          "title": "Wejściówka - niebieski",
+          "text": "Porusz niebieski pionek jedno pole do tyłu",
+          "count": 2,
+          "badge": {
+            "pawn": "niebieski",
+            "arrow": false,
+            "sign": "-"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "backward",
+            "pawn": "niebieski"
+          }
+        },
+        {
+          "title": "Wejściówka - różowy",
+          "text": "Porusz różowy pionek jedno pole do tyłu",
+          "count": 2,
+          "badge": {
+            "pawn": "różowy",
+            "arrow": false,
+            "sign": "-"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "backward",
+            "pawn": "różowy"
+          }
+        },
+        {
+          "title": "Wejściówka - pomarańczowy",
+          "text": "Porusz pomarańczowy pionek jedno pole do tyłu",
+          "count": 2,
+          "badge": {
+            "pawn": "pomarańczowy",
+            "arrow": false,
+            "sign": "-"
+          },
+          "effect": {
+            "type": "move_pawn",
+            "target": "fixed",
+            "steps": 1,
+            "direction": "backward",
+            "pawn": "pomarańczowy"
+          }
+        }
+      ]
+    },
+    {
+      "id": "mods",
+      "name": "Mody Patusa",
+      "cards": [
+        {
+          "title": "Speedrun",
+          "text": "Każda karta ruchu cofająca pionki może być odwrócona."
+        },
+        {
+          "title": "Masa solna",
+          "text": "Wszystkie karty ruchu poruszają tylko o jedno pole"
+        },
+        {
+          "title": "AKO",
+          "text": "Wszystkie ruchy poruszają jednego sąsiadującego pionka."
+        },
+        {
+          "title": "Halloween",
+          "text": "Pionki bez sąsiadów nie mogą się poruszać"
+        },
+        {
+          "title": "Sesja na PG",
+          "text": "Umiejętności postaci nie mogą być używane"
+        },
+        {
+          "title": "Paczka",
+          "text": "wszystkie karty ze Skrzyni są odkryte"
+        },
+        {
+          "title": "Squid Game",
+          "text": "Pionek najbardziej z przodu jest sprawdzany raz na rundę. Nie ma innego sposobu na sprawdzenie"
+        },
+        {
+          "title": "Shady",
+          "text": "Pionek najbardziej z przodu znika z mapy na pełną rundę. Jest dodawany do pionka najbardziej z tyłu"
+        }
+      ]
+    },
+    {
+      "id": "chest",
+      "name": "Karty Skrzyni",
+      "cards": [
+        {
+          "title": "Dzieckorolka",
+          "text": "Porusz pionka o trzy do przodu. Pionki stojące po drodze są zabierane (1 na pole)"
+        },
+        {
+          "title": "Rage Quit",
+          "text": "Wymień wszystkie aktywne Mody Patusa na losowe z talii"
+        },
+        {
+          "title": "Balbinka",
+          "text": "Porusz wszystkie pionki o dwa pola do przodu lub do tyłu"
+        },
+        {
+          "title": "Nie masz Rosji",
+          "text": "Zablokuj i spal dowolny ruch przeciwnika"
+        },
+        {
+          "title": "Gambit Patusa",
+          "text": "Odwróć kierunek wszystkich kart ruchu na pełną rundę"
+        },
+        {
+          "title": "Shady",
+          "text": "Odbierz innemu graczowi specjalną kartę"
+        },
+        {
+          "title": "Gejtos",
+          "text": "Wybierz pole: Mężczyzna - Przenieś pionki z sąsiadujących pól na to pole; Kobieta - Oddal pionki z sąsiadujących pól o jedno pole"
+        },
+        {
+          "title": "Gamechanger",
+          "text": "Kingmaker - Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta; Alter Ego - Piotrek odkrywa swoją tożsamość i zmienia pionka",
+          "presentation": {
+            "type": "role_reveal",
+            "delay": 1.0,
+            "intro_text": "Zmienia funkcję w zależności od gracza.",
+            "variants": {
+              "piotrek": {
+                "title": "Alter Ego",
+                "text": "Piotrek odkrywa swoją tożsamość i zmienia pionka"
+              },
+              "hunter": {
+                "title": "Kingmaker",
+                "text": "Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

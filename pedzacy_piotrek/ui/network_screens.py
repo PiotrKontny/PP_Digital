@@ -1,0 +1,848 @@
+"""
+Menus for playing together.
+
+Four screens, all thin: they read a :class:`NetworkService` and tell it what the
+player did.  None of them knows a socket exists, and none contains a game rule —
+the lobby's validation belongs to the server, and the screens show whatever it
+says.
+
+    MainMenuScreen ──► HostSetupScreen ──► LobbyScreen ──► GameScreen
+                   └─► JoinScreen      ──► LobbyScreen ──► GameScreen
+                   └─► (local hot-seat) ─► MenuScreen  ──► GameScreen
+
+WHAT CHANGED IN STAGE 11, and why the screens look different.  There is no
+"host" address to hand out any more, because no player's machine listens for
+anything.  Everyone connects outward to the same server and finds each other
+with a **room code** — six characters, read aloud over a voice chat, typed by
+somebody who is not looking at it.  That is the only part of the new
+architecture the player ever sees, and it is the part that makes a friend in
+another country able to join without touching a router.
+
+Connecting never blocks.  A service is created and the lobby is entered
+immediately; the connection finishes in the background and the lobby draws its
+progress.  The old screens called a blocking ``connect()`` and froze the whole
+application for five seconds whenever somebody mistyped an address.
+"""
+
+from __future__ import annotations
+
+from typing import List, Optional, Tuple
+
+import pygame
+
+from ..cards.loader import ContentLibrary
+from ..config import settings
+from ..config.settings import RULES
+from ..net.config import current as network_config
+from ..net.lobby import DEFAULT_NICKNAME, clean_room_code
+from ..net.service import ClientService, HostService, NetworkService
+from ..net.transport import ConnectionState, TransportError
+from .app import App, Screen
+from .headings import BLOCK_GAP, content_top, draw_title
+from .widgets import Button, Checkbox, Dropdown, Stepper, TextInput, fit_buttons
+
+_title = draw_title
+
+#: What the character dropdown calls "deal me one".
+RANDOM_LABEL = "Losowa postać"
+
+
+class MainMenuScreen(Screen):
+    """Create a room, join one, play on this machine, or leave."""
+
+    def __init__(self, app: App, library: ContentLibrary) -> None:
+        super().__init__(app)
+        self.library = library
+        self.message = ""
+        self.buttons: List[Tuple[str, Button]] = []
+        self._build()
+
+    def _build(self) -> None:
+        r, layout = self.app.renderer, self.app.layout
+        centre = layout.win_w // 2
+        gap = 16
+        entries = [
+            ("host", "Załóż grę online"),
+            ("join", "Dołącz do gry"),
+            ("local", "Gra lokalna (hot-seat)"),
+            ("quit", "Wyjście"),
+        ]
+        top_limit = content_top(r, layout)
+        message_h = r.fonts.get(17, bold=True).get_height() + 20
+        server_h = r.fonts.get(13).get_height() + 12
+
+        # Measure first, place second.  "Gra lokalna (hot-seat)" is half as long
+        # again as "Wyjście"; one hard-coded width for both is what clipped it.
+        self.buttons = [
+            (key, Button(pygame.Rect(0, 0, 0, 0), label, radius=12, accent=None,
+                         primary=(key == "host")))
+            for key, label in entries
+        ]
+        width, height = fit_buttons(
+            r, [button for _, button in self.buttons],
+            min_width=320, min_height=int(52 * r.fonts.scale),
+            max_width=max(240, layout.win_w - 64),
+        )
+
+        block = len(entries) * height + (len(entries) - 1) * gap
+        free = layout.win_h - top_limit - message_h - server_h - 20
+        top = top_limit + max(0, (free - block) // 2)
+        for index, (_, button) in enumerate(self.buttons):
+            button.rect.topleft = (centre - width // 2, top + index * (height + gap))
+
+        self.server_y = self.buttons[-1][1].rect.bottom + 16
+        self.message_y = self.server_y + r.fonts.get(13).get_height() + 10
+
+    def notify(self, message: str) -> None:
+        self.message = message
+
+    def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            self.app.quit()
+            return
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return
+        for key, button in self.buttons:
+            if button.hit(mouse):
+                self._choose(key)
+                return
+
+    def _choose(self, key: str) -> None:
+        if key == "quit":
+            self.app.quit()
+        elif key == "host":
+            self.app.push(HostSetupScreen(self.app, self.library))
+        elif key == "join":
+            self.app.push(JoinScreen(self.app, self.library))
+        elif key == "local":
+            from .menu import MenuScreen
+
+            def start(config):
+                from ..engine.setup import create_game
+                from ..net.session import LocalSession
+                from .game_screen import GameScreen
+
+                state = create_game(config, self.library)
+                self.app.replace(GameScreen(self.app, LocalSession(state),
+                                            library=self.library))
+
+            self.app.push(MenuScreen(self.app, self.library, start))
+
+    def on_resize(self) -> None:
+        self._build()
+
+    def update(self, dt: float, mouse: Tuple[int, int]) -> None:
+        for _, button in self.buttons:
+            button.update(mouse, dt)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        r, layout = self.app.renderer, self.app.layout
+        _title(r, layout, surface, "gra dla znajomych — kod pokoju i gracie")
+        for _, button in self.buttons:
+            button.draw(r, surface)
+        r.text(f"Serwer gry: {network_config().describe_target()}", r.fonts.get(13),
+               r.theme.text_dim, surface,
+               midtop=(layout.win_w // 2, self.server_y))
+        if self.message:
+            r.text(self.message, r.fonts.get(17, bold=True), r.theme.invalid,
+                   surface, midtop=(layout.win_w // 2, self.message_y),
+                   shadow=True)
+
+
+class _FormScreen(Screen):
+    """Shared plumbing for the two screens that are mostly text fields."""
+
+    def __init__(self, app: App, library: ContentLibrary) -> None:
+        super().__init__(app)
+        self.library = library
+        self.inputs: List[TextInput] = []
+        self.error = ""
+
+    def _focus(self, field: Optional[TextInput]) -> None:
+        for other in self.inputs:
+            if other is not field:
+                other.blur()
+        if field is not None:
+            field.focus()
+
+    def _cycle_focus(self) -> None:
+        if not self.inputs:
+            return
+        focused = next((i for i, f in enumerate(self.inputs) if f.focused), -1)
+        self._focus(self.inputs[(focused + 1) % len(self.inputs)])
+
+    def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            hit = next((f for f in self.inputs if f.rect.collidepoint(mouse)), None)
+            # Blur the others first so only one field owns the keyboard, then
+            # let the field itself place the caret from the click.
+            for field in self.inputs:
+                if field is not hit:
+                    field.blur()
+        # Motion and release go to every field: a drag that starts inside one
+        # may finish outside it, and the selection should still follow.
+        for field in self.inputs:
+            if field.handle(event):
+                return
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self.app.pop()
+                return
+            if event.key == pygame.K_TAB:
+                self._cycle_focus()
+                return
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.confirm()
+                return
+        self.handle_click(event, mouse)
+
+    def handle_click(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        pass
+
+    def confirm(self) -> None:
+        pass
+
+    def update(self, dt: float, mouse: Tuple[int, int]) -> None:
+        # Text fields need the frame time: that is what drives the repeat when
+        # backspace is held down.
+        for field in self.inputs:
+            field.update(mouse, dt)
+        self.update_widgets(dt, mouse)
+
+    def update_widgets(self, dt: float, mouse: Tuple[int, int]) -> None:
+        pass
+
+    # ── shared: opening a lobby without freezing ─────────────────────────────
+    def _enter_lobby(self, service: NetworkService, embedded=None) -> None:
+        self._focus(None)
+        self.app.replace(LobbyScreen(self.app, self.library, service,
+                                     embedded=embedded))
+
+
+class HostSetupScreen(_FormScreen):
+    """Nickname, table settings, then ask the server for a room."""
+
+    FIELD_W = 360
+    FIELD_H = 44
+    LABEL_GAP = 24
+    ROW_GAP = 18
+    MIN_ROW_GAP = 5
+
+    def __init__(self, app: App, library: ContentLibrary) -> None:
+        super().__init__(app, library)
+        self.board_cells = RULES.board_cells_default
+        self.chest_round = RULES.chest_open_default
+        self.double_percent = RULES.double_frequency_default
+        self.debug_version = False
+        self.run_local_server = False
+
+        self.nickname = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
+                                  "Twój nick", DEFAULT_NICKNAME,
+                                  max_length=RULES.max_name_length)
+        self.server = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
+                                "Serwer gry", network_config().server_url, max_length=80)
+        self.inputs = [self.nickname, self.server]
+
+        self.debug_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
+        self.local_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
+        self.create = Button(pygame.Rect(0, 0, 280, 52), "Utwórz pokój",
+                             radius=12, primary=True)
+        self.back = Button(pygame.Rect(0, 0, 280, 40), "Wróć", radius=10)
+        self._lay_out()
+        self._focus(self.nickname)
+
+    def _lay_out(self) -> None:
+        """One downward pass, with elastic gaps.
+
+        The block is measured first and the gaps shrink until it fits.  Fixed
+        spacing is what used to push the error line off the bottom of a
+        1280×760 window.
+        """
+        r, layout = self.app.renderer, self.app.layout
+        centre = layout.win_w // 2
+        self.centre = centre
+        label_h = r.fonts.get(16).get_height()
+        hint_h = r.fonts.get(13).get_height()
+        error_h = r.fonts.get(17, bold=True).get_height()
+        top = content_top(r, layout)
+
+        # Measure the two blocks whose height is not a constant any more: the
+        # stepper rows size themselves to their ± labels, and the buttons to
+        # their captions.  Guessing 40 and 52 here is what left the error line
+        # hanging off the bottom once the type grew.
+        probe = Stepper(centre, 0, big_steps=True, r=r)
+        stepper_h = probe.height
+        button_h = max(self.create.natural_size(r)[1], int(52 * r.fonts.scale))
+        back_h = max(self.back.natural_size(r)[1], int(40 * r.fonts.scale))
+
+        fixed = (
+            len(self.inputs) * (self.LABEL_GAP + self.FIELD_H)
+            + 3 * (label_h + 4 + stepper_h)   # three stepper rows
+            + 2 * (20 + hint_h)               # two option rows with hints
+            + button_h + 12 + back_h          # create + gap + back
+            + 14 + error_h                    # room for a message
+        )
+        gaps = len(self.inputs) + 3 + 3
+        spare = layout.win_h - top - fixed - 16
+        self.ROW_GAP = max(self.MIN_ROW_GAP, min(18, spare // max(1, gaps)))
+
+        y = top
+        for field in self.inputs:
+            field.rect.size = (self.FIELD_W, self.FIELD_H)
+            field.rect.topleft = (centre - self.FIELD_W // 2, y + self.LABEL_GAP)
+            y = field.rect.bottom + self.ROW_GAP
+
+        y += 4
+        self.stepper_rows = []
+        for name in ("cells_stepper", "chest_stepper", "doubles_stepper"):
+            stepper = Stepper(centre, y + label_h + 4,
+                              big_steps=(name != "chest_stepper"), r=r)
+            setattr(self, name, stepper)
+            self.stepper_rows.append((y, stepper))
+            y = stepper.rects["value"].bottom + self.ROW_GAP
+
+        self.local_row_y = y + 2
+        self.local_checkbox.rect.topleft = (centre - 190, self.local_row_y)
+        y = self.local_row_y + 20 + hint_h + self.ROW_GAP
+
+        self.debug_row_y = y
+        self.debug_checkbox.rect.topleft = (centre - 190, self.debug_row_y)
+        y = self.debug_row_y + 20 + hint_h + self.ROW_GAP
+
+        # Both buttons are sized to their own captions, then given the wider of
+        # the two widths so the bottom of the screen reads as one block.
+        fit_buttons(r, [self.create, self.back], min_width=280,
+                    min_height=button_h,
+                    max_width=max(220, layout.win_w - 64))
+        self.create.rect.midtop = (centre, y)
+        self.back.rect.midtop = (centre, self.create.rect.bottom + 12)
+        self.error_y = self.back.rect.bottom + 14
+
+    def on_resize(self) -> None:
+        self._lay_out()
+
+    def handle_click(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return
+        delta = self.cells_stepper.hit(mouse)
+        if delta:
+            self.board_cells = max(RULES.board_cells_min, self.board_cells + delta)
+            return
+        delta = self.chest_stepper.hit(mouse)
+        if delta:
+            self.chest_round = max(RULES.chest_open_min, self.chest_round + delta)
+            return
+        delta = self.doubles_stepper.hit(mouse)
+        if delta:
+            step = 10 if abs(delta) > 1 else 5
+            self.double_percent = max(0, min(
+                100, self.double_percent + step * (1 if delta > 0 else -1)))
+            return
+        if self.local_checkbox.hit(mouse):
+            self.run_local_server = not self.run_local_server
+            if self.run_local_server:
+                self.server.value = network_config().local_server_url
+            return
+        if self.debug_checkbox.hit(mouse):
+            self.debug_version = not self.debug_version
+            return
+        if self.create.hit(mouse):
+            self.confirm()
+        elif self.back.hit(mouse):
+            self.app.pop()
+
+    def confirm(self) -> None:
+        self.error = ""
+        embedded = None
+        url = self.server.value.strip() or network_config().server_url
+
+        if self.run_local_server:
+            from ..server.embedded import EmbeddedServer
+
+            embedded = EmbeddedServer(network_config(), self.library)
+            if not embedded.start():
+                self.error = embedded.error or "Nie udało się uruchomić serwera"
+                return
+            url = embedded.url
+
+        try:
+            service = HostService(self.nickname.value or DEFAULT_NICKNAME,
+                                  config=network_config(), library=self.library, url=url)
+        except TransportError as failure:
+            if embedded is not None:
+                embedded.stop()
+            self.error = str(failure)
+            return
+
+        service.set_settings(board_cells=self.board_cells,
+                             chest_open_round=self.chest_round,
+                             double_percent=self.double_percent,
+                             debug_version=self.debug_version)
+        self._enter_lobby(service, embedded=embedded)
+
+    def update_widgets(self, dt: float, mouse: Tuple[int, int]) -> None:
+        self.debug_checkbox.checked = self.debug_version
+        self.local_checkbox.checked = self.run_local_server
+        self.create.update(mouse, dt)
+        self.back.update(mouse, dt)
+        self.debug_checkbox.update(mouse, dt)
+        self.local_checkbox.update(mouse, dt)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        r, layout = self.app.renderer, self.app.layout
+        centre, mouse = self.centre, self.app.mouse()
+        _title(r, layout, surface, "Załóż grę")
+        for field in self.inputs:
+            field.draw(r, surface)
+
+        labels = ("Liczba pól planszy", "Skrzynia otwiera się w rundzie",
+                  "Pola podwójne (12a / 12b)")
+        values = (str(self.board_cells), str(self.chest_round),
+                  f"{self.double_percent}%")
+        for label, value, (label_y, stepper) in zip(labels, values,
+                                                    self.stepper_rows):
+            r.text(label, r.fonts.get(16), r.theme.text_light, surface,
+                   midtop=(centre, label_y))
+            stepper.draw(r, value, mouse, surface)
+
+        self._option(surface, self.local_checkbox,
+                     "Uruchom serwer na tym komputerze",
+                     "tylko dla graczy w tej samej sieci — przez internet "
+                     "użyj serwera z konfiguracji")
+        self._option(surface, self.debug_checkbox,
+                     "Wersja testowa — gra od 2 graczy",
+                     f"tylko do testów; normalnie potrzeba {RULES.min_players} graczy")
+
+        self.create.draw(r, surface)
+        self.back.draw(r, surface)
+        if self.error:
+            r.text(self.error, r.fonts.get(17, bold=True), r.theme.invalid,
+                   surface, midtop=(centre, self.error_y), shadow=True)
+
+    def _option(self, surface, checkbox, label: str, hint: str) -> None:
+        r = self.app.renderer
+        checkbox.draw(r, surface)
+        r.text(label, r.fonts.get(16), r.theme.text_light, surface,
+               midleft=(checkbox.rect.right + 10, checkbox.rect.centery))
+        r.text(hint, r.fonts.get(13), r.theme.text_dim, surface,
+               midtop=(self.centre, checkbox.rect.bottom + 4))
+
+
+class JoinScreen(_FormScreen):
+    """Room code, nickname, server, connect."""
+
+    FIELD_W = 360
+    FIELD_H = 46
+    LABEL_GAP = 24
+    ROW_GAP = 20
+
+    def __init__(self, app: App, library: ContentLibrary) -> None:
+        super().__init__(app, library)
+        self.code = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
+                              "Kod pokoju", "", placeholder="np. K7M2QD",
+                              max_length=8)
+        self.nickname = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
+                                  "Twój nick", "", placeholder=DEFAULT_NICKNAME,
+                                  max_length=RULES.max_name_length)
+        self.server = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
+                                "Serwer gry", network_config().server_url, max_length=80)
+        self.inputs = [self.code, self.nickname, self.server]
+        self.join = Button(pygame.Rect(0, 0, 280, 52), "Dołącz", radius=12,
+                           primary=True)
+        self.back = Button(pygame.Rect(0, 0, 280, 40), "Wróć", radius=10)
+        self._lay_out()
+        self._focus(self.code)
+
+    def _lay_out(self) -> None:
+        r, layout = self.app.renderer, self.app.layout
+        centre = layout.win_w // 2
+        self.centre = centre
+        y = content_top(r, layout)
+        for field in self.inputs:
+            field.rect.size = (self.FIELD_W, self.FIELD_H)
+            field.rect.topleft = (centre - self.FIELD_W // 2, y + self.LABEL_GAP)
+            y = field.rect.bottom + self.ROW_GAP
+
+        self.join.rect.midtop = (centre, y + 8)
+        fit_buttons(r, [self.join, self.back], min_width=280,
+                    min_height=int(52 * r.fonts.scale),
+                    max_width=max(220, layout.win_w - 64))
+        self.join.rect.midtop = (centre, y + 8)
+        self.back.rect.midtop = (centre, self.join.rect.bottom + 12)
+        self.hint_y = self.back.rect.bottom + 14
+        self.error_y = self.hint_y + r.fonts.get(13).get_height() + 8
+
+    def on_resize(self) -> None:
+        self._lay_out()
+
+    def handle_click(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return
+        if self.join.hit(mouse):
+            self.confirm()
+        elif self.back.hit(mouse):
+            self.app.pop()
+
+    def confirm(self) -> None:
+        self.error = ""
+        code = clean_room_code(self.code.value)
+        if not code:
+            self.error = "Podaj kod pokoju, który dostałeś od znajomego"
+            return
+        try:
+            service = ClientService(code,
+                                    self.nickname.value.strip() or DEFAULT_NICKNAME,
+                                    config=network_config(), library=self.library,
+                                    url=self.server.value.strip())
+        except TransportError as failure:
+            self.error = str(failure)
+            return
+        self._enter_lobby(service)
+
+    def update_widgets(self, dt: float, mouse: Tuple[int, int]) -> None:
+        self.join.update(mouse, dt)
+        self.back.update(mouse, dt)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        r, layout = self.app.renderer, self.app.layout
+        _title(r, layout, surface, "Dołącz do gry")
+        for field in self.inputs:
+            field.draw(r, surface)
+        self.join.draw(r, surface)
+        self.back.draw(r, surface)
+        r.text("Kod pokoju podaje osoba, która ją założyła  ·  Tab przełącza pola",
+               r.fonts.get(13), r.theme.text_dim, surface,
+               midtop=(self.centre, self.hint_y))
+        if self.error:
+            r.text(self.error, r.fonts.get(17, bold=True), r.theme.invalid,
+                   surface, midtop=(self.centre, self.error_y), shadow=True)
+
+
+class LobbyScreen(Screen):
+    """Who is here, what they are playing, and — for the host — Start.
+
+    The layout is computed top-down in :meth:`_lay_out` rather than each piece
+    picking its own fraction of the window: with six seats and a small window
+    the connection details, the seat list and the character dropdown used to
+    land on top of one another.
+    """
+
+    ROW_H = 38
+    ROW_GAP = 6
+
+    def __init__(self, app: App, library: ContentLibrary,
+                 service: NetworkService, embedded=None) -> None:
+        super().__init__(app)
+        self.library = library
+        self.service = service
+        #: A server started inside this process, when the player asked for one.
+        #: Held here so leaving the lobby shuts it down rather than leaving a
+        #: listener running for the rest of the session.
+        self.embedded = embedded
+        self.message = ""
+        self.error = ""
+
+        self.start = Button(pygame.Rect(0, 0, 280, 52), "Rozpocznij grę",
+                            radius=12, primary=True)
+        self.ready = Button(pygame.Rect(0, 0, 280, 52), "Jestem gotowy",
+                            radius=12, primary=True)
+        self.leave = Button(pygame.Rect(0, 0, 280, 40), "Opuść pokój", radius=10)
+        self.character = Dropdown(pygame.Rect(0, 0, 260, 34),
+                                  [RANDOM_LABEL, *library.character_titles()])
+        self.character.value = RANDOM_LABEL
+        self._lay_out()
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    @property
+    def lobby(self):
+        return self.service.lobby_state
+
+    @property
+    def is_host(self) -> bool:
+        return self.service.is_host
+
+    @property
+    def my_peer_id(self) -> str:
+        return self.service.peer_id
+
+    @property
+    def my_seat(self):
+        return self.lobby.seat_of(self.my_peer_id)
+
+    @property
+    def connecting(self) -> bool:
+        """No room yet: either still dialling, or waiting for the answer."""
+        return not self.lobby.code
+
+    def _taken(self) -> set:
+        return set(self.lobby.taken_characters(except_peer=self.my_peer_id))
+
+    # ── layout ───────────────────────────────────────────────────────────────
+    def _lay_out(self) -> None:
+        """Place everything in one downward pass, so nothing can collide."""
+        r, layout = self.app.renderer, self.app.layout
+        centre = layout.win_w // 2
+        self.centre = centre
+        self.row_width = min(580, layout.win_w - 80)
+
+        # Bottom-up: the buttons are anchored to the bottom margin.
+        margin = max(18, int(layout.win_h * 0.03))
+        self.message_y = layout.win_h - margin - r.fonts.get(15).get_height()
+        # "Jestem gotowy" and "Czekam na hosta" swap into the same button, so
+        # it is measured against the longer of the two rather than whichever
+        # one happens to be showing when the screen is laid out.
+        widest = max(("Jestem gotowy", "Czekam na hosta"),
+                     key=lambda text: r.spaced_width(
+                         text.upper(), r.fonts.get(self.ready.text_size, bold=True), 2))
+        self.ready.label = widest
+        fit_buttons(r, [self.start, self.ready], min_width=280,
+                    min_height=int(52 * r.fonts.scale),
+                    max_width=max(220, layout.win_w - 64))
+        self.leave.fit(r, min_width=280, min_height=int(40 * r.fonts.scale),
+                       max_width=max(220, layout.win_w - 64))
+        self.leave.rect.midbottom = (centre, self.message_y - 10)
+        self.problem_y = (self.leave.rect.top - 8
+                          - r.fonts.get(16, bold=True).get_height())
+        self.start.rect.midbottom = (centre, self.problem_y - 6)
+        self.ready.rect.midbottom = self.start.rect.midbottom
+
+        # Top-down: heading, room code, seat list, character picker.
+        y = content_top(r, layout)
+        self.info_y = y
+        y += r.fonts.get(30, bold=True).get_height() + 4
+        y += r.fonts.get(14).get_height() + BLOCK_GAP
+
+        self.character_row_y = self.start.rect.top - BLOCK_GAP - 34
+        self.character.rect.size = (260, 34)
+        self.character.rect.topleft = (centre + 30, self.character_row_y)
+        self.character.max_bottom = layout.win_h - 10
+
+        self.seats_top = y
+        available = self.character_row_y - BLOCK_GAP - y
+        rows = max(RULES.min_players, len(self.lobby.seats), 1)
+        row_h = self.ROW_H + self.ROW_GAP
+        if rows * row_h > available:
+            # Shrink the rows rather than letting the list grow into the
+            # controls below it.
+            row_h = max(24, available // rows)
+        self.row_h = row_h
+
+    def seat_rect(self, index: int) -> pygame.Rect:
+        return pygame.Rect(self.centre - self.row_width // 2,
+                           self.seats_top + index * self.row_h,
+                           self.row_width, max(20, self.row_h - self.ROW_GAP))
+
+    def on_resize(self) -> None:
+        self._lay_out()
+
+    # ── input ────────────────────────────────────────────────────────────────
+    def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            if self.character.open:
+                self.character.open = False
+            else:
+                self._leave()
+            return
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return
+
+        if self.character.open:
+            option = self.character.option_at(mouse)
+            self.character.open = False
+            if option is not None:
+                self.character.value = option
+                self.service.set_character(
+                    "" if option == RANDOM_LABEL else option)
+            return
+        if self.character.hit(mouse):
+            self.character.disabled_options = self._taken()
+            self.character.open = True
+            return
+        if self.is_host and self.start.hit(mouse):
+            self._start()
+            return
+        if not self.is_host and self.ready.hit(mouse):
+            seat = self.my_seat
+            self.service.set_ready(not (seat.ready if seat else False))
+            return
+        if self.leave.hit(mouse):
+            self._leave()
+
+    def _start(self) -> None:
+        """Ask the server to begin.  The answer arrives as a broadcast.
+
+        Nothing happens on screen here: the server builds the game, tells
+        everybody — including this machine — and :meth:`update` notices the
+        session appearing.  Host and client therefore take exactly the same
+        path into the match, which is why there is no way for one of them to
+        enter a game the other did not.
+        """
+        self.error = ""
+        if self.service.start_game(self.library) is None and self.service.error:
+            self.error = self.service.error
+
+    def _enter_game(self) -> None:
+        from .game_screen import GameScreen
+
+        self.app.replace(GameScreen(self.app, self.service.session,
+                                    service=self.service, library=self.library))
+
+    def _leave(self) -> None:
+        self.service.close()
+        if self.embedded is not None:
+            self.embedded.stop()
+        self.app.replace(MainMenuScreen(self.app, self.library))
+
+    def _go_home(self, reason: str) -> None:
+        if self.embedded is not None:
+            self.embedded.stop()
+        menu = MainMenuScreen(self.app, self.library)
+        menu.notify(reason)
+        self.app.replace(menu)
+
+    # ── frame ────────────────────────────────────────────────────────────────
+    def update(self, dt: float, mouse: Tuple[int, int]) -> None:
+        self.service.poll(self.library)
+        if self.service.disconnected:
+            self._go_home(self.service.disconnected)
+            return
+        if self.service.session is not None:
+            self._enter_game()
+            return
+
+        notices = self.service.drain_notices()
+        if notices:
+            self.message = notices[-1]
+        self._lay_out()
+        self.start.enabled = self.lobby.can_start
+        self.start.update(mouse, dt)
+        self.ready.update(mouse, dt)
+        self.leave.update(mouse, dt)
+        self.character.update(mouse, dt)
+
+    def draw(self, surface: pygame.Surface) -> None:
+        r, layout = self.app.renderer, self.app.layout
+        theme, centre = r.theme, self.centre
+        _title(r, layout, surface, "Poczekalnia")
+
+        self._draw_code(surface)
+        self._draw_seats(surface)
+
+        r.text("Twoja postać:", r.fonts.get(17), theme.text_light, surface,
+               midright=(self.character.rect.left - 14,
+                         self.character.rect.centery))
+        self.character.draw(r, surface)
+
+        if self.is_host:
+            self.start.draw(r, surface)
+            problem = self.error or self.lobby.validate()
+            if problem and not self.connecting:
+                r.text(problem, r.fonts.get(16, bold=True), theme.invalid,
+                       surface, midtop=(centre, self.problem_y), shadow=True)
+        else:
+            seat = self.my_seat
+            self.ready.label = ("Czekam na hosta" if seat and seat.ready
+                                else "Jestem gotowy")
+            self.ready.draw(r, surface)
+            if not self.connecting:
+                r.text("Grę rozpoczyna osoba, która założyła pokój",
+                       r.fonts.get(16), theme.text_dim, surface,
+                       midtop=(centre, self.problem_y))
+
+        self.leave.draw(r, surface)
+        if self.message:
+            r.text(self.message, r.fonts.get(15), theme.text_dim, surface,
+                   midtop=(centre, self.message_y))
+        if self.character.open:
+            self.character.draw_overlay(r, self.app.mouse(), surface)
+
+    def _draw_code(self, surface: pygame.Surface) -> None:
+        """The room code, big, because it is the one thing to read aloud."""
+        r, theme, centre = self.app.renderer, self.app.renderer.theme, self.centre
+        font = r.fonts.get(30, bold=True)
+        y = self.info_y
+        if self.connecting:
+            state = self.service.connection_state
+            text = ("ŁĄCZĘ PONOWNIE…" if state is ConnectionState.RECONNECTING
+                    else "ŁĄCZĘ Z SERWEREM…")
+            r.spaced_text(text, font, theme.text_dim, surface,
+                          center=(centre, y + font.get_height() // 2), spacing=4)
+            r.text(self.service.server_url, r.fonts.get(14), theme.text_dim,
+                   surface, midtop=(centre, y + font.get_height() + 4))
+            return
+
+        r.spaced_text(f"KOD POKOJU: {self.lobby.code}", font, theme.prompt,
+                      surface, center=(centre, y + font.get_height() // 2),
+                      spacing=6, shadow=True)
+        r.text("Podaj go znajomym — wpisują go w „Dołącz do gry”",
+               r.fonts.get(14), theme.text_dim, surface,
+               midtop=(centre, y + font.get_height() + 4))
+
+    def _draw_seats(self, surface: pygame.Surface) -> None:
+        r, theme = self.app.renderer, self.app.renderer.theme
+        seats = self.lobby.seats
+        for index, seat in enumerate(seats):
+            rect = self.seat_rect(index)
+            mine = seat.peer_id == self.my_peer_id
+            settled = seat.ready or seat.is_host
+            style = r.emphasis(
+                fill=theme.btn_active_bg if mine else theme.btn_idle_bg,
+                border=theme.accent if mine else theme.panel_line,
+                text=theme.text_light, selected=mine, quiet=not mine,
+            )
+            rect = r.interactive_panel(rect, style, surface, radius=9)
+            small = r.fonts.get(min(15, max(11, rect.height - 22)))
+            font = r.fonts.get(min(18, max(12, rect.height - 20)), bold=True)
+
+            # Right to left: the status, then the character, then whatever room
+            # is left goes to the nickname.  Placing the character at a fixed
+            # offset from the right edge is what let a long name run into it on
+            # a 1280-wide window — the row has three things in it now, so the
+            # positions have to be measured rather than guessed.
+            if not seat.connected:
+                mark, colour = "rozłączony", theme.invalid
+            elif settled:
+                mark, colour = "gotowy", theme.valid
+            else:
+                mark, colour = "czeka", theme.text_dim
+            mark_left = rect.right - 14 - small.size(mark)[0]
+            r.text(mark, small, colour, surface,
+                   midright=(rect.right - 14, rect.centery))
+
+            character = seat.character or "losowa postać"
+            character_right = mark_left - 16
+            r.text(character, small,
+                   theme.text_light if seat.character else theme.text_dim,
+                   surface, midright=(character_right, rect.centery))
+
+            label = seat.nickname + ("  (ty)" if mine else "")
+            if seat.is_host:
+                label += "  ·  zakłada"
+            room = character_right - small.size(character)[0] - 16 - (rect.left + 14)
+            r.text(_elided(label, font, room), font, theme.text_light, surface,
+                   midleft=(rect.left + 14, rect.centery))
+
+        minimum = self.lobby.minimum_players
+        for index in range(len(seats), minimum):
+            rect = self.seat_rect(index)
+            r.inset_well(rect, surface, radius=9)
+            r.spaced_text("CZEKAMY NA GRACZA", r.fonts.get(13, bold=True),
+                          theme.text_dim, surface, center=rect.center, spacing=2)
+
+
+def _elided(text: str, font, width: int) -> str:
+    """Shorten ``text`` with an ellipsis until it fits ``width``.
+
+    Six long nicknames on a 1280-wide window is the worst case the lobby has,
+    and a name that does not fit must lose its own tail rather than run over
+    whatever is drawn beside it.
+    """
+    if width <= 0:
+        return ""
+    if font.size(text)[0] <= width:
+        return text
+    for length in range(len(text) - 1, 0, -1):
+        candidate = text[:length].rstrip() + "…"
+        if font.size(candidate)[0] <= width:
+            return candidate
+    return "…"
