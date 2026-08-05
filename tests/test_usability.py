@@ -718,3 +718,172 @@ def test_an_unreadable_clipboard_falls_back_but_a_readable_empty_one_does_not(mo
     clipboard.reset()
     clipboard.copy("K7M2QD")
     assert clipboard.paste() == "K7M2QD", "the internal buffer has to save this one"
+
+
+# ── Windows: the encoding belongs to the format, not to the module ───────────
+# pygame does not use SDL on Windows.  src_c/scrap.c picks the SDL2 backend
+# with `#if !defined(__WIN32__)`, so Windows gets scrap_win.c, which maps
+# "text/plain;charset=utf-8" to CF_UNICODETEXT — a UTF-16LE format — and then
+# memcpys whatever bytes it was given, converting nothing.  Handing it UTF-8
+# made "sdh" arrive as 摳 in every other application.  This stand-in copies
+# that behaviour closely enough to catch it, because no Linux CI box can.
+CF_TEXT, CF_UNICODETEXT = 1, 13
+
+
+class _WinScrap:
+    """scrap_win.c: the mapping, the single trailing NUL, and the ownership cache."""
+
+    def __init__(self) -> None:
+        self.clipboard = {}     # what Windows holds: format -> bytes
+        self.cache = {}         # pygame's _clipdata, returned while we own it
+        self.owned = False
+
+    def init(self) -> None:
+        pass
+
+    def get_init(self) -> bool:
+        return True
+
+    def set_mode(self, mode) -> None:
+        pass
+
+    @staticmethod
+    def _internal(text_type):
+        if text_type == "text/plain":
+            return CF_TEXT
+        if text_type == "text/plain;charset=utf-8":
+            return CF_UNICODETEXT
+        return None
+
+    def put(self, text_type, data):
+        text_format = self._internal(text_type)
+        if text_format is None:
+            raise pygame.error("content could not be placed in clipboard.")
+        # GlobalAlloc(srclen + 1), memset 0, memcpy srclen — one NUL, no more.
+        self.clipboard = {text_format: bytes(data) + b"\x00"}
+        self.cache = {text_type: bytes(data) + b"\x00"}
+        self.owned = True
+
+    def get(self, text_type):
+        if self.owned:              # !pygame_scrap_lost(): our own bytes back
+            return self.cache.get(text_type)
+        text_format = self._internal(text_type)
+        return self.clipboard.get(text_format)
+
+    # ── what Discord, a browser or Notepad actually sees ─────────────────────
+    def as_another_application_reads_it(self) -> str:
+        if CF_UNICODETEXT in self.clipboard:
+            raw = self.clipboard[CF_UNICODETEXT]
+            if len(raw) % 2:                    # Windows reads whole WCHARs
+                raw = raw[:-1]
+            text = raw.decode("utf-16-le")
+            return text.split("\x00")[0]        # up to the terminator
+        if CF_TEXT in self.clipboard:
+            return self.clipboard[CF_TEXT].split(b"\x00")[0].decode("cp1250")
+        return ""
+
+    def another_application_copies(self, text: str) -> None:
+        self.clipboard = {CF_UNICODETEXT: text.encode("utf-16-le") + b"\x00\x00"}
+        self.owned = False
+
+
+@pytest.fixture
+def windows(monkeypatch):
+    """The game running on Windows, where pygame is not talking to SDL."""
+    scrap = _WinScrap()
+    monkeypatch.setattr(pygame, "scrap", scrap)
+    monkeypatch.setattr(clipboard, "_WINDOWS", True)
+    clipboard.reset()
+    yield scrap
+    clipboard.reset()
+
+
+def test_windows_copying_sdh_does_not_produce_a_chinese_character(windows):
+    """The reported bug, exactly: 0x73,0x64 read as one UTF-16LE unit is 摳."""
+    clipboard.copy("sdh")
+    assert windows.as_another_application_reads_it() == "sdh"
+
+
+@pytest.mark.parametrize("text", [
+    "abc",
+    "ąćęłńóśźż",
+    "ĄĆĘŁŃÓŚŹŻ",
+    "123456",
+    "ABCD12",
+    "K7M2QD",
+    "wss://example.com",
+    "wss://piotrek.up.railway.app",
+    "Kuba Nowak",
+    "a",                        # odd byte count: the terminator has to survive
+    "zażółć gęślą jaźń",
+])
+def test_windows_copies_the_exact_string(windows, text):
+    clipboard.copy(text)
+    assert windows.as_another_application_reads_it() == text
+
+
+def test_windows_uses_the_unicode_format_not_the_ansi_one(windows):
+    """CF_TEXT is the local code page and cannot carry every language."""
+    clipboard.copy("ąćęłńóśźż")
+    assert CF_UNICODETEXT in windows.clipboard
+    assert CF_TEXT not in windows.clipboard
+
+
+def test_windows_terminator_is_two_bytes(windows):
+    """pygame allocates srclen+1 and zeroes it; UTF-16 needs a second byte.
+
+    Without the one supplied here the closing WCHAR straddles the end of the
+    allocation, and what follows it is whatever the heap had lying around.
+    """
+    clipboard.copy("ok")
+    raw = windows.clipboard[CF_UNICODETEXT]
+    assert raw.endswith(b"\x00\x00"), raw
+    assert len(raw) % 2 == 0, "a whole WCHAR of terminator, inside the buffer"
+
+
+def test_windows_pasting_from_another_application_still_works(windows):
+    """The stage 15 direction must not regress."""
+    windows.another_application_copies("wss://piotrek.up.railway.app")
+    assert clipboard.paste() == "wss://piotrek.up.railway.app"
+    windows.another_application_copies("zażółć gęślą jaźń")
+    assert clipboard.paste() == "zażółć gęślą jaźń"
+
+
+def test_windows_copy_then_paste_inside_the_game(windows):
+    """While the game owns the clipboard, pygame hands back its own bytes."""
+    clipboard.copy("ąćęłńóśźż")
+    assert clipboard.paste() == "ąćęłńóśźż"
+
+
+def test_windows_round_trip_through_another_application(windows):
+    """Copy out, have the other application copy it back, paste in."""
+    clipboard.copy("ABCD12")
+    windows.another_application_copies(windows.as_another_application_reads_it())
+    assert clipboard.paste() == "ABCD12"
+
+
+def test_a_lone_cjk_character_is_not_mistaken_for_utf16(windows):
+    """摳 in UTF-16LE is 0x73,0x64 — no NUL to spot it by, so the format says."""
+    windows.another_application_copies("摳")
+    assert clipboard.paste() == "摳"
+
+
+def test_the_sdl_platforms_still_get_utf8(monkeypatch):
+    """Same table, other branch: SDL_SetClipboardText wants UTF-8, unterminated."""
+    seen = {}
+
+    class _Sdl(_WinScrap):
+        def put(self, text_type, data):
+            if text_type != "text/plain;charset=utf-8":
+                raise pygame.error("content could not be placed in clipboard.")
+            seen["type"], seen["data"] = text_type, bytes(data)
+
+        def get(self, text_type):
+            return seen.get("data") if text_type == seen.get("type") else None
+
+    monkeypatch.setattr(pygame, "scrap", _Sdl())
+    monkeypatch.setattr(clipboard, "_WINDOWS", False)
+    clipboard.reset()
+    clipboard.copy("zażółć")
+    assert seen["data"] == "zażółć".encode("utf-8")
+    assert clipboard.paste() == "zażółć"

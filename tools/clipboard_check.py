@@ -41,6 +41,15 @@ def _pump(seconds: float) -> None:
         time.sleep(0.02)
 
 
+SAMPLES = [
+    "abc",
+    "ABCD12",
+    "123456",
+    "ąćęłńóśźż",
+    "wss://piotrek.up.railway.app",
+]
+
+
 def _backend() -> str:
     scrap = getattr(pygame, "scrap", None)
     if scrap is None:
@@ -67,10 +76,23 @@ def main() -> int:
         print("   internal fallback — but not with other applications.")
         return 1
 
+    print("\n0/2  Every sample survives a copy")
+    for sample in SAMPLES:
+        clipboard.copy(sample)
+        back = clipboard.paste()
+        print(f"     {'ok ' if back == sample else 'BAD'} {sample!r} -> {back!r}")
+    print(f"     format used: {clipboard._text_format}")
+    print("     (this only proves the round trip through pygame; on Windows the")
+    print("      corruption of stage 16 was invisible here, because pygame hands")
+    print("      back its own bytes while the game owns the clipboard.  Step 1")
+    print("      below is the one that counts.)")
+
     print("\n1/2  Game → other application")
     clipboard.copy(MARKER)
     print(f"     Copied: {MARKER}")
-    print("     Now paste into Discord, a browser or Notepad.")
+    print("     Now paste into Discord, a browser or Notepad, and check that")
+    print("     what arrives is that string CHARACTER FOR CHARACTER — this is")
+    print("     where UTF-8 written into a UTF-16 clipboard format shows up.")
     print("     (this window stays alive for 30 s so the paste can be served)")
     _pump(30)
 

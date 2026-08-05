@@ -1561,3 +1561,138 @@ then watches for something copied in another application.
 - On X11, clipboard contents vanish when the game exits unless a clipboard
   manager is running. That is how SDL applications behave and is not something
   this module can fix.
+
+---
+
+## Stage 16 — The other half: encoding
+**Date:** 2026-08-05
+
+### Starting point
+Stage 15 made the clipboard the system clipboard, and pasting in from Discord,
+a browser and Notepad worked. Copying *out* produced garbage: `sdh` arrived in
+other applications as `摳`, and every string was corrupted the same way.
+
+### Root cause
+Not SDL, not `ctypes`, not the text editor. **pygame does not use SDL for the
+clipboard on Windows.** `src_c/scrap.c` line 65:
+
+```c
+/* Determine what type of clipboard we are using */
+#if !defined(__WIN32__)
+#define SDL2_SCRAP
+#include "scrap_sdl2.c"
+...
+#elif defined(__WIN32__)
+#define WIN_SCRAP
+#include "scrap_win.c"
+```
+
+So Windows compiles the native `scrap_win.c`, which maps types to Windows
+clipboard formats (`_convert_internal_type`):
+
+```c
+if (strcmp(type, PYGAME_SCRAP_TEXT) == 0)            return CF_TEXT;
+if (strcmp(type, "text/plain;charset=utf-8") == 0)   return CF_UNICODETEXT;
+```
+
+and then, in `pygame_scrap_put`, `memcpy`s the bytes it was given straight into
+the global memory block and calls `SetClipboardData(format, hMem)`. **It
+converts nothing.** The type name is a promise about the bytes, and the module
+was breaking that promise: it encoded UTF-8 and handed the result to a format
+Windows reads as UTF-16LE.
+
+`sdh` is `0x73 0x64 0x68`. Read as UTF-16LE, `0x73,0x64` is one code unit,
+U+6473 — `摳`. The reported character is not a symptom, it is the arithmetic.
+
+Two further details from the same source explain why this was invisible:
+
+- `pygame_scrap_get` begins `if (!pygame_scrap_lost()) return
+  PyBytes_AsString(PyDict_GetItemString(_clipdata, type));` — while the game
+  still owns the clipboard, pygame hands back **its own cached bytes**. So a
+  corrupt copy pasted back into the game perfectly, and copy→paste between two
+  in-game fields was fine. Only another application ever saw the truth;
+- external text still pasted in correctly because reading falls through to
+  `_convert_internal_type`, gets CF_UNICODETEXT, and returns real UTF-16LE
+  bytes — which stage 15's decoder detected by their interleaved NULs. Hence
+  "pasting works, copying is broken", exactly as reported.
+
+### Fix
+`ui/clipboard.py` only — no rewrite, no new backend, no `ctypes`. The type
+table became a **format** table, because the encoding is a property of the
+format and not of the module:
+
+```python
+_WINDOWS_FORMATS = (
+    ("text/plain;charset=utf-8", "utf-16-le", b"\x00"),   # CF_UNICODETEXT
+    ("text/plain",               "mbcs",      b""),       # CF_TEXT
+)
+_SDL_FORMATS = (
+    ("text/plain;charset=utf-8", "utf-8", b""),
+    ...
+)
+```
+
+- `_encode()` encodes for the format being written, and returns `None` when the
+  platform has no such codec (`mbcs` is Windows-only) or the text does not fit
+  the code page — which is why ANSI/`CF_TEXT` is a fallback and never the first
+  choice: it cannot carry `ąćęłńóśźż` on every machine. Windows synthesises
+  `CF_TEXT` from `CF_UNICODETEXT` for applications that ask, so nothing is lost
+  by writing only the Unicode format.
+- **The second terminator byte.** `pygame_scrap_put` allocates `srclen + 1` and
+  zeroes it — one NUL. A UTF-16 string needs two, so one is appended here.
+  Without it the closing `WCHAR` straddles the end of the allocation and the
+  string ends in whatever the heap had lying around.
+- `_decode()` now takes the declared encoding and, on the wide path, **decodes
+  the full buffer rather than one stripped of trailing NULs**. The high byte of
+  a final ASCII character is a NUL: stripping it truncated `ABCD12` to `ABCD1`.
+  The terminator is cut after decoding, which is what Windows does. The
+  declared encoding also settles the case a heuristic cannot see — a lone CJK
+  character in UTF-16 contains no NUL to spot it by.
+- `_text_type` became `_text_format`; the learnt format is remembered whole.
+
+Nothing else moved. `copy`, `paste`, `reset` keep their signatures, the SDL2
+path still writes plain UTF-8, and the stage 15 behaviour — system first,
+fallback only when the clipboard cannot be read — is untouched.
+
+### Tests
+`_WinScrap` (new, `tests/test_usability.py`) reproduces `scrap_win.c`: the
+format mapping, the single trailing NUL, the ownership cache that returns the
+program's own bytes, and — the point of the whole thing — a
+`as_another_application_reads_it()` that decodes `CF_UNICODETEXT` as UTF-16LE.
+Fed the stage 15 bytes it produces `摳h` from `sdh`, so it is known to
+reproduce the bug before being trusted to prove the fix.
+
+19 new tests (595 total, was 576):
+- the reported string, by name: `sdh` must not become `摳`;
+- eleven strings copied and read as another application would read them —
+  ASCII, Polish lower and upper case, digits, room codes, both server
+  addresses, a name with a space, and a single character (odd byte count, where
+  the terminator arithmetic is most likely to go wrong);
+- the Unicode format is used and the ANSI one is not;
+- the terminator is a whole `WCHAR` and lands inside the buffer;
+- Windows paste from another application still works, in Polish;
+- copy → paste inside the game, where pygame answers from its own cache;
+- a full round trip out through another application and back;
+- a lone CJK character is not mistaken for UTF-16 by a NUL heuristic;
+- the SDL platforms still get plain UTF-8, unterminated.
+
+### Verification
+- **595 tests passing**, ~120 s. `--selftest` clean, `inspect_frame.py` 0
+  problems at 1920×1080.
+- Before/after against `_WinScrap`, printed side by side:
+  `'sdh' -> '摳h'`, `'abc' -> '扡c'`, `'ABCD12' -> '䉁䑃㈱'`, `'zażółć' ->
+  '慺볅돃苅蟄'` with the old encoding; every one exact with the new one.
+- **Still not verified on real hardware.** This container has no Windows and no
+  X11 driver, so `_WinScrap` is a reading of `scrap_win.c`, not a Windows box.
+  It is a close reading — the mapping, the allocation size and the ownership
+  cache are all quoted above from the 2.6.1 source — but
+  `tools/clipboard_check.py` on the real machine is still the proof, and it now
+  prints a sample set (ASCII, room code, digits, Polish, a server address) to
+  compare by eye after pasting into another application.
+
+### Notes
+- `mbcs`/`CF_TEXT` remains reachable only if the Unicode format fails outright.
+  It is lossy by nature; if it ever starts being used, something else is wrong.
+- macOS uses the SDL2 backend (`!defined(__WIN32__)`), so it takes the UTF-8
+  path and was never affected by this bug. ⌘C/⌘V still is not wired — see the
+  stage 15 note.

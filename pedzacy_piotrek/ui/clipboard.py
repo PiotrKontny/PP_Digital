@@ -33,10 +33,32 @@ platform is installed:
 So both call styles are tried, and the working text type is discovered once and
 then remembered.  Guessing a single one of them is what broke this module
 before — see the note in CHANGELOG_LLM.md, Stage 15.
+
+
+...and why the type string alone is not enough
+----------------------------------------------
+A clipboard type does not only say what the data *is*; on Windows it decides
+how the bytes are read.  pygame does not compile the SDL2 backend there —
+``src_c/scrap.c`` selects it with ``#if !defined(__WIN32__)``, so Windows gets
+the native ``scrap_win.c``, which maps
+
+    "text/plain;charset=utf-8"  ->  CF_UNICODETEXT   (Windows reads UTF-16LE)
+    "text/plain"                ->  CF_TEXT          (Windows reads ANSI)
+
+and then ``memcpy``s whatever bytes it was handed straight into the clipboard
+**without converting anything**.  Sending UTF-8 to a type named "utf-8" is
+therefore correct on the SDL2 backend and corrupting on Windows: "sdh" becomes
+摳 (0x73,0x64 read as one UTF-16LE code unit, U+6473).  That was Stage 16.
+
+So the encoding is a property of the FORMAT, not of the module, and the two
+travel together in ``_TEXT_FORMATS``.  CF_UNICODETEXT also needs a two-byte
+terminator, and pygame's ``pygame_scrap_put`` appends only one zero byte, so
+the second is supplied here.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import pygame
@@ -45,34 +67,55 @@ import pygame
 _fallback: str = ""
 _checked = False
 _available = False
-#: The MIME/type string this platform actually accepted, learnt on first copy.
-_text_type: Optional[str] = None
+#: The format this platform actually accepted, learnt on first copy.
+_text_format: Optional[tuple] = None
 
-#: Tried in order.  The SDL2 spelling comes first because it is the one upstream
-#: pygame 2 accepts; the rest cover other backends and older builds.
-_TEXT_TYPES = (
-    "text/plain;charset=utf-8",
-    "text/plain",
-    "UTF8_STRING",
-    "TEXT",
-    "STRING",
+#: True where pygame compiles scrap_win.c instead of the SDL2 backend.  The
+#: condition is scrap.c's own: ``#if !defined(__WIN32__)`` picks SDL2.
+_WINDOWS = os.name == "nt"
+
+#: (type, encoding, extra terminator).  Tried in order.
+#:
+#: Windows: CF_UNICODETEXT is UTF-16LE and needs a two-byte terminator, of
+#: which pygame writes one.  CF_TEXT is the local ANSI code page and cannot
+#: carry every Polish letter on every machine, so it is a fallback, never the
+#: first choice.
+_WINDOWS_FORMATS = (
+    ("text/plain;charset=utf-8", "utf-16-le", b"\x00"),    # CF_UNICODETEXT
+    ("text/plain", "mbcs", b""),                           # CF_TEXT
 )
 
+#: Everywhere else the SDL2 backend hands the bytes to SDL_SetClipboardText,
+#: which wants UTF-8 and terminates the string itself.
+_SDL_FORMATS = (
+    ("text/plain;charset=utf-8", "utf-8", b""),
+    ("text/plain", "utf-8", b""),
+    ("UTF8_STRING", "utf-8", b""),
+    ("TEXT", "utf-8", b""),
+    ("STRING", "utf-8", b""),
+)
 
-def _candidate_types() -> tuple:
-    """Text types to try, best guess first.
+#: Kept for the tests that put text on the clipboard the way another
+#: application would.
+_TEXT_TYPES = tuple(entry[0] for entry in _SDL_FORMATS)
+
+
+def _candidate_formats() -> tuple:
+    """Formats to try, best guess first.
 
     ``pygame.SCRAP_TEXT`` is read at call time rather than at import: it is a
     platform constant and on Windows it is not necessarily a MIME string.
     """
-    types = []
-    if _text_type:                      # already proven to work here
-        types.append(_text_type)
-    types.extend(_TEXT_TYPES)
+    formats = []
+    if _text_format:                    # already proven to work here
+        formats.append(_text_format)
+    formats.extend(_WINDOWS_FORMATS if _WINDOWS else _SDL_FORMATS)
     scrap_text = getattr(pygame, "SCRAP_TEXT", None)
-    if scrap_text is not None and scrap_text not in types:
-        types.append(scrap_text)
-    return tuple(types)
+    if scrap_text is not None and scrap_text not in [f[0] for f in formats]:
+        # An unknown spelling of plain text: the platform default encoding for
+        # it is the one the rest of that platform's list uses.
+        formats.append((scrap_text,) + formats[-1][1:])
+    return tuple(formats)
 
 
 def _ensure_ready() -> bool:
@@ -121,29 +164,65 @@ def _ensure_ready() -> bool:
     return _available
 
 
-def _decode(raw) -> str:
-    """Bytes from the clipboard into text, whatever the platform encoded them as."""
+def _encode(text: str, encoding: str, terminator: bytes) -> Optional[bytes]:
+    """Text into the bytes this clipboard format is read back as.
+
+    ``None`` when the platform has no such codec — ``mbcs`` exists on Windows
+    only — or when the text does not fit the code page, which is why the ANSI
+    format is a fallback and not the first choice.
+    """
+    try:
+        return text.encode(encoding) + terminator
+    except (LookupError, UnicodeEncodeError):
+        return None
+
+
+def _decode(raw, encoding: str = "") -> str:
+    """Bytes from the clipboard into text, whatever the platform encoded them as.
+
+    ``encoding`` is what the format we asked for is *supposed* to hold.  It is
+    tried first, but not trusted blindly: another application may have put
+    something else in there, and a wrong guess about UTF-16 is silent rather
+    than noisy — every byte pair is a valid code unit.  So the shape of the
+    data decides, and the declared encoding only breaks ties.
+    """
     if isinstance(raw, str):
         return raw
     data = bytes(raw)
     body = data.rstrip(b"\x00")
-    if b"\x00" in body:                 # interleaved NULs: UTF-16 from Windows
-        for encoding in ("utf-16-le", "utf-16"):
+    wide = encoding.startswith("utf-16") or b"\x00" in body
+    if wide:                            # interleaved NULs: UTF-16 from Windows
+        # Decoded from the FULL buffer, not the stripped one: the high byte of
+        # a final ASCII character is a NUL, and stripping trailing zeroes eats
+        # it — "ABCD12" came back as "ABCD1".  The terminator is cut after
+        # decoding instead, which is what Windows itself does.
+        even = data[:len(data) - len(data) % 2]
+        for candidate in ("utf-16-le", "utf-16"):
             try:
-                return body.decode(encoding)
+                decoded = even.decode(candidate)
             except (UnicodeDecodeError, UnicodeError):
-                pass
-    for encoding in ("utf-8", "latin-1"):
+                continue
+            decoded = decoded.split("\x00")[0]
+            if decoded:
+                return decoded
+    for candidate in (encoding, "utf-8", "latin-1"):
+        if not candidate or candidate.startswith("utf-16"):
+            continue
         try:
-            return body.decode(encoding)
-        except UnicodeDecodeError:
+            return body.decode(candidate)
+        except (LookupError, UnicodeDecodeError):
             continue
     return body.decode("utf-8", "replace")
 
 
 def _system_copy(text: str) -> bool:
-    """Write to the OS clipboard.  True if it actually got there."""
-    global _text_type
+    """Write to the OS clipboard.  True if it actually got there.
+
+    Each format is encoded the way the platform will read that format back —
+    UTF-8 for SDL2, UTF-16LE for Windows' CF_UNICODETEXT.  Encoding to one and
+    declaring the other is what turned "sdh" into 摳.
+    """
+    global _text_format
     scrap = getattr(pygame, "scrap", None)
     if scrap is None:
         return False
@@ -159,13 +238,16 @@ def _system_copy(text: str) -> bool:
     put = getattr(scrap, "put", None)
     if put is None:         # pragma: no cover - platform dependent
         return False
-    data = text.encode("utf-8")
-    for text_type in _candidate_types():
+    for text_format in _candidate_formats():
+        text_type, encoding, terminator = text_format
+        data = _encode(text, encoding, terminator)
+        if data is None:
+            continue        # no such codec here, or the text does not fit it
         try:
             put(text_type, data)
         except Exception:
             continue        # this platform does not want that type; try the next
-        _text_type = text_type
+        _text_format = text_format
         return True
     return False
 
@@ -178,7 +260,7 @@ def _system_paste() -> Optional[str]:
     ``None`` when the clipboard could not be read at all, which is the only
     case that justifies the fallback.
     """
-    global _text_type
+    global _text_format
     scrap = getattr(pygame, "scrap", None)
     if scrap is None:
         return None
@@ -194,15 +276,16 @@ def _system_paste() -> Optional[str]:
     if get is None:         # pragma: no cover - platform dependent
         return None
     readable = False
-    for text_type in _candidate_types():
+    for text_format in _candidate_formats():
+        text_type, encoding, _terminator = text_format
         try:
             raw = get(text_type)
         except Exception:
             continue        # unsupported type on this platform, not a failure
         readable = True
         if raw:
-            _text_type = text_type
-            return _decode(raw)
+            _text_format = text_format
+            return _decode(raw, encoding)
     return "" if readable else None
 
 
@@ -249,10 +332,10 @@ def reset() -> None:
     readable in the next one, and tests would pass or fail depending on order.
     Only tests call this.
     """
-    global _fallback, _checked, _available, _text_type
+    global _fallback, _checked, _available, _text_format
     _fallback = ""
     if _ensure_ready():
         _system_copy("")
     _checked = False
     _available = False
-    _text_type = None
+    _text_format = None

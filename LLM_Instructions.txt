@@ -254,7 +254,9 @@ pedzacy_piotrek/
                      fallback for machines where SDL has none.  Tries both
                      shapes of pygame.scrap (put_text/get_text, and put/get
                      with a type it discovers) because upstream pygame and
-                     pygame-ce do not offer the same one.  See CLIPBOARD.
+                     pygame-ce do not offer the same one, and encodes per
+                     FORMAT (UTF-16LE on Windows) because pygame converts
+                     nothing.  See CLIPBOARD.
     board_view.py    Board viewport: camera, pawn animation, walks, stacks.
     hand_fan.py      The hand fan and the card-play gesture.
     overlays.py      ChoicePrompt (the engine asking a question), RevealOverlay
@@ -729,7 +731,20 @@ Why the module is not three lines:
   backend accepts exactly one: ``"text/plain;charset=utf-8"``.
   ``pygame.SCRAP_TEXT`` is ``"text/plain"`` and is refused with "content could
   not be placed in clipboard"; other backends and older builds want
-  ``UTF8_STRING`` or ``TEXT``.
+  ``UTF8_STRING`` or ``TEXT``;
+* **and the type decides the ENCODING.**  pygame does not use SDL on Windows:
+  ``src_c/scrap.c`` selects the SDL2 backend with ``#if !defined(__WIN32__)``,
+  so Windows compiles ``scrap_win.c``, which maps
+
+      "text/plain;charset=utf-8"  ->  CF_UNICODETEXT  (Windows reads UTF-16LE)
+      "text/plain"                ->  CF_TEXT         (Windows reads ANSI)
+
+  and then ``memcpy``s the bytes it was handed, converting NOTHING.  UTF-8 sent
+  to the first of those is read back as UTF-16: "sdh" arrives in Discord as
+  摳.  ``_TEXT_FORMATS`` therefore carries (type, encoding, terminator)
+  together and the Windows table is a different table, not a different order.
+  CF_UNICODETEXT also wants a two-byte terminator and ``pygame_scrap_put``
+  allocates exactly ``srclen + 1``, so the second zero byte is appended here.
 
 So both call styles are tried, the type is discovered on first use and then
 remembered.  Delete either branch and the game works on one installation and
@@ -747,13 +762,23 @@ Rules the code depends on:
 * nothing raises.  A clipboard is not worth a stack trace in a menu;
 * pasted text is flattened to one line (CRLF first, or Windows text arrives
   with doubled spaces).  These are single-line fields;
+* UTF-16 is decoded from the WHOLE buffer, never from one stripped of trailing
+  NULs: the high byte of a final ASCII character IS a NUL, and stripping it
+  turned "ABCD12" into "ABCD1".  The terminator is cut after decoding, the
+  way Windows does it;
 * ``reset()`` is a TEST entry point and it blanks the system clipboard too —
   otherwise a value copied by one test is still readable in the next and tests
   pass or fail by order.
 
-Testing it is the subtle part.  Every clipboard test written before stage 15
-went through ``copy()`` and ``paste()``, which agreed with each other perfectly
-while nothing reached the operating system.  A test proves something here only
+Testing it is the subtle part, and it caught this module out twice.  Every
+clipboard test written before stage 15 went through ``copy()`` and ``paste()``,
+which agreed with each other perfectly while nothing reached the operating
+system.  Stage 16 was the same trap one level down: on Windows pygame returns
+the program's own cached bytes while it still owns the clipboard, so text
+written in the wrong encoding still pastes back correctly *inside the game*.
+The answer is ``_WinScrap`` in ``tests/test_usability.py`` — a stand-in that
+reproduces ``scrap_win.c``'s format mapping, its single trailing NUL and its
+ownership cache, and can be asked what another application would see.  A test proves something here only
 if it reaches PAST the module — put with ``pygame.scrap.put``, read back with
 ``clipboard.paste()``, and the other way round (N66).  Even then, SDL's dummy
 driver keeps clipboard text inside the process, so the last mile — a real
@@ -1475,6 +1500,18 @@ N66. Never swallow an exception around a clipboard call without a test that
 N67. Never let the internal fallback answer when the system clipboard could be
      read. An empty system clipboard is an answer; pasting a stale in-process
      value over it is a lie about what the user copied.
+N68. Never encode clipboard text without asking which FORMAT it is going into.
+     pygame converts nothing on Windows: bytes handed to
+     "text/plain;charset=utf-8" land in CF_UNICODETEXT and are read as
+     UTF-16LE. UTF-8 there turns "sdh" into 摳. Encoding and type travel
+     together in _TEXT_FORMATS.
+N69. Never trust a clipboard round trip through pygame as proof that copying
+     works. On Windows, scrap_win.c returns the program's OWN cached bytes
+     while it still owns the clipboard, so a corrupt copy reads back perfectly
+     inside the game. Only another application can tell you, or the
+     scrap_win.c stand-in in tests/test_usability.py.
+N70. Never rstrip NULs before decoding UTF-16. The high byte of a trailing
+     ASCII character is one, and "ABCD12" loses its 2.
 
 
 ================================================================================
@@ -1486,11 +1523,12 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    (server/room.py broadcast), and it is not free — see L1a.
 
 0aa. FIRST, five minutes: run tools/clipboard_check.py on the real desktop and
-   confirm copy and paste cross into another application. Stage 15 fixed the
-   clipboard, and the fix is covered by tests, but this environment's SDL had
-   no X11 driver, so no human or machine has yet seen text travel between this
-   game and Discord. It is the one claim in the stage that rests on reasoning
-   rather than observation.
+   confirm copy and paste cross into another application INTACT. Stages 15 and
+   16 fixed the clipboard, and both fixes are covered by tests, but no CI box
+   has Discord and this environment's pygame had no X11 driver at all, so the
+   final hop has still never been observed. Stage 16 exists because stage 16's
+   bug was invisible to every test that stayed inside the process — check the
+   Polish letters and a room code by eye, not just that something arrives.
 
 0a. BEFORE ANYTHING ELSE, someone should play a real match through a deployed
    server. Stage 13 fixed the defect that made hosting impossible, and the fix
@@ -1528,7 +1566,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 576 tests, ~100 s
+    python -m pytest -q                     # 595 tests, ~120 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -1551,7 +1589,11 @@ HOW TO VERIFY A CHANGE
                                    (stage 15) that copy and paste really reach
                                    pygame.scrap rather than a buffer inside the
                                    process — those tests bypass ui/clipboard on
-                                   purpose
+                                   purpose — and (stage 16) a _WinScrap
+                                   stand-in that reproduces scrap_win.c's
+                                   format mapping, single NUL and ownership
+                                   cache, so the Windows encoding path is
+                                   exercised on Linux
       tests/test_menu_layout.py  — text overlap at four resolutions, text entry
     python -m pedzacy_piotrek --selftest    # renders frames headlessly
     python tools/inspect_frame.py --window 2560x1440
