@@ -567,6 +567,39 @@ class Layout:
         panel = self.card_picker_panel(count)
         return pygame.Rect(panel.centerx - 110, panel.bottom - 56, 220, 40)
 
+    # Paczka's window is a LIST rather than a row of cards: six players holding
+    # two Chest cards each is twelve faces, which no card lineup fits at
+    # 1280×760.  It borrows the picker's furniture — centred panel, brass
+    # heading, one button — and sizes itself to however many lines it has.
+    def chest_reveal_panel(self, lines: int) -> pygame.Rect:
+        width = int(_clamp(self.win_w * 0.34, 380, 620))
+        height = int(self.chest_reveal_header
+                     + max(1, lines) * self.chest_reveal_line
+                     + self.chest_reveal_footer)
+        height = min(height, int(self.win_h * 0.86))
+        return pygame.Rect(self.win_w // 2 - width // 2,
+                           self.win_h // 2 - height // 2, width, height)
+
+    @property
+    def chest_reveal_line(self) -> int:
+        return int(24 * self.ui_scale)
+
+    @property
+    def chest_reveal_header(self) -> int:
+        return int(76 * self.ui_scale)
+
+    @property
+    def chest_reveal_footer(self) -> int:
+        return int(78 * self.ui_scale)
+
+    def chest_reveal_ok_rect(self, lines: int) -> pygame.Rect:
+        panel = self.chest_reveal_panel(lines)
+        width = int(_clamp(self.win_w * 0.09, 130, 220))
+        height = int(40 * self.ui_scale)
+        return pygame.Rect(panel.centerx - width // 2,
+                           panel.bottom - height - int(20 * self.ui_scale),
+                           width, height)
+
     # ── choosing the Mods Patusa ─────────────────────────────────────────────
     # Same furniture as the card picker, one size down and with room under the
     # panel for the vote tally.  Reusing ``card_picker_card_size`` is what keeps

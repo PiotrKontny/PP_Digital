@@ -1,6 +1,7 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 23 — Piotrek is dealt chest cards again, chest deck to 16
+Last updated: stage 25 — Paczka, Squid Game and Shady have their effects; AKO
+              is the last placeholder mod
               (see CHANGELOG_LLM.md)
 ================================================================================
 
@@ -96,6 +97,21 @@ WORKING:
 - PLAYABLE movement cards: 26 of 30 definitions.  Deterministic ones act at
   once; select-a-token ones (Janek, Kolos z paki, Astral 2019, Astral 2022)
   ask through the generic choice system, which shows the pawns themselves.
+- MOD PATUSA EFFECTS (stages 24-25): SEVEN of the eight mods now change the
+  game.  Speedrun lets a backward movement card be turned around; Masa solna
+  caps a movement card at one field; Halloween pins any pawn with nobody in
+  front of or behind it; Sesja na PG locks character abilities without spending
+  their charges; Paczka shows every player the same window listing who holds
+  which Chest cards; Squid Game replaces checking with one automatic check of
+  the leading pawn per round; Shady takes the leading pawn off the map for a
+  round.  AKO is the only placeholder left.  Every rule is DECLARED in
+  cards.json as a ``passive`` and read through ``GameState.mod_rule`` — no
+  titles in the engine.  See "HOW THE MOD PATUSA EFFECTS WORK".
+- MOD DECK COMPOSITION (stage 24): thirteen cards, not one of each — Speedrun 2,
+  Masa solna 2, AKO 1, Halloween 1, Sesja na PG 2, Paczka 2, Squid Game 1,
+  Shady 2.  Those are DEFAULTS from cards.json; the lobby sets any count per
+  title through the "Skład talii" panel on both settings screens, and the
+  numbers replicate like every other setting.
 - MOD PATUSA SELECTION (stage 21): every second round from the third (both
   numbers set in the lobby) the table PAUSES and both factions choose a mod.
   Piotrek picks one of three; the hunters vote on three of their own.  See
@@ -109,12 +125,15 @@ WORKING:
   prototype did; off, only the local seat may act — enforced in the engine, so
   it is the rule the network will need.
 - CHARACTER ABILITIES: Big D Randy, Lubin, Mitoman, Norbur, Dziad, Ondrej,
-  Dziubdziuch and Atencjusz all execute.  Glockboy reports that the checking
-  mechanic does not exist yet and spends nothing.
+  Dziubdziuch and Atencjusz all execute.  Glockboy still reports that it has
+  nothing to do and spends nothing — checking DOES exist (stage 17, see
+  VICTORY AND THE HIDDEN IDENTITY), so what Glockboy and Ice Block are waiting
+  on now is a decision about how they should interact with it, not the
+  mechanic.
 - PIOTREK'S SKILLS: dealt at game start.  ChatGPT (passive: two movement cards
   fewer and one chest slot; active: +1 range on the next movement card, five
-  times) and Dług u Tomasza (records its state) work; Ice Block reports the
-  missing checking mechanic.
+  times) and Dług u Tomasza (records its state) work; Ice Block still reports
+  that it has nothing to do (see the note on Glockboy above).
 - PERSISTENT GAMEPLAY STATES: frozen, skip turn, linked, extra turn, movement
   bonus, restricted movement, forbidden adjacency, check refusal.
 - CHEST HAND LIMIT with a keep/discard overlay (Piotrek 2, hunters 1).
@@ -180,9 +199,12 @@ WORKING:
 - 647 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
+- ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
+  mod slot, but has no gameplay effect yet — its text still needs a ruling from
+  the owner. The other seven all work (stages 24-25).
 - Cards whose effect requires a player decision (14 of 69 movement cards, all
-  chest cards, all mods). They are inert: they can be drawn, discarded and put
-  in the mod rack, and their text tells players what to do manually.
+  chest cards). They are inert: they can be drawn and discarded, and their text
+  tells players what to do manually.
 - Turn enforcement: any player can act at any time (deliberate, for testing).
 - Sound and music.
 
@@ -977,6 +999,284 @@ hand-off, resize).
 
 
 ================================================================================
+HOW THE MOD PATUSA EFFECTS WORK  (stage 24)
+================================================================================
+
+A mod in the rack changes the rules for as long as it is there.  That is what a
+``passive`` is — the same field ChatGPT uses to shrink Piotrek's hand — so the
+rules are DECLARED IN cards.json:
+
+    Speedrun     {"reverse_backward": true}
+    Masa solna   {"movement_cap": 1}
+    Halloween    {"require_neighbour": true}
+    Sesja na PG  {"abilities_locked": true}
+
+``GameState.mod_rule(key)`` scans the rack; ``movement_cap``,
+``abilities_locked``, ``requires_neighbour`` and ``reverses_backward_moves``
+are named wrappers.  NOTHING IN THE ENGINE ASKS A MOD WHAT IT IS CALLED, and
+nothing may start: card titles are content, not code.  A future mod that caps
+movement is a JSON entry and no Python at all.
+
+The LEFT slot wins if two mods ever disagree.  Nothing declares a conflicting
+pair today; the rule exists so both machines resolve it the same way rather
+than by dictionary order.
+
+
+WHICH EFFECTS THE MODS APPLY TO
+-------------------------------
+Masa solna and Halloween are rules about MOVEMENT CARDS.  They must not touch:
+
+  * character abilities — Dziad's ability is an ordinary ``move_pawn`` and
+    would otherwise be caught by both;
+  * chest cards — none has a movement effect today, and when one does it must
+    not silently inherit the movement deck's restrictions.
+
+``EffectContext`` carries ``origin`` ("card" / "ability" / "on_draw") and
+``deck_id`` for exactly this, and ``ctx.from_movement_card`` is the test.
+
+
+``can_ask`` — READ THIS BEFORE ADDING A MOD THAT ASKS ANYTHING
+--------------------------------------------------------------
+Seks z pedałami and Troll's forced play choose a card from
+``resolves_without_asking``.  That is a property of the PRINTED card, computed
+from its spec, and it CANNOT know that a mod has just given the card a question
+to ask.  A mod that opens a prompt therefore breaks both cards: they pick a
+card that looks self-resolving, it returns a Choice, nobody is there to answer,
+and the card fizzles with "bez efektu".
+
+Those two call sites pass ``can_ask=False``.  A handler that would ask must
+fall back to something legal instead.  Speedrun declines the reversal, which is
+always legal because the mod only ever OFFERS one.
+
+
+THE ORDER OF THE QUESTIONS IS PART OF THE RULES
+-----------------------------------------------
+    1. Speedrun's direction
+    2. which pawn (if the card asks)
+    3. which half of a widened row (if the destination is doubled)
+
+Speedrun is resolved at the TOP of ``_move_pawn``, before ``_movement_target``.
+It can be: the card's printed direction is all it needs.  Asking it after the
+pawn would mean the player choosing a pawn to move backwards and only then
+being told it could go forwards.  Do not "tidy" it back down next to the other
+step handling.
+
+Only ``direction: "backward"`` asks.  ``direction: "either"`` does NOT — those
+cards already let the player choose the way, and a second question about the
+same decision would be asked and answered twice.
+
+Plagiat! moves backwards through ``_move_pawns``, a SEPARATE handler, and gets
+the same treatment there.  Any rule added to one handler has to be added to the
+other or the two paths drift apart.
+
+
+HALLOWEEN AND THE FIZZLE
+------------------------
+A pinned pawn does not refuse the card.  The card is played, discarded, the
+hand refills and the turn passes; only the movement does nothing.
+
+That cannot be an empty Plan.  ``Plan.ok`` is ``bool(self.operations)``, so an
+empty one reads as a REFUSAL everywhere and the card would stay in the hand.
+The idiom is Thunderfuck's, which has had the same problem since stage 21: emit
+a REAL operation whose executor does nothing.  Here that is ``Fizzle`` →
+``_op_fizzle`` → ``MoveFizzled``, which also tells the player why, because a
+card that silently did nothing looks like a bug.
+
+Neighbour means the position immediately ahead or behind is occupied.  Sharing
+a field is NOT being a neighbour: a tower is one field.
+
+**THE CAMP IS ONE CLUSTER.  This is a decision, not a reading of the rule, and
+it is load-bearing.**  Every pawn starts in the camp at ``CAMP_INDEX``.  Taken
+literally nobody there has a neighbour, so Halloween reaching the rack while
+the field is still waiting — which ``mod_round_first: 1`` allows — would freeze
+the board for the rest of the match: nothing moves, nobody reaches the finish,
+no tower is ever built, so NEITHER FACTION CAN WIN.  Pawns waiting shoulder to
+shoulder in the camp are neighbours of one another.  If the owner wants the
+literal rule instead, the deadlock has to be solved some other way first.
+
+On a multi-pawn card each pawn is judged against the board THAT move sees, via
+``MoveProjection.positions``, because an earlier move can give a later pawn its
+neighbour or take it away.
+
+
+SESJA NA PG PRESERVES CHARGES
+-----------------------------
+Refused in ``_use_ability`` BEFORE anything resolves, so ``spend_use()`` is
+never reached and the remaining uses survive the mod untouched.  In the engine
+and not only the interface: a client that does not grey the button must still
+be unable to act.
+
+The button greys exactly the way a spent ability does (``enabled=False``) but
+reads "SESJA NA PG", not "ZUŻYTE" — locked is not spent, and the caption must
+not say something false about charges that are coming back.
+
+
+THE DECK AND ITS COMPOSITION
+----------------------------
+Thirteen cards.  Every title appears ONCE in cards.json and copies come from
+``count`` — never repeat the entry.
+
+``SessionConfig.mod_counts`` overrides the counts by title and
+``DeckDef.with_counts()`` builds the result.  Two properties are load-bearing:
+
+  * an ABSENT title keeps its printed count, so an empty mapping means "the
+    real deck".  That is what every existing test sends, and what a client on
+    an older build sends;
+  * the CARD ORDER stays the JSON's.  A shuffle is a permutation of a list, so
+    a list assembled in the mapping's iteration order shuffles differently on
+    two machines from one seed.  Do not rebuild it from the mapping.
+
+``clamp_mod_counts`` (config/settings.py) is shared by the config, the lobby
+and the server so all three agree what a payload means, and it returns the
+pairs SORTED because the mapping travels inside the lobby snapshot clients
+compare against the host's.
+
+``room.set_settings`` MERGES incoming counts rather than replacing them: the
+panel sends only the titles it knows about, and a replace would let a host on
+an older build empty the deck.
+
+A deck too small to deal ``mod_choices`` cards to both factions simply does not
+pause the round — ``_open_mod_selection`` already declined on an exhausted
+deck, and the panel warns before it gets that far.
+
+
+THE PANEL
+---------
+``ui/mod_counts_panel.py``, shared by the hot-seat menu and the network host
+screen.  ONE deck needs ONE place to describe it.
+
+It is an overlay, not eight more settings rows, and that is not cosmetic: both
+screens lay themselves out by measuring rows and shrinking the gaps until they
+fit, and stage 21 already records a FIFTH row pushing the Start button off a
+1280×760 window.  Eight more do not fit at any gap on either screen.  If you
+are tempted to inline them, run tests/test_menu_layout.py at 1280×760 first.
+
+Two things it gets right that are easy to get wrong again:
+
+  * the opening button sits BESIDE the Mod Patusa row, not under it.  Under, it
+    lands on the "pola podwójne" label at 1280×760.
+  * the steppers are MEASURED and placed by their right edge.  ``Stepper``
+    sizes its buttons to its own labels at the current type scale, so any
+    hard-coded inset is wrong at some window size.
+
+Both are pinned by tests in tests/test_mod_counts_ui.py.
+
+
+================================================================================
+THE THREE MODS THAT ACT AT A MOMENT  (stage 25)
+================================================================================
+
+Paczka, Squid Game and Shady are NOT pure passives, and that is the only thing
+that makes them different from the stage 24 four.  A passive answers a question
+about the rack as it is now.  These three act at a MOMENT: Paczka when it
+arrives, Squid Game at the start of every round after it arrives, Shady when it
+arrives and again a round later.
+
+``GameState.armed_mods`` maps a mod's card uid to the round it entered the
+rack, and ``_sync_mod_states()`` computes the TRANSITIONS in and out of it.
+Call it from anything that changes ``mod_slots`` — the selection, PlaceMod and
+Thunderfuck all do.  A fourth way into the rack that forgets to would silently
+skip every arrival.
+
+THE DEPARTURE HALF IS NOT OPTIONAL.  A mod that leaves must leave NOTHING
+behind: removing Shady puts its pawn back immediately (otherwise replacing it
+mid-round strands a pawn nowhere for the rest of the match) and removing Squid
+Game drops the pending check and restores ordinary checking.  The rack is the
+only thing keeping any of these rules alive.
+
+Arming is keyed on the declared ``passive``, never on the title (N98).
+
+
+PACZKA, AND THE ONE SANCTIONED BREACH OF N81
+--------------------------------------------
+``ChestCardsRevealed`` carries card TITLES to the whole table.  N81 forbids
+exactly that, and this is the ONE place allowed the exception: the rule exists
+because normally only one player is entitled to look, and here the card IS the
+entitlement — Paczka's whole text is that the Chest is public.  Any OTHER event
+carrying Chest titles is still a bug.
+
+Every machine builds the same list from its own replica and shows its own
+window; each player dismisses their own with OK.  Nothing is synchronised
+because nothing changes, and no command is logged.
+
+The window is a LIST, not a row of card faces — six players holding two cards
+each is twelve faces and no lineup fits at 1280×760 — but it is built from the
+card picker's furniture so it reads as the same family of window.  It sits
+ABOVE the keyboard dispatch in ``handle_event`` so Esc closes it rather than
+opening the pause menu, and it consumes only the input that dismisses it.
+
+
+SQUID GAME: WHO IS CHECKED IS PUBLIC, WHAT IT MEANS IS NOT
+----------------------------------------------------------
+THE SPLIT IS THE WHOLE DESIGN, and getting it wrong is either a desync or a
+client deciding a winner.
+
+  ARMING   ``_arm_lead_check`` runs in ``_begin_round`` on EVERY machine.  The
+           single furthest pawn is public information, so every replica names
+           the same colour and stores it in ``pending_lead_check``.
+  JUDGING  ``victory.review`` runs on the AUTHORITY ONLY and turns that colour
+           into the existing ``EliminatePawn`` or ``DeclareVictory``.  It needs
+           the hidden colour, which is why it cannot be anywhere else.
+
+NO NEW COMMAND.  The verdict travels the road every other verdict travels, so
+logging, broadcast, replay, reconnection and the fingerprint keep working.
+
+``pending_lead_check`` is cleared by the COMMAND that settles it, in
+``_eliminate_pawn`` and ``_declare_victory``.  Not by the code that armed it:
+the authority would clear its own copy and every replica would go on waiting.
+
+The other half of the card is that the ORDINARY check is switched off — while
+``lead_check_only`` is true, ``review`` never looks at a gathering tile at all.
+Both halves read the same rule so they cannot get out of step.
+
+A SHARED LEAD IS SKIPPED, NOT TIE-BROKEN, and the skip is announced: a round
+where nothing happens is otherwise indistinguishable from a broken mod.  A
+colour already crossed off is not checked twice.  Piotrek reaching the meta
+still wins — this mod replaces CHECKING, not the other ending.
+
+
+SHADY: ONE PAWN, IGNORED BY FIVE THINGS
+---------------------------------------
+``StatusKind.HIDDEN`` on the pawn (N18), carrying the riders and the round, so
+snapshot, serialisation and reconnection are free.
+
+The pawn taken is the BOTTOM of the furthest OCCUPIED FIELD.  That is a
+different question from Squid Game's and has its own function: the lead mod
+skips a shared lead, Shady is told what to do about one.
+
+Once hidden it is ignored by ``hindmost``/``foremost`` (one filter in
+``_ordered_pawns``), by ``pawn_options``, by ``MoveProjection.positions`` and
+by ``has_neighbour`` — all four go through ``effects.is_hidden`` /
+``live_pawns``, so "ignore it" is one decision rather than six.  A card that
+names it anyway RESOLVES, is discarded and does nothing: ``Fizzle``, the
+Halloween idiom (N99), in ``_move_pawn``, ``_move_pawns`` AND ``_stack_pawn``
+(N104).
+
+ON SCREEN IT DISAPPEARS THROUGH ONE OMISSION, in ``BoardView._draw_order``.
+That list is what gets painted AND what ``token_at`` hit-tests, so the pawn
+stops being drawn and stops being clickable in the same line.
+``BoardView.forget_pawn`` drops its animation state, or it slides the length of
+the board when it reappears somewhere it has never been.
+
+CHECKING COUNTS THE PAWNS ON THE TABLE, not the palette — ``visible_pawns`` —
+which is the whole of the exception.  Five onto one field while a pawn is away,
+six again once it is back.
+
+Restored at the START OF THE NEXT ROUND, on top of the rearmost pawn, before
+anything else in ``_begin_round`` sees the board.  It does NOT go back where it
+came from; that is the point of the card.  ONE-TIME: it stays on display and
+never fires again, because arming is a transition.  A SECOND Shady is a new
+arrival and does hide a pawn.
+
+THE BRIEF'S ARITHMETIC.  The brief says checking normally needs "all five
+remaining pawns" and four while Shady is active.  The palette has SIX pawns, so
+that reads as off by one; it is consistent if the count is pawns stacked ONTO A
+BASE PAWN (five onto one is all six, four onto one is all five), which also
+matches the brief's own "since one pawn is absent".  Do not "fix" the code to
+literal fives and fours.
+
+
+================================================================================
 HOW THE PLAYER SYSTEM WORKS
 ================================================================================
 
@@ -1711,6 +2011,58 @@ KNOWN LIMITATIONS
   treats a mouse press during a rename as "confirm". See TEXT FIELDS for why
   this is a UI decision rather than a missing patch.
 
+L17. DECIDED, NOT SPECIFIED: Shady removes ONE pawn, and anything riding it
+    stays where it was and settles onto the field. The brief says to remove
+    "the BOTTOM pawn of that stack" and its own example removes one pawn (pink
+    standing on green: "green disappears"), but it also says to store and
+    RESTORE "its carried stack", which only means something if the tower
+    travels too. Those conflict. One pawn leaves, because the brief elsewhere
+    says "since one pawn is absent" and because the checking exception is
+    written for exactly one absent pawn. The carried stack IS recorded in the
+    status and in PawnHidden, so the other reading is a small change rather
+    than a rewrite. The owner should confirm.
+
+L18. DECIDED, NOT SPECIFIED: Squid Game's automatic check runs at the start of
+    every round from the one AFTER it arrived, and the pawn it inspects is
+    chosen by board POSITION. Two pawns on one field are two pawns at the
+    front, so a tower at the head of the road skips the round exactly as two
+    separate pawns level with each other do. The brief says "exactly one pawn
+    occupies the furthest position", which is what that implements, but a
+    reading where the tower's bottom pawn is checked is equally defensible and
+    would be one call to change.
+
+L19. Paczka's window is driven by an EVENT, so a player who reconnects and
+    replays a long command log can see it open for a mod that arrived several
+    rounds ago. It is dismissed with one click and changes nothing, so this is
+    a wart rather than a bug — but it is the same class of thing N74 exists
+    for, and if it ever matters the fix is to drive it from ``armed_mods`` and
+    the state the way the match overlays are driven.
+
+L14. DECIDED, NOT SPECIFIED: Halloween treats the CAMP as one cluster — pawns
+    waiting there are neighbours of one another. The brief says only "one in
+    front or one behind", which taken literally means no pawn in the camp ever
+    has a neighbour; since every pawn starts there and the lobby allows
+    ``mod_round_first: 1``, that reading can freeze the board for the whole
+    match and make both victory conditions unreachable. The owner should
+    confirm. If the literal rule is wanted, the deadlock needs solving first —
+    exempting camp pawns entirely is the obvious alternative.
+
+L15. DECIDED, NOT SPECIFIED: Masa solna caps the distance PRINTED ON THE CARD,
+    and ChatGPT's +1 movement bonus still applies on top, so a capped two-field
+    card plus the bonus moves two. The brief says movement cards move one
+    field; the bonus is a status somebody spent an ability to get, not a
+    movement card, and swallowing it would have rewritten a skill this stage
+    was not asked to touch. Trivial to change — the cap is applied in
+    ``_capped_steps`` before the bonus is added — if the owner wants the mod to
+    win outright.
+
+L16. The Mod Patusa counts are the first setting that is a MAPPING rather than a
+    number, and the first that can make a deck too small to use. The panel
+    warns and ``_open_mod_selection`` already declines on an exhausted deck, so
+    a table with no mods plays on without pausing — correct, but it means a
+    misconfigured lobby fails quietly rather than loudly. If mods ever become
+    load-bearing for balance, consider refusing to start instead.
+
 L1. STILL OPEN. A client rebuilds the FULL state from the seed and the command
     log, so a modified client could read another player's hand. The server now
     checks *permissions* (whose seat, whose turn) but does not yet filter what
@@ -1736,23 +2088,25 @@ L3e. The server keeps the whole command log in memory for as long as a room
 L2a. The Debug Version option is a development aid: it only relaxes the player
     minimum to two.  A two-player game is playable but not balanced — one hunter
     against Piotrek is not the game the design document describes.
-L3b. Nothing ends the game yet: the loop will happily run for ever, because win
-    conditions are still unimplemented.
+L3b. OUT OF DATE: win conditions landed in stage 17; a match ends and offers
+    three ways out.
 L3c. A two-player game is playable end to end but not balanced, and its cadence
     gives the single hunter a whole round of their own.
 L3a. (fixed in stage 8) The turn passes manually (any active player may hand it to anyone) — the
     cadence in turn_order.py is displayed but not enforced.
-L4. Four movement cards remain inert, each needing a mechanic that does not
-    exist: Troll (forces a card out of a hand), Stańczyk (skips a future turn),
-    Spy (looks at another hand and steals), Plagiat! (its second half makes the
-    player to the left act).  All mods and chest cards are still inert too.
+L4. OUT OF DATE, kept for the history: those four movement cards were finished
+    in stage 19 and the mods in stages 24-25. What is still inert is AKO and
+    every CHEST card.
 L4a. Gamechanger, Alter Ego and Kingmaker are PRESENTATION ONLY — they have no
     gameplay effect yet, as the stage brief specified.
-L4b. Statuses are recorded and shown but not all are enforced: SKIP_TURN and
-    EXTRA_TURN are informational because there is no turn enforcement, and
-    FORBIDDEN_ADJACENCY waits on the checking rules.
-L5. No win detection, no turn enforcement, no scoring.
-L6. Mods and chest cards have no mechanical effect; they are text for humans.
+L4b. PARTLY OUT OF DATE: SKIP_TURN has been enforced since stage 19. EXTRA_TURN
+    is still informational, and FORBIDDEN_ADJACENCY is still unread — which by
+    N80 means Dług u Tomasza looks implemented and is not.
+L5. OUT OF DATE: win detection landed in stage 17 (engine/victory.py) and the
+    turn loop in stage 8. What is still missing is turn ENFORCEMENT as an
+    optional rule switch, and scoring.
+L6. OUT OF DATE: seven of the eight mods work (stages 24-25). CHEST cards are
+    still text for humans, and that is the largest block of content left.
 L7. "hindmost" ties are broken by (position index, stack depth, pawn order).
     This is deterministic but arbitrary; the paper game would have players
     decide.
@@ -2490,13 +2844,127 @@ N97. Never cut the chest deck back to one copy per title. Two cards go out per
    for the rest of the match. It is sixteen (eight titles, two each) and the
    doubling is UNIFORM so that no title is more likely than another.
 
+N98. Never ask a Mod Patusa what it is CALLED. Its rule is declared in
+   cards.json as a `passive` and read through GameState.mod_rule. A chain of
+   `if card.title == "Masa solna"` is the thing this project does not do, and
+   a mod is not an exception to it. Adding a mod that caps movement, locks
+   abilities or pins lone pawns is a JSON entry and no Python.
+
+N99. Never express "this card did nothing" as an empty Plan. `Plan.ok` is
+   `bool(self.operations)`, so an empty plan reads as a REFUSAL to every caller
+   and the card stays in the hand — the opposite of Halloween's rule, which is
+   that the card resolves and is discarded. Emit a real operation whose
+   executor does nothing (`Fizzle`), the way Thunderfuck does for an empty
+   rack, and say why: a card that silently did nothing looks like a bug.
+
+N100. Never let a handler open a prompt without checking `ctx.can_ask`. Seks z
+   pedałami and Troll's forced play choose from `resolves_without_asking`,
+   which is computed from the PRINTED card and cannot know a mod has just given
+   it a question. Without the check, every revealed backward card became "bez
+   efektu" while Speedrun was in the rack. Fall back to something legal —
+   Speedrun declines the reversal, which is always allowed because the mod only
+   ever offers one.
+
+N101. Never make Halloween's neighbour test literal for the camp. Every pawn
+   starts at CAMP_INDEX, so under "one in front or one behind" nobody in the
+   camp ever has a neighbour, and Halloween reaching the rack on round 1 —
+   which the lobby allows — freezes the board permanently: nothing moves,
+   nobody reaches the finish, no tower is built, so NEITHER FACTION CAN WIN.
+   Pawns in the camp are neighbours of one another. This is a decision, not a
+   reading; if it is ever reversed, the deadlock must be solved first.
+
+N102. Never move the Mod Patusa counts into the settings rows. Both screens
+   shrink their gaps until they fit and stage 21 already lost the Start button
+   to a fifth row at 1280×760; eight more do not fit at any gap. They live in
+   an overlay. The button that opens it goes BESIDE the Mod Patusa row, never
+   under it, and the steppers inside are MEASURED rather than inset by a
+   constant — Stepper sizes itself to its own labels at the current type scale,
+   so any fixed inset is wrong at some window size.
+
+N103. Never apply a movement mod to an ability or a chest card. Masa solna and
+   Halloween are rules about MOVEMENT CARDS; Dziad's ability is an ordinary
+   `move_pawn` and would be caught by both. `ctx.from_movement_card` is the
+   test, and it is why EffectContext carries `origin` and `deck_id` at all.
+
+N105. Never assume the checking mechanic is missing because this file used to
+   say so. It has existed since stage 17 as engine/victory.review(): all pawns
+   on one field, inspect the BOTTOM one, hunters win or the colour is crossed
+   off. Four places in this file called it "the main blocker" for seven stages
+   after it shipped, and stage 25 was one mistaken reading away from building a
+   second one. When a note and the changelog disagree, the changelog is newer.
+
+N106. Never let a mod that acts at a MOMENT be armed anywhere but
+   `_sync_mod_states`. Arrival and departure are transitions of the rack, not
+   properties of it, so they are computed by comparing `armed_mods` with
+   `mod_slots` and nowhere else. A mod that arms itself from `_begin_round`, or
+   from the selection only, is a mod Thunderfuck can install without it ever
+   firing.
+
+N107. Never leave a departing mod's effect behind. The rack is the only thing
+   keeping a mod's rule alive, so removing Shady puts its pawn back at once and
+   removing Squid Game drops the pending check. Without the departure half,
+   replacing Shady mid-round strands a pawn nowhere for the rest of the match —
+   and a stranded pawn cannot be moved, checked or won with.
+
+N108. Never widen Paczka's exception to N81. `ChestCardsRevealed` carries card
+   titles to the whole table because Paczka's text IS "the Chest is public" —
+   the card is the entitlement. That is the ONE event allowed it. Any other
+   event carrying Chest titles is a leak, and the fact that this one exists is
+   not a precedent.
+
+N109. Never let one machine decide WHO an automatic check inspects and another
+   decide what it means. Squid Game arms on every replica from public
+   information (`pending_lead_check`, in the snapshot) and is judged only by
+   `victory.review` on the authority. Moving the judgement to the clients means
+   a client declaring a winner (N72); moving the arming to the server alone
+   means the server drifting from every replica.
+
+N110. Never clear state that a command settles from the code that armed it.
+   `pending_lead_check` is cleared inside `_eliminate_pawn` and
+   `_declare_victory`, so every machine clears it at the same point in the log.
+   Clearing it where the check was armed clears it on the authority only, and
+   five replicas go on waiting for a check that already happened.
+
+N111. Never remove a pawn from play without asking what still counts it.
+   Shady's hidden pawn had to disappear from `_ordered_pawns`, `pawn_options`,
+   `MoveProjection.positions`, `has_neighbour`, `victory.gathering_tile` and
+   `BoardView._draw_order`. Miss the last and it is still clickable; miss the
+   fifth and the hunters can never check again, because they are being asked to
+   gather a pawn that is not on the board.
+
+N104. Never add a rule to `_move_pawn` without asking whether `_move_pawns`
+   needs it too. Plagiat! moves backwards through the second handler, so
+   Speedrun, Masa solna and Halloween all had to be applied twice. A rule added
+   to one path only makes the two drift apart, and the difference is invisible
+   until someone plays the one card that takes the other route.
+
 
 ================================================================================
 RECOMMENDED ORDER OF FUTURE DEVELOPMENT
 ================================================================================
 
-0. NEXT: hidden-information filtering (L1) is now the biggest remaining gap and
-   the last thing between this and a public release. It is a server-side change
+0. NEXT, and it costs one message: confirm the two rulings stage 24 had to make
+   because the brief did not cover them — Halloween's camp cluster (L14) and
+   Masa solna against ChatGPT's +1 bonus (L15). Both are one-line changes now
+   and both are the kind of thing that calcifies once a real match is played on
+   top of them.
+
+0b. THEN: AKO is the last mod without an effect, and it is waiting on the
+   owner rather than on any machinery — "Wszystkie ruchy poruszają jednego
+   sąsiadującego pionka" needs a ruling on which neighbour, chosen by whom, and
+   whether it replaces the card's own movement or adds to it. Everything needed
+   to write it exists: a rule is a `passive` in cards.json plus a wrapper on
+   GameState (seven worked examples now), and a mod that acts at a moment goes
+   through `_sync_mod_states` (N106). Read "HOW THE MOD PATUSA EFFECTS WORK"
+   and "THE THREE MODS THAT ACT AT A MOMENT" first, plus `can_ask` (N100) if it
+   asks anything and N104 if it touches movement.
+
+0c. AND: confirm the two rulings stage 25 had to make — Shady removing one pawn
+   rather than the whole tower (L17) and a tower at the head of the road
+   counting as a shared lead (L18). Both are one-line changes today.
+
+1. hidden-information filtering (L1) is the biggest remaining gap and the last
+   thing between this and a public release. It is a server-side change
    (server/room.py broadcast), and it is not free — see L1a.
 
 0aa. FIRST, five minutes: run tools/clipboard_check.py on the real desktop and
@@ -2521,10 +2989,12 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    (double_frequency, edit_mode).  Both normalised() and create_game() use
    dataclasses.replace now, and a test walks every field — keep it that way.
 
-1. THE CHECKING MECHANIC. Several abilities are built and waiting on it
-   (Glockboy, Ice Block, and Ondrej's link already marks both pawns). It is
-   also what makes the game finishable.
-2. Effects for the remaining mod and chest cards. THE MOVEMENT DECK IS NOW
+1. CHEST CARD EFFECTS — the largest block of content left, and now the
+   clearest next stage. (This entry used to read "THE CHECKING MECHANIC";
+   that shipped in stage 17 and the note was seven stages stale — see N105.
+   Glockboy and Ice Block are waiting on a DECISION about how they interact
+   with checking, not on checking itself.)
+2. Effects for the remaining chest cards. THE MOVEMENT DECK IS NOW
    COMPLETE (stage 19 finished Troll, Stańczyk, Spy and Plagiat!). Most of
    what remains is a JSON entry plus at most one handler — and before writing
    the handler, read TURN INTERRUPTS, FORCED PLAYS AND MULTI-SELECT, because
@@ -2547,7 +3017,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 647 tests, ~140 s
+    python -m pytest -q                     # 944 tests, ~140 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -2579,6 +3049,17 @@ HOW TO VERIFY A CHANGE
                                    dealing round at every table size, that two
                                    overflows in one round are both asked, and
                                    that no card leaks out of the chest deck
+      tests/test_mod_effects.py  — Paczka, Squid Game and Shady: the rules
+                                   coming from the JSON, Paczka's list and its
+                                   empty case, Squid Game arming a round late
+                                   and skipping a shared lead, and Shady's
+                                   target, its fizzle, its reduced checking
+                                   requirement and its one-time-ness
+      tests/test_mod_effects_sync.py — the same three across a real server:
+                                   identical windows, the check armed
+                                   everywhere and judged once, and that the
+                                   server learning the colour does NOT move the
+                                   fingerprint
       tests/test_mod_selection.py — the Mod Patusa round: when it fires, what
                                    each faction is dealt, which slot each side
                                    owns, one-vote-per-hunter and changing it,

@@ -41,7 +41,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..cards.loader import ContentLibrary
-from ..config.settings import RULES, SessionConfig
+from ..config.settings import RULES, SessionConfig, clamp_mod_counts
 from ..engine import commands as cmd
 from ..engine import events as ev
 from ..engine import victory
@@ -299,6 +299,16 @@ class Room:
         if "mod_round_interval" in payload:
             lobby.mod_round_interval = max(RULES.mod_round_interval_min,
                                            int(payload["mod_round_interval"]))
+        if "mod_counts" in payload:
+            # Merged, not replaced: the panel sends the titles it knows about,
+            # and a host on an older build that sends none must not wipe the
+            # deck.  Clamped here as well as in the panel because the server
+            # settles what the settings ARE — a hand-written message is not
+            # allowed to seat a deck with -3 copies of a card in it.
+            incoming = clamp_mod_counts(payload.get("mod_counts"))
+            merged = dict(lobby.mod_counts)
+            merged.update(incoming)
+            lobby.mod_counts = clamp_mod_counts(merged)
         if "double_percent" in payload:
             lobby.double_percent = max(0, min(100, int(payload["double_percent"])))
         if "debug_version" in payload:

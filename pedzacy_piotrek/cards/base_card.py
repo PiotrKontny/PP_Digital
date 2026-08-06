@@ -17,7 +17,7 @@ time.  That is split here:
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Mapping, Optional
 
 _uid_counter = itertools.count(1)
@@ -414,9 +414,32 @@ class DeckDef:
         """Expand ``count`` into one :class:`Card` per physical copy."""
         out: list[Card] = []
         for definition in self.cards:
-            for _ in range(max(1, definition.count)):
+            for _ in range(max(0, definition.count)):
                 out.append(Card(definition))
         return out
+
+    def with_counts(self, counts: Mapping[str, int]) -> "DeckDef":
+        """A copy of this deck with some titles' copy counts replaced.
+
+        How the lobby resizes the Mody Patusa deck without editing the JSON.
+        Titles the mapping does not name keep the count the data gives them, so
+        a partial (or empty) mapping means "the printed deck", and a title the
+        deck does not contain is ignored rather than invented.
+
+        The card ORDER is the JSON's, untouched — every copy of a title sits
+        where the definition sits.  That is what keeps two machines building the
+        same pile from the same seed: the shuffle is a permutation of a list,
+        and a list built in a different order shuffles differently.  Do not
+        rebuild this from the mapping's own iteration order.
+        """
+        if not counts:
+            return self
+        cards = tuple(
+            replace(card, count=max(0, int(counts[card.title])))
+            if card.title in counts else card
+            for card in self.cards
+        )
+        return DeckDef(id=self.id, name=self.name, cards=cards)
 
 
 @dataclass(frozen=True)

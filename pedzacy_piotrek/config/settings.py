@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Mapping
 
 # ── paths ────────────────────────────────────────────────────────────────────
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -86,6 +87,13 @@ class Rules:
     mod_round_interval_min: int = 1
     #: How many Mod Patusa cards each faction is offered to choose from.
     mod_choices: int = 3
+
+    #: Bounds on how many copies of one Mod Patusa the lobby may put in the
+    #: deck.  Zero is allowed — leaving a mod out of the game is a legitimate
+    #: balance decision, and the DEFAULTS live in cards.json rather than here
+    #: because the composition of the deck is content, not code.
+    mod_count_min: int = 0
+    mod_count_max: int = 9
 
     #: Piotrek acts on every Nth turn slot of a round (slot 0, 3, 6, ...).
     piotrek_turn_period: int = 3
@@ -235,6 +243,12 @@ class SessionConfig:
     #: then every second round.
     mod_round_first: int = RULES.mod_round_first_default
     mod_round_interval: int = RULES.mod_round_interval_default
+    #: How many copies of each Mod Patusa go into the deck, by card title.
+    #: EMPTY MEANS "as printed" — the counts in cards.json.  Only titles the
+    #: lobby actually changed need to be in here, so a match built by an older
+    #: client, or by a test that never opened the panel, still gets the real
+    #: deck instead of an empty one.
+    mod_counts: dict[str, int] = field(default_factory=dict)
     character_choices: list[str | None] = field(default_factory=list)
     #: Probability that a row of the board is widened into a doubled position
     #: (12a / 12b).  ``None`` keeps the board theme's fixed pattern.
@@ -288,5 +302,28 @@ class SessionConfig:
                                    self.mod_round_interval),
             character_choices=choices[:players],
             double_frequency=frequency,
+            mod_counts=clamp_mod_counts(self.mod_counts),
             local_seat=max(0, min(players - 1, self.local_seat)),
         )
+
+
+def clamp_mod_counts(counts: "Mapping[str, int] | None") -> dict[str, int]:
+    """Force a mod-count mapping into its legal range, dropping junk.
+
+    Shared by the config, the lobby and the server so a hand-written message
+    cannot seat a deck with -3 copies of a card in it, and so all three agree
+    about what a given payload means.  Sorted by title on the way out: this
+    ends up in the lobby snapshot every client compares, and two dictionaries
+    with the same pairs in a different order are the same settings.
+    """
+    if not counts:
+        return {}
+    clean: dict[str, int] = {}
+    for title, value in counts.items():
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        clean[str(title)] = max(RULES.mod_count_min,
+                                min(RULES.mod_count_max, number))
+    return {title: clean[title] for title in sorted(clean)}

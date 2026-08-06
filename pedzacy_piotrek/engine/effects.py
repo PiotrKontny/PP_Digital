@@ -236,6 +236,26 @@ class Announce(Operation):
     text: str
 
 
+@dataclass(frozen=True)
+class Fizzle(Operation):
+    """The card resolved, and its movement did nothing.
+
+    Not a :class:`Refusal`: a refusal means the play was ILLEGAL and the card
+    stays in the hand, and Halloween's rule is the opposite — the card is
+    played and discarded like any other, it simply moves nobody.  An empty
+    :class:`Plan` cannot express that either, because ``Plan.ok`` is
+    ``bool(operations)`` and an empty one reads as a refusal to every caller.
+
+    So this follows the idiom Thunderfuck already established for an empty
+    rack: emit a real operation whose executor does nothing but say so.  The
+    reason reaches the status bar, because a card that silently did nothing
+    looks like a bug to the player.
+    """
+
+    reason: str
+    pawn_id: str = ""
+
+
 # ── results ──────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Plan:
@@ -353,10 +373,33 @@ class EffectContext:
     #: the way into a hand has to be able to refer to itself — Troll's status
     #: has to know which physical Troll started it.
     card_uid: Optional[int] = None
+    #: Where the effect came from: ``"card"``, ``"ability"`` or ``"on_draw"``.
+    #: The Mody Patusa need it — Masa solna and Halloween change what MOVEMENT
+    #: CARDS do and must leave character abilities alone, and Dziad's ability is
+    #: an ordinary ``move_pawn`` that would otherwise be caught by both.
+    origin: str = "card"
+    #: Which deck the card came from, so a rule can say "movement cards" and
+    #: mean it.  Chest cards have no movement effect today; when one gets one,
+    #: it must not silently inherit the movement deck's restrictions.
+    deck_id: str = ""
+    #: False when nobody can be asked a question — a card revealed and played
+    #: by another card (Seks z pedałami, Troll's forced play).  A handler that
+    #: would open a prompt must fall back to something legal instead, or the
+    #: card fizzles: those call sites pick their card from
+    #: ``resolves_without_asking``, which is a property of the printed card and
+    #: cannot know that a mod has just made it ask.
+    can_ask: bool = True
 
     def choice(self, key: str) -> Optional[str]:
         value = self.choices.get(key)
         return str(value) if value is not None else None
+
+    @property
+    def from_movement_card(self) -> bool:
+        """True when this is a movement card being played, not an ability."""
+        from ..config import settings
+
+        return self.origin == "card" and self.deck_id == settings.DECK_MOVEMENT
 
     @property
     def board(self):
@@ -386,7 +429,8 @@ def effect(name: str) -> Callable[[Handler], Handler]:
 def resolve_spec(
     state, spec: Optional[EffectSpec], actor: int = 0,
     choices: Optional[Mapping[str, str]] = None, source: str = "",
-    card_uid: Optional[int] = None,
+    card_uid: Optional[int] = None, origin: str = "card",
+    deck_id: str = "", can_ask: bool = True,
 ) -> Resolution:
     """Resolve any effect specification against the current state."""
     if spec is None:
@@ -395,16 +439,25 @@ def resolve_spec(
     if handler is None:
         return Refusal(f"Nieznany typ efektu: {spec.type}")
     return handler(
-        spec, EffectContext(state, actor, dict(choices or {}), source, card_uid)
+        spec,
+        EffectContext(state, actor, dict(choices or {}), source, card_uid,
+                      origin=origin, deck_id=deck_id, can_ask=can_ask),
     )
 
 
 def resolve(
     state, card: Card, actor: int = 0,
     choices: Optional[Mapping[str, str]] = None,
+    can_ask: bool = True,
 ) -> Resolution:
-    """Resolve a card's effect."""
-    return resolve_spec(state, card.effect, actor, choices, card.title, card.uid)
+    """Resolve a card's effect.
+
+    ``can_ask=False`` is for a card nobody chose to play and nobody can be
+    asked about — see :attr:`EffectContext.can_ask`.
+    """
+    return resolve_spec(state, card.effect, actor, choices, card.title,
+                        card.uid, origin="card", deck_id=card.deck_id,
+                        can_ask=can_ask)
 
 
 def resolve_on_draw(state, card: Card, actor: int = 0) -> Resolution:
@@ -417,7 +470,8 @@ def resolve_on_draw(state, card: Card, actor: int = 0) -> Resolution:
     """
     if card.on_draw is None:
         return Refusal("Ta karta nic nie robi przy dobraniu")
-    return resolve_spec(state, card.on_draw, actor, None, card.title, card.uid)
+    return resolve_spec(state, card.on_draw, actor, None, card.title, card.uid,
+                        origin="on_draw", deck_id=card.deck_id)
 
 
 def resolve_ability(
@@ -430,7 +484,8 @@ def resolve_ability(
     if not card.ability_available:
         return Refusal(f"Umiejętność „{card.skill or card.title}” została już zużyta")
     return resolve_spec(state, card.ability, actor, choices,
-                        card.skill or card.title)
+                        card.skill or card.title, origin="ability",
+                        deck_id=card.deck_id)
 
 
 def preview(
@@ -468,10 +523,33 @@ def pawn_index(state, pawn_id: str) -> int:
     return CAMP_INDEX if index is None else int(index)
 
 
+def is_hidden(state, pawn_id: str) -> bool:
+    """Whether Shady has taken this pawn off the map.
+
+    A hidden pawn is ignored for movement, for targeting and for the neighbour
+    test.  Everything that walks the pawn list goes through here or through
+    :func:`live_pawns`, so 'ignore it' is one decision rather than six.
+    """
+    checker = getattr(state, "pawn_is_hidden", None)
+    return bool(checker(pawn_id)) if checker is not None else False
+
+
+def live_pawns(state) -> List:
+    """Pawns that are on the table — the palette minus anything hidden."""
+    return [pawn for pawn in state.library.pawns if not is_hidden(state, pawn.id)]
+
+
 def _ordered_pawns(state) -> List[Tuple[int, int, int, str]]:
-    """Every pawn as (position, stack depth, palette order, id), sorted."""
+    """Every pawn as (position, stack depth, palette order, id), sorted.
+
+    Hidden pawns are left out entirely, which is what makes ``hindmost`` and
+    ``foremost`` ignore a pawn Shady has removed without either of them having
+    to know Shady exists.
+    """
     out: List[Tuple[int, int, int, str]] = []
     for order, pawn in enumerate(state.library.pawns):
+        if is_hidden(state, pawn.id):
+            continue
         index = pawn_index(state, pawn.id)
         depth = state.board.stack_depth(pawn.id) if index != CAMP_INDEX else 0
         out.append((index, depth, order, pawn.id))
@@ -576,9 +654,15 @@ def pawn_name(state, pawn_id: str) -> str:
 
 
 def pawn_options(state, exclude: Sequence[str] = ()) -> Tuple[ChoiceOption, ...]:
+    """The pawns a player may pick from.
+
+    A pawn that is off the map is never offered: the card would resolve and do
+    nothing, and offering a choice that cannot do anything is a worse answer
+    than not offering it.
+    """
     return tuple(
         ChoiceOption(id=pawn.id, label=pawn.name, pawn=pawn.id)
-        for pawn in state.library.pawns
+        for pawn in live_pawns(state)
         if pawn.id not in exclude
     )
 
@@ -636,6 +720,111 @@ class MoveProjection:
         self._moved[pawn_id] = destination
         for rider in travellers(self.state, pawn_id):
             self._moved[rider] = destination
+
+    @property
+    def positions(self) -> Dict[str, int]:
+        """Every pawn's projected position — what a neighbour test needs.
+
+        The whole field, not only the pawns this plan has moved: a pawn is
+        pinned or freed by where EVERYBODY is, and asking about only the ones
+        already moved would find no neighbours at all on the first move.
+        """
+        return {pawn.id: self.index_of(pawn.id)
+                for pawn in live_pawns(self.state)}
+
+
+# ── the Mody Patusa that change how movement cards behave ────────────────────
+def has_neighbour(state, pawn_id: str,
+                  positions: Optional[Mapping[str, int]] = None) -> bool:
+    """Whether a pawn has company directly in front of or behind it (Halloween).
+
+    Neighbour means the position immediately ahead or immediately behind is
+    occupied.  Sharing a field does NOT count: a tower is one field, and the
+    rule is about what is in front and behind, not what is underneath.
+
+    THE CAMP IS ONE CLUSTER, and that is a decision rather than a reading of
+    the rule.  Every pawn starts in the camp at :data:`CAMP_INDEX`, so under
+    the letter of "one in front or one behind" no pawn in the camp ever has a
+    neighbour — and with ``mod_round_first`` set to 1 in the lobby, Halloween
+    could reach the rack while the whole field is still waiting to start.  The
+    board would then be frozen permanently: no movement card could move
+    anything, nobody could reach the finish and no tower could ever be built,
+    so neither faction could win.  Pawns waiting shoulder to shoulder in the
+    camp are treated as neighbours of one another, which is both deadlock-free
+    and what the picture on the table actually looks like.
+
+    ``positions`` overrides where the pawns are, for a multi-pawn card that
+    moves them one after another and has to see the board each move leaves.
+    """
+    if positions is None:
+        positions = {pawn.id: pawn_index(state, pawn.id)
+                     for pawn in live_pawns(state)}
+    mine = positions.get(pawn_id, CAMP_INDEX)
+    for other, index in positions.items():
+        if other == pawn_id:
+            continue
+        if mine == CAMP_INDEX and index == CAMP_INDEX:
+            return True
+        if abs(index - mine) == 1:
+            return True
+    return False
+
+
+def _capped_steps(ctx: EffectContext, steps: int) -> int:
+    """Shrink a movement card's distance to what Masa solna allows.
+
+    Applies to the number PRINTED ON THE CARD only.  A character ability that
+    happens to move a pawn (Dziad) is not a movement card, and neither is a
+    chest card — hence :attr:`EffectContext.from_movement_card`.  A movement
+    BONUS is not capped either: it is a charge somebody spent an ability to
+    get, it is added after this, and cancelling it here would quietly rewrite
+    ChatGPT's skill instead of the movement deck.
+
+    The sign is preserved, so a card that moves two back moves one back.
+    """
+    if not ctx.from_movement_card:
+        return steps
+    cap = ctx.state.movement_cap
+    if cap is None or abs(steps) <= cap:
+        return steps
+    return cap if steps > 0 else -cap
+
+
+def _speedrun_reversal(spec: EffectSpec, ctx: EffectContext,
+                       key: str = "speedrun") -> Resolution:
+    """Ask whether a backward card should be turned around (Speedrun).
+
+    Returns ``True`` when the player chose to go forward, ``False`` to keep the
+    printed direction, or a :class:`Choice` when nobody has been asked yet.
+
+    ONLY cards that naturally move backwards ask.  ``direction: "either"`` does
+    not count as backward: those cards already let the player pick the way, and
+    a second question about the same decision would be asked and answered
+    twice.  A forward card never asks at all.
+
+    Callers must resolve this BEFORE the pawn question — the order of the
+    prompts is part of the rules: direction, then pawn, then which half of a
+    widened row.
+    """
+    if not spec.is_backward or not ctx.state.reverses_backward_moves:
+        return False
+    if not ctx.can_ask:
+        # Nobody to ask (a card played by another card).  Speedrun only ever
+        # OFFERS a reversal, so declining is always a legal answer and the card
+        # does what it says on its face.
+        return False
+    answer = ctx.choice(key)
+    if answer in ("forward", "backward"):
+        return answer == "forward"
+    return Choice(
+        key=key, kind="option",
+        prompt="Speedrun — wybierz kierunek",
+        options=(
+            ChoiceOption(id="backward", label="Do tyłu"),
+            ChoiceOption(id="forward", label="Do przodu"),
+        ),
+        description="ta karta cofa pionki, ale Speedrun pozwala ją odwrócić",
+    )
 
 
 def _turn_expiry(state, spec: EffectSpec) -> Optional[int]:
@@ -700,9 +889,23 @@ def _movement_steps(spec: EffectSpec, ctx: EffectContext) -> Resolution:
 
 @effect("move_pawn")
 def _move_pawn(spec: EffectSpec, ctx: EffectContext) -> Resolution:
-    """Move one pawn a number of positions, forwards or backwards."""
+    """Move one pawn a number of positions, forwards or backwards.
+
+    THE ORDER OF THE QUESTIONS IS PART OF THE RULES and it is the order they
+    appear in below: Speedrun's direction first, then which pawn, then which
+    half of a widened row.  Speedrun comes first because it can be settled
+    before anybody knows which pawn is moving — the card's printed direction is
+    all it needs — and asking it after the pawn would mean the player picking a
+    pawn to move backwards and only then being told it could go forwards.
+    """
     state = ctx.state
 
+    # 1) Speedrun — before the pawn question.
+    reversed_direction = _speedrun_reversal(spec, ctx)
+    if isinstance(reversed_direction, (Choice, Refusal, NotAvailable)):
+        return reversed_direction
+
+    # 2) which pawn.
     pawn_id = _movement_target(spec, ctx)
     if isinstance(pawn_id, (Choice, Refusal, NotAvailable)):
         return pawn_id
@@ -715,9 +918,39 @@ def _move_pawn(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     if isinstance(steps, (Choice, Refusal, NotAvailable)):
         return steps
 
+    # Masa solna shortens the card, Speedrun may turn it around.  Distance
+    # first, then direction, so the two never fight over the sign.
+    steps = _capped_steps(ctx, steps)
+    if reversed_direction:
+        steps = abs(steps)
+
     name = pawn_name(state, pawn_id)
+
+    # Shady: a pawn that is off the map cannot be moved, and the card does not
+    # refuse — it resolves, is discarded and does nothing, exactly like a
+    # blocked move.  Checked BEFORE the freeze, which is a refusal: a pawn that
+    # is not on the board at all has nothing to say about being frozen.
+    if is_hidden(state, pawn_id):
+        return Plan(
+            (Fizzle(f"Shady: pionek {name} zniknął z mapy", pawn_id),),
+            f"{name}: poza mapą",
+        )
+
     if state.statuses.pawn_has(StatusKind.FROZEN, pawn_id):
         return Refusal(f"Pionek {name} jest zamrożony")
+
+    # Halloween pins a pawn with nobody in front of or behind it.  This is NOT
+    # a refusal — the card is played and discarded, its movement just does
+    # nothing — and it is checked before the widened-row question, because
+    # asking which half of a field to land on makes no sense for a pawn that is
+    # not going anywhere.
+    if (ctx.from_movement_card and state.requires_neighbour
+            and not has_neighbour(state, pawn_id)):
+        return Plan(
+            (Fizzle(f"Halloween: {name} nie ma sąsiadów i zostaje w miejscu",
+                    pawn_id),),
+            f"{name}: bez ruchu (Halloween)",
+        )
 
     operations: List[Operation] = []
     # A movement bonus (ChatGPT) stretches the next card by one field and is
@@ -793,6 +1026,13 @@ def _stack_pawn(spec: EffectSpec, ctx: EffectContext) -> Resolution:
         return Refusal("Brakuje pionków do przeniesienia")
     if source == destination:
         return Refusal("Ten pionek już tam stoi")
+    for pawn_id in (source, destination):
+        if is_hidden(state, pawn_id):
+            return Plan(
+                (Fizzle(f"Shady: pionek {pawn_name(state, pawn_id)} "
+                        f"zniknął z mapy", pawn_id),),
+                f"{pawn_name(state, pawn_id)}: poza mapą",
+            )
     if state.statuses.pawn_has(StatusKind.FROZEN, source):
         return Refusal(f"Pionek {pawn_name(state, source)} jest zamrożony")
 
@@ -1266,7 +1506,18 @@ def _move_pawns(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     state = ctx.state
     wanted = max(1, int(spec.get("count", 2)))
     key = str(spec.get("choice_key", "pawns"))
-    steps = spec.signed_steps
+
+    # Speedrun first, exactly as for a single-pawn card: the direction question
+    # comes before the pawn question.  Plagiat! moves backwards, so it is a
+    # card Speedrun turns around — it reaching a different handler is an
+    # implementation detail and must not make it behave differently.
+    reversed_direction = _speedrun_reversal(spec, ctx)
+    if isinstance(reversed_direction, (Choice, Refusal, NotAvailable)):
+        return reversed_direction
+
+    steps = _capped_steps(ctx, spec.signed_steps)
+    if reversed_direction:
+        steps = abs(steps)
 
     known = {pawn.id for pawn in state.library.pawns}
     picked: List[str] = []
@@ -1290,10 +1541,31 @@ def _move_pawns(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     operations: List[Operation] = []
     names: List[str] = []
 
+    blocked: List[str] = []
+
     for order, pawn_id in enumerate(picked):
         name = pawn_name(state, pawn_id)
+
+        # Shady, per pawn and on the same terms as Halloween below: the pawn
+        # is skipped and the rest of the card carries on.  A rule added to
+        # ``_move_pawn`` has to be added here too or the two paths drift, and
+        # the difference only shows up on the one card that takes this one.
+        if is_hidden(state, pawn_id):
+            blocked.append(f"{name} (poza mapą)")
+            continue
+
         if state.statuses.pawn_has(StatusKind.FROZEN, pawn_id):
             return Refusal(f"Pionek {name} jest zamrożony")
+
+        # Halloween is judged per pawn and against the board THIS move sees,
+        # not the one the card was played on: the pawns move one after another,
+        # so an earlier move can give a later pawn the neighbour it needed, or
+        # take it away.  A pinned pawn is skipped and the rest of the card
+        # carries on — it is one pawn that does nothing, not a refused card.
+        if ctx.from_movement_card and state.requires_neighbour:
+            if not has_neighbour(state, pawn_id, projection.positions):
+                blocked.append(f"{name} (Halloween, bez sąsiadów)")
+                continue
 
         start = projection.index_of(pawn_id)
         route = route_between(state, start, steps)
@@ -1339,6 +1611,14 @@ def _move_pawns(spec: EffectSpec, ctx: EffectContext) -> Resolution:
         names.append(name)
 
     way = "do tyłu" if steps < 0 else "do przodu"
+    if blocked:
+        # Every chosen pawn was pinned or absent: the card still resolves and
+        # is still discarded, so it needs an operation to carry that rather
+        # than an empty plan, which every caller would read as a refusal.
+        note = f"Bez ruchu: {', '.join(blocked)}"
+        if not operations:
+            return Plan((Fizzle(note),), "bez ruchu")
+        operations.append(Fizzle(note))
     return Plan(
         tuple(operations),
         f"{' → '.join(names)}: {abs(steps)} {fields_word(abs(steps))} {way}",

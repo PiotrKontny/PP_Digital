@@ -494,35 +494,64 @@
       "cards": [
         {
           "title": "Speedrun",
-          "text": "Każda karta ruchu cofająca pionki może być odwrócona."
+          "text": "Każda karta ruchu cofająca pionki może być odwrócona.",
+          "count": 2,
+          "passive": {
+            "reverse_backward": true
+          }
         },
         {
           "title": "Masa solna",
-          "text": "Wszystkie karty ruchu poruszają tylko o jedno pole"
+          "text": "Wszystkie karty ruchu poruszają tylko o jedno pole",
+          "count": 2,
+          "passive": {
+            "movement_cap": 1
+          }
         },
         {
           "title": "AKO",
-          "text": "Wszystkie ruchy poruszają jednego sąsiadującego pionka."
+          "text": "Wszystkie ruchy poruszają jednego sąsiadującego pionka.",
+          "count": 1
         },
         {
           "title": "Halloween",
-          "text": "Pionki bez sąsiadów nie mogą się poruszać"
+          "text": "Pionki bez sąsiadów nie mogą się poruszać",
+          "count": 1,
+          "passive": {
+            "require_neighbour": true
+          }
         },
         {
           "title": "Sesja na PG",
-          "text": "Umiejętności postaci nie mogą być używane"
+          "text": "Umiejętności postaci nie mogą być używane",
+          "count": 2,
+          "passive": {
+            "abilities_locked": true
+          }
         },
         {
           "title": "Paczka",
-          "text": "wszystkie karty ze Skrzyni są odkryte"
+          "text": "wszystkie karty ze Skrzyni są odkryte",
+          "count": 2,
+          "passive": {
+            "reveal_chest": true
+          }
         },
         {
           "title": "Squid Game",
-          "text": "Pionek najbardziej z przodu jest sprawdzany raz na rundę. Nie ma innego sposobu na sprawdzenie"
+          "text": "Pionek najbardziej z przodu jest sprawdzany raz na rundę. Nie ma innego sposobu na sprawdzenie",
+          "count": 1,
+          "passive": {
+            "lead_check_only": true
+          }
         },
         {
           "title": "Shady",
-          "text": "Pionek najbardziej z przodu znika z mapy na pełną rundę. Jest dodawany do pionka najbardziej z tyłu"
+          "text": "Pionek najbardziej z przodu znika z mapy na pełną rundę. Jest dodawany do pionka najbardziej z tyłu",
+          "count": 2,
+          "passive": {
+            "hide_leader": true
+          }
         }
       ]
     },
@@ -562,7 +591,7 @@
         },
         {
           "title": "Gejtos",
-          "text": "Wybierz pole: Mężczyzna - Przenieś pionki z sąsiadujących pól na to pole; Kobieta - Oddal pionki z sąsiadujących pól o jedno pole",
+          "text": "Wybierz opcję: Mężczyzna - Przenieś pionki z sąsiadujących pól na to pole; Kobieta - Oddal pionki z sąsiadujących pól o jedno pole",
           "count": 2
         },
         {

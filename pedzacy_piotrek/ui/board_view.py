@@ -166,6 +166,22 @@ class BoardView:
         )
 
     # ── event reactions ──────────────────────────────────────────────────────
+    def forget_pawn(self, pawn_id: str) -> None:
+        """Drop a pawn's animation state and snap it to where it now is.
+
+        Shady moves a pawn without walking it: it vanishes, and it comes back
+        somewhere it has never been.  Without this the view would still be
+        holding the old position and would slide the pawn the length of the
+        board when it reappeared — a walk the engine never asked for and the
+        rules do not describe.
+        """
+        self.walks.pop(pawn_id, None)
+        if self.dragging == pawn_id:
+            self.dragging = None
+        token = self.state.tokens.get(pawn_id)
+        if token is not None:
+            self.visual[pawn_id] = token.position
+
     def _on_token_moved(self, event: ev.TokenMoved) -> None:
         """Glide a dragged pawn (and anything riding it) to its new home."""
         movers = [event.pawn_id, *event.carried]
@@ -534,9 +550,17 @@ class BoardView:
         return best
 
     def _draw_order(self) -> List[Tuple[str, Point, Tuple[int, int, int]]]:
-        """Back to front: lower on the map is nearer; higher in a stack is above."""
+        """Back to front: lower on the map is nearer; higher in a stack is above.
+
+        A pawn Shady has taken off the map is not in here at all, and that one
+        omission is what removes it from the board: this list is what gets
+        painted AND what :meth:`token_at` hit-tests, so the pawn stops being
+        drawn and stops being clickable in the same breath.
+        """
         entries: List[Tuple[str, Point, Tuple[int, int, int]]] = []
         for pawn_id, token in self.state.tokens.items():
+            if self.state.pawn_is_hidden(pawn_id):
+                continue
             entries.append((pawn_id, self.display_position(pawn_id), token.color))
         entries.sort(key=lambda item: (item[1][1], self.state.board.stack_depth(item[0])))
         return entries

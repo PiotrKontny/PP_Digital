@@ -20,6 +20,9 @@ let a remote player's decision appear on everybody's table later.
 * :class:`ModChoice` — the Mod Patusa selection that pauses a round.  One
   overlay serves both factions: Piotrek clicks to keep, hunters click to vote
   and watch the count build up.
+* :class:`ChestReveal` — Paczka's window: who is holding which Chest cards.
+  Purely informational, shown on every machine at once and dismissed by each
+  player independently.
 """
 
 from __future__ import annotations
@@ -967,3 +970,101 @@ class CardPicker:
         r.text("kliknij kartę, którą zabierasz  ·  Esc anuluje",
                r.fonts.label(), theme.text_dim, surface,
                midbottom=(panel.centerx, panel.bottom - 14))
+
+
+# ── Paczka: the Chest is public ──────────────────────────────────────────────
+@dataclass
+class ChestHoldingView:
+    """One player's Chest cards, as the window lists them."""
+
+    name: str
+    titles: List[str] = field(default_factory=list)
+
+
+class ChestReveal:
+    """Who is holding which Chest cards (Paczka).
+
+    Informational and nothing else: it changes no state, blocks no command and
+    is dismissed by each player on their own machine, so one person reading it
+    slowly does not hold the table up.  Every machine builds the same list from
+    its own replica, which is why there is nothing to synchronise.
+
+    A LIST rather than a row of card faces, because six players holding two
+    cards each is twelve faces and no lineup fits them at 1280×760.  The
+    furniture is the card picker\'s — the dimmed table, the panel, the brass
+    heading, one button — so it reads as the same family of window as the chest
+    limit and the mod selection rather than as a fourth kind of dialog.
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self.holdings: List[ChestHoldingView] = []
+        self.appear = 0.0
+
+    def show(self, holdings: Sequence[ChestHoldingView]) -> None:
+        self.active = True
+        self.holdings = list(holdings)
+        self.appear = 0.0
+
+    def hide(self) -> None:
+        self.active = False
+        self.holdings = []
+
+    @property
+    def lines(self) -> int:
+        """Rows of text: a name plus one per card, or the empty-table message."""
+        if not self.holdings:
+            return 1
+        return sum(1 + max(1, len(h.titles)) for h in self.holdings)
+
+    def ok_hit(self, layout: Layout, position: Tuple[int, int]) -> bool:
+        return layout.chest_reveal_ok_rect(self.lines).collidepoint(position)
+
+    def update(self, dt: float) -> None:
+        if self.active:
+            self.appear = approach(self.appear, 1.0, 12.0, dt)
+
+    def draw(self, r: Renderer, layout: Layout, surface: pygame.Surface,
+             mouse: Tuple[int, int]) -> None:
+        if not self.active:
+            return
+        theme = r.theme
+        lines = self.lines
+        panel = layout.chest_reveal_panel(lines)
+        _dim(surface, surface.get_rect(), int(150 * min(1.0, self.appear)))
+        r.premium_panel(panel, surface, radius=16, border=theme.brass_light,
+                        glow=theme.brass, glow_strength=0.4, shadow=22)
+
+        r.spaced_text("PACZKA", r.fonts.get(22, bold=True), theme.brass_bright,
+                      surface, center=(panel.centerx, panel.top + int(26 * layout.ui_scale)),
+                      spacing=3, shadow=True)
+        r.text("Wszystkie karty ze Skrzyni są odkryte",
+               r.fonts.deck(), theme.text_dim, surface,
+               midtop=(panel.centerx, panel.top + int(42 * layout.ui_scale)))
+
+        step = layout.chest_reveal_line
+        y = panel.top + layout.chest_reveal_header
+        left = panel.left + int(28 * layout.ui_scale)
+        if not self.holdings:
+            r.text("Nikt nie posiada obecnie kart Skrzyni.",
+                   r.fonts.deck(), theme.text_light, surface, topleft=(left, y))
+        else:
+            for holding in self.holdings:
+                r.text(holding.name, r.fonts.get(16, bold=True), theme.brass_bright,
+                       surface, topleft=(left, y))
+                y += step
+                for title in holding.titles:
+                    r.text(f"– {title}", r.fonts.deck(), theme.text_light, surface,
+                           topleft=(left + int(16 * layout.ui_scale), y))
+                    y += step
+
+        ok = layout.chest_reveal_ok_rect(lines)
+        hovered = ok.collidepoint(mouse)
+        style = r.emphasis(fill=theme.btn_primary_bg,
+                           border=theme.btn_primary_border,
+                           text=theme.btn_primary_text,
+                           hover=1.0 if hovered else 0.0, enabled=True,
+                           accent=theme.brass_light)
+        drawn = r.interactive_panel(ok, style, surface, radius=10)
+        r.fit_spaced_text("OK", drawn, style.text, surface, base_size=17,
+                          spacing=2, padding=14)

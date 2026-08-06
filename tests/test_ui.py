@@ -31,6 +31,8 @@ from pedzacy_piotrek.cards.loader import ContentLibrary
 from pedzacy_piotrek.config import settings
 from pedzacy_piotrek.config.settings import RULES, SessionConfig
 from pedzacy_piotrek.engine import commands as cmd
+from pedzacy_piotrek.engine import events as ev
+from pedzacy_piotrek.engine.statuses import Status, StatusKind
 from pedzacy_piotrek.engine.setup import create_game
 from pedzacy_piotrek.net.session import LocalSession
 from pedzacy_piotrek.ui.app import App
@@ -2288,3 +2290,136 @@ def _badge_width(surface):
             if surface.get_at((x, y))[:3] != background:
                 columns.append(x)
     return (max(columns) - min(columns)) if columns else 0
+
+
+# ── Paczka's window ──────────────────────────────────────────────────────────
+def _open_paczka(screen: GameScreen, holders=((1, ("Teleport",)),)):
+    """Raise the window the way the engine does, from an event."""
+    holdings = [
+        ev.ChestHolding(player_index=index,
+                        player_name=screen.state.player(index).name,
+                        titles=list(titles))
+        for index, titles in holders
+    ]
+    screen.bus.emit(ev.ChestCardsRevealed(holdings))
+    return holdings
+
+
+def test_paczka_opens_a_window_on_every_machine(screen):
+    _open_paczka(screen)
+    assert screen.chest_reveal.active
+    assert [h.name for h in screen.chest_reveal.holdings] == [
+        screen.state.player(1).name
+    ]
+
+
+def test_the_paczka_window_lists_the_cards_it_was_given(screen):
+    _open_paczka(screen, holders=((0, ("Balbinka", "Gejtos")),))
+    assert screen.chest_reveal.holdings[0].titles == ["Balbinka", "Gejtos"]
+    # A name row plus one row per card.
+    assert screen.chest_reveal.lines == 3
+
+
+def test_the_paczka_window_paints(screen):
+    _open_paczka(screen, holders=((0, ("Balbinka",)), (2, ("Rage Quit",))))
+    settle(screen, frames=8)
+    panel = screen.app.layout.chest_reveal_panel(screen.chest_reveal.lines)
+    assert screen.app.canvas.get_rect().contains(panel), "it stays on screen"
+    frame(screen)
+
+
+def test_the_ok_button_dismisses_it(screen):
+    _open_paczka(screen)
+    settle(screen, frames=4)
+    ok = screen.app.layout.chest_reveal_ok_rect(screen.chest_reveal.lines)
+    click(screen, ok.center)
+    assert not screen.chest_reveal.active
+
+
+def test_a_click_that_is_not_the_button_leaves_it_open(screen):
+    """Informational, but not dismissed by a stray click on the board."""
+    _open_paczka(screen)
+    settle(screen, frames=4)
+    panel = screen.app.layout.chest_reveal_panel(screen.chest_reveal.lines)
+    click(screen, (panel.centerx, panel.top + 4))
+    assert screen.chest_reveal.active
+
+
+def test_escape_closes_it_rather_than_opening_the_pause_menu(screen):
+    _open_paczka(screen)
+    settle(screen, frames=4)
+    screen.handle_event(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, mod=0), (0, 0)
+    )
+    assert not screen.chest_reveal.active
+    assert not screen.pause_menu.active, "Esc was spent on the window"
+
+
+def test_it_says_so_when_nobody_holds_a_chest_card(screen):
+    screen.bus.emit(ev.ChestCardsRevealed([]))
+    assert screen.chest_reveal.active
+    assert screen.chest_reveal.holdings == []
+    assert screen.chest_reveal.lines == 1
+    settle(screen, frames=6)
+    frame(screen)
+
+
+def test_the_window_does_not_block_the_table(screen):
+    """Each player dismisses their own copy; the game carries on underneath."""
+    _open_paczka(screen)
+    before = screen.state.active_player_index
+    settle(screen, frames=30)
+    assert screen.state.active_player_index == before
+    assert screen.chest_reveal.active, "and it waits as long as it needs to"
+
+
+@pytest.mark.parametrize("size", [(1280, 760), (1920, 1080), (2560, 1440)])
+def test_the_window_fits_at_every_resolution(library, size):
+    app = App(Layout(), headless=True, size=size)
+    state = create_game(
+        SessionConfig(num_players=6, board_cells=24, seed=5), library
+    )
+    game_screen = GameScreen(app, LocalSession(state))
+    app.push(game_screen)
+    holdings = [
+        ev.ChestHolding(player_index=p.index, player_name=p.name,
+                        titles=["Dzieckorolka", "Rage Quit"])
+        for p in state.players
+    ]
+    game_screen.bus.emit(ev.ChestCardsRevealed(holdings))
+    lines = game_screen.chest_reveal.lines
+    panel = app.layout.chest_reveal_panel(lines)
+    ok = app.layout.chest_reveal_ok_rect(lines)
+    assert app.canvas.get_rect().contains(panel), f"panel off screen at {size}"
+    assert panel.contains(ok), f"button outside its panel at {size}"
+    frame(game_screen)
+
+
+# ── Shady and Squid Game on screen ───────────────────────────────────────────
+def test_a_hidden_pawn_is_not_drawn_and_cannot_be_clicked(screen):
+    """One omission in the draw order removes it from the map and the mouse."""
+    board = screen.state.board
+    pawns = [p.id for p in screen.state.library.pawns]
+    for offset, pawn_id in enumerate(pawns):
+        board.place_pawn(pawn_id, board.position(2 + offset).tiles[0].index)
+    screen.state._sync_token_positions()
+    screen.board_view.build()
+
+    victim = pawns[0]
+    drawn = [entry[0] for entry in screen.board_view._draw_order()]
+    assert victim in drawn
+
+    screen.state.statuses.add(
+        Status.for_pawn(StatusKind.HIDDEN, victim, data={"round": 1})
+    )
+    drawn = [entry[0] for entry in screen.board_view._draw_order()]
+    assert victim not in drawn, "not painted"
+    assert screen.board_view.token_at((0, 0)) != victim, "and not clickable"
+    frame(screen)
+
+
+def test_the_automatic_check_is_reported_even_when_it_is_skipped(screen):
+    """A round where nothing happens must not look like a broken mod."""
+    screen.bus.emit(ev.LeadCheckAnnounced(pawn_id="", skipped=True))
+    assert screen.status_bar.message
+    settle(screen, frames=2)

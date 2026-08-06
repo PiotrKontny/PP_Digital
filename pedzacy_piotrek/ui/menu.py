@@ -23,6 +23,7 @@ from ..config import settings
 from ..config.settings import RULES, SessionConfig
 from .app import App, Screen
 from .headings import content_top, draw_title
+from .mod_counts_panel import ModCountsPanel
 from .widgets import BUTTON_TEXT_SIZE, Button, Checkbox, Dropdown, Stepper
 
 ROW_H = 38
@@ -92,12 +93,19 @@ class MenuScreen(Screen):
         self.dropdowns: List[Dropdown] = []
         self._build_rows()
 
+        # The deck composition is a panel rather than eight more rows: see
+        # ui/mod_counts_panel.py for why the rows would not fit.
+        self.mod_counts_panel = ModCountsPanel(app, library)
+        self.mod_deck_button = Button(pygame.Rect(0, 0, 190, 30),
+                                      "Skład talii", radius=8)
+
         self.start_button = Button(
             pygame.Rect(0, 0, 180, 52), "Start", radius=10, primary=True,
         )
         self.start_button.fit(r, min_width=180,
                               min_height=int(52 * r.fonts.scale))
         self.start_button.rect.midtop = (centre, self._start_button_y())
+        self._place_mod_deck_button()
         self.open_dropdown: Optional[int] = None
 
     # ── layout ───────────────────────────────────────────────────────────────
@@ -183,10 +191,32 @@ class MenuScreen(Screen):
         self.doubles_stepper = Stepper(centre, self.doubles_row_y, big_steps=True, r=r)
         self.edit_checkbox.rect.topleft = (centre - 150, self.edit_row_y)
         self.debug_checkbox.rect.topleft = (centre + 150, self.edit_row_y)
+        self._place_mod_deck_button()
+        self.mod_counts_panel.on_resize()
         self._build_rows()
         self.start_button.fit(r, min_width=180,
                               min_height=int(52 * r.fonts.scale))
         self.start_button.rect.midtop = (centre, self._start_button_y())
+
+    def _place_mod_deck_button(self) -> None:
+        """Sit the deck button to the RIGHT of the Mod Patusa schedule row.
+
+        Beside the steppers, not under them.  Under looked obvious and was
+        wrong: the vertical gaps shrink until the screen fits, so at 1280x760
+        the button landed on top of the "pola podwójne" label below it.  The
+        row is centred and the settings block is far narrower than the window,
+        so the space beside it is free at every size this screen supports and
+        costs the fitting pass nothing.
+        """
+        r = self.app.renderer
+        self.mod_deck_button.fit(r, min_width=int(150 * r.fonts.scale),
+                                 min_height=int(28 * r.fonts.scale))
+        row = self.mod_interval_stepper
+        right_edge = max(rect.right for rect in row.rects.values())
+        self.mod_deck_button.rect.midleft = (
+            right_edge + int(20 * r.fonts.scale),
+            row.y + row.height // 2,
+        )
 
     # ── row construction ─────────────────────────────────────────────────────
     def _row_left(self) -> int:
@@ -265,6 +295,12 @@ class MenuScreen(Screen):
 
     # ── input ────────────────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        # The deck panel is modal while it is open — it covers the steppers
+        # underneath, so a click that fell through would change a setting the
+        # player cannot currently see.
+        if self.mod_counts_panel.handle_event(event, mouse):
+            return
+
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 if self.open_dropdown is not None:
@@ -320,6 +356,10 @@ class MenuScreen(Screen):
                                     self.mod_interval + delta)
             return
 
+        if self.mod_deck_button.hit(mouse):
+            self.mod_counts_panel.open()
+            return
+
         if self.edit_checkbox.hit(mouse):
             self.edit_mode = not self.edit_mode
             return
@@ -363,6 +403,7 @@ class MenuScreen(Screen):
             chest_open_round=self.chest_round,
             mod_round_first=self.mod_first,
             mod_round_interval=self.mod_interval,
+            mod_counts=dict(self.mod_counts_panel.counts),
             character_choices=list(self.choices[: self.num_players]),
             double_frequency=self.double_percent / 100.0,
             edit_mode=self.edit_mode,
@@ -379,8 +420,10 @@ class MenuScreen(Screen):
     def update(self, dt: float, mouse: Tuple[int, int]) -> None:
         self._sync_widgets()
         for widget in (*self.checkboxes, *self.dropdowns, self.edit_checkbox,
-                       self.debug_checkbox, self.start_button):
+                       self.debug_checkbox, self.start_button,
+                       self.mod_deck_button):
             widget.update(mouse, dt)
+        self.mod_counts_panel.update(dt, mouse)
 
     def draw(self, surface: pygame.Surface) -> None:
         r = self.app.renderer
@@ -409,6 +452,7 @@ class MenuScreen(Screen):
                midbottom=(centre, self.mod_row_y - 6))
         self.mod_first_stepper.draw(r, str(self.mod_first), mouse, surface)
         self.mod_interval_stepper.draw(r, str(self.mod_interval), mouse, surface)
+        self.mod_deck_button.draw(r, surface)
 
         r.text("Jak często pola podwójne (12a / 12b)", r.fonts.get(18),
                theme.text_light, surface, midbottom=(centre, self.doubles_row_y - 6))
@@ -463,3 +507,7 @@ class MenuScreen(Screen):
         # The open list is painted last so it sits above everything.
         if self.open_dropdown is not None:
             self.dropdowns[self.open_dropdown].draw_overlay(r, mouse, surface)
+
+        # ...except the deck panel, which is modal and therefore above even
+        # that.  It draws its own shade over the screen it covers.
+        self.mod_counts_panel.draw(surface)

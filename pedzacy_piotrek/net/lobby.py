@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from ..config import settings
-from ..config.settings import RULES, SessionConfig
+from ..config.settings import RULES, SessionConfig, clamp_mod_counts
 
 #: What a player is called when they do not say.
 DEFAULT_NICKNAME = "Player"
@@ -113,6 +113,10 @@ class LobbyState:
     #: apart the pauses are after that.
     mod_round_first: int = RULES.mod_round_first_default
     mod_round_interval: int = RULES.mod_round_interval_default
+    #: How many copies of each Mod Patusa go into the deck, by title.  EMPTY
+    #: MEANS "as printed in cards.json" — an older client, or a host that never
+    #: opened the panel, must not seat a table with no mods in it.
+    mod_counts: Dict[str, int] = field(default_factory=dict)
     double_percent: int = RULES.double_frequency_default
     #: Development option: a two-player table is enough to start.  Set by the
     #: host and broadcast, so every client shows the same requirement.
@@ -200,6 +204,7 @@ class LobbyState:
             chest_open_round=self.chest_open_round,
             mod_round_first=self.mod_round_first,
             mod_round_interval=self.mod_round_interval,
+            mod_counts=dict(self.mod_counts),
             character_choices=[s.character or None for s in ordered],
             double_frequency=self.double_percent / 100.0,
             debug_version=self.debug_version,
@@ -226,6 +231,9 @@ class LobbyState:
             "chest_open_round": self.chest_open_round,
             "mod_round_first": self.mod_round_first,
             "mod_round_interval": self.mod_round_interval,
+            # Sorted, because this dictionary is part of the picture every
+            # client compares against the host's.
+            "mod_counts": clamp_mod_counts(self.mod_counts),
             "double_percent": self.double_percent,
             "debug_version": self.debug_version,
             "started": self.started,
@@ -244,6 +252,7 @@ class LobbyState:
                                         RULES.mod_round_first_default)),
             mod_round_interval=int(raw.get("mod_round_interval",
                                            RULES.mod_round_interval_default)),
+            mod_counts=clamp_mod_counts(raw.get("mod_counts")),
             double_percent=int(raw.get("double_percent",
                                        RULES.double_frequency_default)),
             debug_version=bool(raw.get("debug_version", False)),

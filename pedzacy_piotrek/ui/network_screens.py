@@ -43,6 +43,7 @@ from ..net.transport import ConnectionState, TransportError
 from . import clipboard
 from .app import App, Screen
 from .headings import BLOCK_GAP, content_top, draw_title
+from .mod_counts_panel import ModCountsPanel
 from .widgets import Button, Checkbox, Dropdown, Stepper, TextInput, fit_buttons
 
 _title = draw_title
@@ -354,6 +355,11 @@ class HostSetupScreen(_FormScreen):
 
         self.debug_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
         self.local_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
+        # The same panel the hot-seat menu uses: one deck, one place to say
+        # what is in it.  See ui/mod_counts_panel.py.
+        self.mod_counts_panel = ModCountsPanel(app, library)
+        self.mod_deck_button = Button(pygame.Rect(0, 0, 150, 30),
+                                      "Skład talii", radius=8)
         self.create = Button(pygame.Rect(0, 0, 280, 52), "Utwórz pokój",
                              radius=12, primary=True)
         self.back = Button(pygame.Rect(0, 0, 280, 40), "Wróć", radius=10)
@@ -421,6 +427,17 @@ class HostSetupScreen(_FormScreen):
                                             y + label_h + 4, value_w=64, r=r)
         y = self.mod_first_stepper.rects["value"].bottom + self.ROW_GAP
 
+        # Beside the row, never under it: the vertical gaps here shrink to fit
+        # too, and a button placed below lands on the next label.
+        self.mod_deck_button.fit(r, min_width=int(150 * r.fonts.scale),
+                                 min_height=int(28 * r.fonts.scale))
+        self.mod_deck_button.rect.midleft = (
+            max(rect.right for rect in self.mod_interval_stepper.rects.values())
+            + int(20 * r.fonts.scale),
+            self.mod_interval_stepper.y + self.mod_interval_stepper.height // 2,
+        )
+        self.mod_counts_panel.on_resize()
+
         self.local_row_y = y + 2
         self.local_checkbox.rect.topleft = (centre - 190, self.local_row_y)
         y = self.local_row_y + 20 + hint_h + self.ROW_GAP
@@ -442,6 +459,9 @@ class HostSetupScreen(_FormScreen):
         self._lay_out()
 
     def handle_click(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        # Modal while open: it covers the steppers underneath.
+        if self.mod_counts_panel.handle_event(event, mouse):
+            return
         if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
             return
         delta = self.cells_stepper.hit(mouse)
@@ -451,6 +471,9 @@ class HostSetupScreen(_FormScreen):
         delta = self.chest_stepper.hit(mouse)
         if delta:
             self.chest_round = max(RULES.chest_open_min, self.chest_round + delta)
+            return
+        if self.mod_deck_button.hit(mouse):
+            self.mod_counts_panel.open()
             return
         delta = self.mod_first_stepper.hit(mouse)
         if delta:
@@ -508,6 +531,7 @@ class HostSetupScreen(_FormScreen):
                              chest_open_round=self.chest_round,
                              mod_round_first=self.mod_first,
                              mod_round_interval=self.mod_interval,
+                             mod_counts=dict(self.mod_counts_panel.counts),
                              double_percent=self.double_percent,
                              debug_version=self.debug_version)
         self._enter_lobby(service, embedded=embedded)
@@ -517,6 +541,8 @@ class HostSetupScreen(_FormScreen):
         self.local_checkbox.checked = self.run_local_server
         self.create.update(mouse, dt)
         self.back.update(mouse, dt)
+        self.mod_deck_button.update(mouse, dt)
+        self.mod_counts_panel.update(dt, mouse)
         self.debug_checkbox.update(mouse, dt)
         self.local_checkbox.update(mouse, dt)
 
@@ -542,6 +568,7 @@ class HostSetupScreen(_FormScreen):
                r.theme.text_light, surface, midtop=(centre, self.mod_row_y))
         self.mod_first_stepper.draw(r, str(self.mod_first), mouse, surface)
         self.mod_interval_stepper.draw(r, str(self.mod_interval), mouse, surface)
+        self.mod_deck_button.draw(r, surface)
 
         self._option(surface, self.local_checkbox,
                      "Uruchom serwer na tym komputerze",
@@ -556,6 +583,8 @@ class HostSetupScreen(_FormScreen):
         if self.error:
             r.text(self.error, r.fonts.get(17, bold=True), r.theme.invalid,
                    surface, midtop=(centre, self.error_y), shadow=True)
+        # Last, so it sits above the whole form.
+        self.mod_counts_panel.draw(surface)
 
     def _option(self, surface, checkbox, label: str, hint: str) -> None:
         r = self.app.renderer

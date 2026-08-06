@@ -2522,3 +2522,397 @@ the opposite. Six players is back in the two strict recipient tests it had been
 excluded from, and the deck-size assertion in `test_engine.py` is 8 → 16.
 
 **797 passing** (791 before, +6), ~156 s. N97 added.
+
+---
+
+## Stage 24 — The Mody Patusa start doing things
+**Date:** 2026-08-06
+
+### Goal
+Four of the eight mods gain their real effect, the deck stops being one copy of
+each, and the composition becomes a lobby setting. Nothing else was touched:
+no rewrite of movement, turn order or victory.
+
+### The deck (parts 1 and 2)
+`cards.json` now gives every mod a `count`: Speedrun 2, Masa solna 2, AKO 1,
+Halloween 1, Sesja na PG 2, Paczka 2, Squid Game 1, Shady 2 — **13 cards**, up
+from 8. Every title still appears ONCE in the data; copies come from `count`,
+never from repeating the entry.
+
+Those numbers are DEFAULTS, not constants. `SessionConfig.mod_counts` overrides
+them per title, and `DeckDef.with_counts()` builds the altered deck. Two things
+about that method matter and both are load-bearing:
+
+- an ABSENT title keeps the printed count, so an empty mapping means "the real
+  deck" — that is what an older client, and every existing test, sends;
+- the CARD ORDER stays the JSON's. A shuffle is a permutation of a list, so a
+  list assembled in the mapping's iteration order would shuffle differently on
+  two machines from the same seed. Do not rebuild it from the mapping.
+
+`clamp_mod_counts` (config/settings.py) is shared by the config, the lobby and
+the server so all three agree what a payload means, and it returns the pairs
+SORTED because the mapping travels inside the lobby snapshot clients compare.
+
+`room.set_settings` MERGES the incoming counts rather than replacing them. The
+panel sends the titles it knows about; a host on an older build sends none, and
+a replace would have emptied the deck.
+
+### The rules are in the JSON, not in the engine
+Every mod that does something declares a `passive`:
+
+    Speedrun     {"reverse_backward": true}
+    Masa solna   {"movement_cap": 1}
+    Halloween    {"require_neighbour": true}
+    Sesja na PG  {"abilities_locked": true}
+
+`GameState.mod_rule(key)` reads the rack; `movement_cap`, `abilities_locked`,
+`requires_neighbour` and `reverses_backward_moves` are named wrappers over it.
+No part of the engine asks a mod what it is CALLED — the project rule holds. A
+new mod that caps movement is a JSON entry.
+
+The LEFT slot wins a disagreement between two mods. Nothing declares a
+conflicting pair today; the rule exists so that the day one does, two machines
+resolve it the same way instead of by dictionary order.
+
+### EffectContext learned three things
+`origin` ("card" / "ability" / "on_draw"), `deck_id`, and `can_ask`.
+
+The first two exist because Masa solna and Halloween apply to MOVEMENT CARDS
+and Dziad's ability is an ordinary `move_pawn` that both would otherwise have
+caught. `ctx.from_movement_card` is the test.
+
+`can_ask` is subtler and fixes a bug that would have shipped. Seks z pedałami
+and Troll's forced play pick a card from `resolves_without_asking` — a property
+of the PRINTED card, computed from its spec, which cannot know that Speedrun
+has just given it a question to ask. Without the flag, every revealed backward
+card became "bez efektu" while Speedrun was in the rack. With it, those two call
+sites resolve non-interactively and Speedrun declines the reversal, which is
+always legal because the mod only ever OFFERS one.
+
+### Speedrun (part 3)
+A backward movement card asks which way to go, through the existing
+`ChoicePrompt` with `kind="option"` — the same modal as the 2A/2B field
+question, as asked.
+
+THE ORDER OF THE QUESTIONS IS PART OF THE RULES: direction, then pawn, then
+which half of a widened row. Speedrun is resolved at the TOP of `_move_pawn`,
+before `_movement_target`, because the card's printed direction is all it needs
+and asking after the pawn would mean picking a pawn to move backwards and only
+then being told it could go forwards.
+
+Only cards whose direction is literally `backward` ask. `direction: "either"`
+(Dziad) does not: those already let the player choose, and a second question
+about the same decision would be asked twice.
+
+Plagiat! reaches movement through `_move_pawns`, a different handler, and gets
+the same treatment there. That it is a different handler is an implementation
+detail and must not make the card behave differently.
+
+### Masa solna (part 4)
+Caps the distance a movement card DECLARES at one field, sign preserved, so
+Astral 2022 moves one back rather than two. It hits exactly the nine cards the
+brief lists — Obniżenie progu, Astral 2019, Astral 2022 and the six Fillerski
+przedmiot colours — because those are precisely the entries with `steps: 2`.
+
+NOT capped: abilities (Dziad), chest cards, and the ChatGPT movement bonus. The
+bonus is a charge somebody spent an ability to get, it is added after the cap,
+and swallowing it here would have quietly rewritten a skill this stage was not
+asked to touch. A capped two-field card plus the bonus therefore moves two.
+Recorded rather than decided silently — see KNOWN LIMITATIONS.
+
+### Halloween (part 5)
+A pawn with nobody directly in front of or behind it cannot move. The card
+still RESOLVES: it is played, discarded, the hand refills and the turn passes —
+only the movement does nothing.
+
+That could not be an empty `Plan`. `Plan.ok` is `bool(operations)`, so an empty
+one reads as a REFUSAL to every caller and the card would have stayed in the
+hand — the opposite of the rule. It follows the idiom Thunderfuck already
+established for an empty rack: a real operation, `Fizzle`, whose executor
+changes nothing and emits `MoveFizzled` so the player is told why. A card that
+silently did nothing looks like a bug.
+
+Sharing a field is NOT being a neighbour: a tower is one field, and the rule is
+about what is in front and behind, not underneath.
+
+**THE CAMP IS ONE CLUSTER, and this is a decision, not a reading.** Every pawn
+starts in the camp at `CAMP_INDEX`. Taken literally nobody there has a
+neighbour, so Halloween reaching the rack while the field is still waiting —
+which `mod_round_first: 1` in the lobby allows — would have frozen the board
+permanently: nothing could move, nobody could reach the finish, no tower could
+be built, so NEITHER FACTION COULD WIN. Pawns waiting shoulder to shoulder in
+the camp are neighbours of one another. Flagged for the owner.
+
+On a multi-pawn card each pawn is judged against the board THAT move sees, via
+`MoveProjection.positions` — an earlier move can give a later pawn the
+neighbour it needed, or take it away. A pinned pawn is skipped and the rest of
+the card carries on.
+
+### Sesja na PG (part 6)
+Refused in `_use_ability`, BEFORE anything resolves, so no charge is spent: a
+player who had two uses when the mod arrived has two when it leaves. Blocked in
+the engine and not only in the interface, for the usual reason — a client that
+does not grey the button must still be unable to act.
+
+The button uses the same `enabled=False` styling as a spent ability, but reads
+"SESJA NA PG" rather than "ZUŻYTE", because locked is not spent and a caption
+saying otherwise would be false.
+
+### AKO and the rest (part 7)
+AKO, Paczka, Squid Game and Shady are placeholders with counts and no
+`passive`. They draw, they are selectable, they occupy a slot, they do nothing.
+There are tests asserting exactly that — "it does nothing yet" is worth pinning
+so the next person does not mistake it for a bug they introduced.
+
+### The interface
+`ui/mod_counts_panel.py` — one panel, used by BOTH the hot-seat menu and the
+network host screen. One deck needs one place to describe it.
+
+It is an OVERLAY and not eight more settings rows because both screens lay
+themselves out by measuring and shrinking their gaps until they fit; stage 21
+already records a fifth row pushing the Start button off a 1280×760 window.
+Eight more would not fit at any gap on either screen.
+
+Two layout bugs were caught by looking rather than by the suite:
+
+1. the button first sat UNDER the Mod Patusa row and landed on the "pola
+   podwójne" label at 1280×760, where the gaps are tightest. It belongs BESIDE
+   the row, in the margin, which is free at every supported size.
+2. the steppers hung over the panel's right edge. `Stepper` sizes its buttons
+   to its own labels at the current type scale, so the hard-coded inset was
+   wrong everywhere. The row is measured now and placed by its right edge.
+
+Both have tests, the first parametrised over four window sizes.
+
+### Verified
+- Rendered the menu and panel at 1920×1080 and 1280×760, open and shut.
+- Six consecutive four-player matches over a real in-process server with a
+  resized deck (Speedrun 3, Halloween 2, Paczka 0): all four rules exercised
+  through the real command path, every replica AND the server's authoritative
+  copy compared after each step. No divergence.
+- `--selftest` exits 0.
+
+### Tests
+**884 passing** (797 before, +87), ~136 s.
+
+- `tests/test_mod_rules.py` — 53 new: the composition; resizing; clamping;
+  determinism across two builds; an emptied deck not hanging the round; the
+  rules coming from the JSON; Masa solna over all nine two-field cards and the
+  things it must not touch; Speedrun's prompt, its order against the pawn and
+  tile questions, the multi-pawn path and the non-interactive fallback;
+  Halloween's neighbours, the tower case, the camp, the discard, and per-pawn
+  skipping; Sesja na PG's refusal and preserved charges; the placeholders.
+- `tests/test_mod_counts_sync.py` — 8 new: settings reaching every client,
+  host-only, identical decks and uids everywhere, fingerprints agreeing,
+  server-side clamping, and partial updates merging.
+- `tests/test_mod_counts_ui.py` — 26 new: the panel's contents, defaults,
+  bounds, reset, closing, the modality, the counts reaching a built deck, the
+  host screen having the same panel, and the two layout bugs above.
+
+One existing test changed: `test_deck_sizes_match_the_data_file` asserted the
+mods deck was 8. Its docstring says a count change should make somebody confirm
+the new number, so it is 13 with a comment saying why — the assertion is doing
+its job, not in the way.
+
+### Notes
+- N98: mod rules are declared in cards.json as `passive`; never match a title.
+- N99: an empty Plan is a refusal; a move that does nothing needs an operation.
+- N100: a card played by another card cannot be asked a question.
+- N101: Halloween treats the camp as one cluster, or the game can deadlock.
+- N102: the deck panel is an overlay because the settings rows do not fit.
+
+---
+
+## Stage 25 — The last three Mody Patusa
+**Date:** 2026-08-06
+
+### Goal
+Paczka, Squid Game and Shady — the three placeholders left after stage 24 —
+gain their real effects. AKO is still a placeholder; nothing else was touched.
+
+### 0. The checking mechanic already existed
+Two of these cards are about checking, and `LLM_Instructions.txt` says in four
+places that the checking mechanic is unimplemented and is "the main blocker".
+That text is STALE: it predates stage 17, which built checking as
+`engine/victory.py::review()` — all pawns on one field, inspect the bottom
+pawn, hunters win or the colour is crossed off. The instructions have been
+corrected rather than worked around.
+
+This mattered: it is the difference between "implement checking, then modify
+it" and "modify one condition in `review`". Reading the changelog past the
+instructions is what caught it, and it is the reason L5 and the old §1 of the
+development order have been rewritten.
+
+### 1. The rules are in the JSON, as usual
+    Paczka      {"reveal_chest": true}
+    Squid Game  {"lead_check_only": true}
+    Shady       {"hide_leader": true}
+
+plus the three wrappers on `GameState` — `chest_cards_revealed`,
+`lead_check_only`, `hides_leader`. No part of the engine asks a mod what it is
+called (N98). A test now walks every `passive` key in the deck and asserts
+something reads it, which is N80 applied to mods: a rule nothing consumes is a
+card that looks implemented and does nothing.
+
+### 2. The thing these three needed that stage 24's four did not
+Speedrun, Masa solna, Halloween and Sesja na PG are pure passives: the answer
+depends only on what is in the rack *now*. All three of these depend on a
+MOMENT instead — Paczka acts when it arrives, Squid Game needs to know which
+round it arrived in so its first check falls on the next one, and Shady acts on
+arrival and again a round later.
+
+So `GameState.armed_mods` maps a mod's card uid to the round it entered the
+rack, and `_sync_mod_states()` computes the TRANSITIONS into and out of that
+mapping. It is called from every path that changes `mod_slots` — the selection,
+`PlaceMod` and Thunderfuck — which is what stops a fourth way into the rack
+silently skipping an arrival.
+
+The departure half is load-bearing and easy to forget: a mod that leaves must
+leave nothing behind. Removing Shady puts its pawn back at once (otherwise
+replacing it mid-round strands a pawn nowhere for the rest of the match), and
+removing Squid Game drops any pending check and restores ordinary checking.
+
+### 3. Paczka
+`ChestCardsRevealed` carries, per holder, the seat, the name and the card
+titles. Every machine builds the same list from its own replica and shows its
+own window, dismissed independently with OK; nothing is synchronised because
+nothing changes. A test compares the three machines' lists.
+
+**It deliberately breaks N81**, which forbids a card title in an event the
+whole table sees. That rule exists because only one player was entitled to
+look; here the card IS the entitlement — Paczka's entire text is that the Chest
+is public. Recorded as the one sanctioned exception, in the event's docstring
+and in the rules list, because a future reader finding it will otherwise assume
+it is a leak.
+
+The window is a LIST, not a row of card faces: six players holding two cards
+each is twelve faces and no lineup fits them at 1280×760. It borrows the card
+picker's furniture — dimmed table, `premium_panel`, brass heading, one
+`interactive_panel` button — so it reads as the same family of window as the
+chest limit rather than as a fourth kind of dialog. Empty table gives the
+brief's sentence, "Nikt nie posiada obecnie kart Skrzyni."
+
+Above the keyboard dispatch in `handle_event`, so Esc closes the window instead
+of opening the pause menu, and it consumes only the input that dismisses it —
+the table underneath stays live while somebody reads.
+
+### 4. Squid Game, and the part that could have leaked
+Two halves, both from the one rule so they cannot get out of step: the ordinary
+gathering check is skipped entirely in `review`, and an automatic check runs at
+the start of every round after the one the mod arrived in.
+
+**THE SPLIT IS THE WHOLE DESIGN.** Deciding WHO is checked is public — the
+single furthest pawn — so `_arm_lead_check` runs in `_begin_round` on every
+machine and they all agree. Deciding what that MEANS needs the hidden colour,
+so it happens in `victory.review` on the authority alone and comes back as the
+existing `EliminatePawn` or `DeclareVictory`. Doing it any other way means
+either the server drifting from five replicas or a client judging a winner
+(N72), and both are worse than the extra field.
+
+**No new command.** The verdict travels the road every other verdict travels,
+so logging, broadcast, replay, reconnection and the fingerprint all keep
+working untouched.
+
+`pending_lead_check` is cleared by the COMMAND that settles it, in
+`_eliminate_pawn` and `_declare_victory` — not by the code that armed it, or
+the authority would clear its own copy and every replica would go on waiting
+for a check that already happened.
+
+A shared lead is SKIPPED, not tie-broken, and the skip is reported: a round
+where nothing happens is otherwise indistinguishable from a broken mod. A
+colour already crossed off is not checked again. Piotrek reaching the meta
+still wins — Squid Game replaces checking, not the other ending.
+
+### 5. Shady
+`StatusKind.HIDDEN` on the pawn (N18), carrying the riders and the round, so
+the snapshot, the serialisation and reconnection come for free.
+
+The pawn taken is the BOTTOM of the furthest occupied field, which is a
+different question from Squid Game's and needed its own function: the lead mod
+skips a shared lead, Shady is told what to do about one.
+
+Removed from the board, and ignored by `hindmost`/`foremost` (one filter in
+`_ordered_pawns`), by `pawn_options`, by `MoveProjection.positions` and by
+`has_neighbour`. A card that names it anyway resolves, is discarded and does
+nothing — `Fizzle`, the Halloween idiom (N99), applied in `_move_pawn`,
+`_move_pawns` AND `_stack_pawn`, because N104 is exactly about this.
+
+On screen it disappears through ONE omission, in `BoardView._draw_order` — the
+list that is painted is also the list `token_at` hit-tests, so it stops being
+drawn and stops being clickable in the same line. `forget_pawn` drops its
+animation state, or it would slide the length of the board when it reappeared
+somewhere it has never been.
+
+Checking counts against the pawns ON THE TABLE rather than against the palette,
+which is the whole of the exception: five onto one field while a pawn is away,
+six again once it is back.
+
+Restored at the start of the next round, on top of the rearmost pawn, before
+anything else in `_begin_round` sees the board. One-time: it stays on display
+and never fires again, because arming is a transition. A SECOND Shady is a new
+arrival and does hide a pawn.
+
+### The brief's arithmetic, decoded
+The brief says checking normally needs "all five remaining pawns" and four
+while Shady is active. The palette has SIX pawns, so that looks off by one. It
+is consistent if the count is *pawns stacked onto a base pawn*: five onto one
+is all six, four onto one is all five. That reading also matches the brief's
+own "since one pawn is absent", and it is what the code does — checking
+requires every pawn currently on the board.
+
+### The ruling the brief did not settle
+See L17. The brief says Shady removes "the BOTTOM pawn of that stack" and its
+example removes ONE pawn (pink on green: "green disappears"), but it also says
+to store and restore "its carried stack". Those conflict. One pawn leaves; the
+riders settle onto the field. The carried stack is recorded anyway, so the
+other reading is a small change rather than a rewrite. **The owner should
+confirm.**
+
+### Tests
+**944 passing** (884 before, +60), ~138 s.
+
+- `tests/test_mod_effects.py` (new, 42): the three rules coming from the JSON;
+  Paczka's list, its omissions, its empty case, that it changes nothing and
+  fires once; Squid Game not checking in its arrival round, checking every
+  round after, crossing off a wrong colour, winning it for the hunters, both
+  skip cases, camp pawns not leading, a blind replica deciding nothing, the
+  snapshot, the clearing, and Piotrek's own ending still working; Shady's
+  target including the bottom-of-a-tower case, the four ways a hidden pawn is
+  ignored, the fizzle, the reduced checking requirement and its restoration,
+  where the pawn comes back and where it does not, one-time-ness, a second
+  Shady, removal restoring at once, and the status in the snapshot.
+- `tests/test_mod_effects_sync.py` (new, 8): every machine building the same
+  Paczka window, no command logged for it, the automatic check armed everywhere
+  and judged once with the result reaching every machine, the armed round in
+  the fingerprint, that the server learning the colour does NOT move the
+  fingerprint, the same pawn hidden and restored everywhere, and the table
+  still agreeing after a dozen turns.
+- `tests/test_ui.py` (+13): the window opening, listing, painting, dismissing
+  by button and by Esc but not by a stray click, not blocking the table, the
+  empty sentence, fitting at three resolutions with six players holding two
+  cards each; a hidden pawn neither painted nor clickable; the skipped check
+  still reported.
+- `tests/test_mod_rules.py`: the two placeholder tests were honest about stage
+  24 and are now wrong, so they were updated rather than deleted — AKO is the
+  only placeholder left, and `install` now goes through `_sync_mod_states` so a
+  mod that acts on arrival does so there too.
+
+### Verification
+- 944 tests; `--selftest` exits 0; `inspect_frame.py` 0 problems at 1280×760
+  and 3840×2160.
+- R1, N44 and N34a re-checked by grep: no pygame in `engine/`, `net/` or
+  `server/`, no radial glows, no literal colours in the new overlay.
+- The window rendered at 1920×1080 and 1280×760, full and empty, and inspected
+  as images.
+
+### Notes
+- Three test bugs of my own were worth recording because each is a trap:
+  a title read from a pile *inside* the loop that empties it named a different
+  card each iteration; `review_victory()` called by hand returns messages that
+  nothing delivers, so a verdict must be triggered by a real command the way
+  `test_victory.py` does; and "a client decides nothing" is false on PIOTREK's
+  client, which legitimately holds his own colour — the safety net is that a
+  `NetworkSession` never calls `review`, not that the answer would be empty.
+- AKO is the last mod without an effect, and it is the only one whose text
+  ("Wszystkie ruchy poruszają jednego sąsiadującego pionka") still needs a
+  ruling from the owner before it can be written.

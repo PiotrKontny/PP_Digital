@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, replace, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..board.board import BoardModel
+from ..board.tiles import Tile
 from ..cards.base_card import Card, CardDef, EffectSpec, Pawn
 from ..cards.deck import Deck
 from ..cards.loader import ContentLibrary
@@ -181,6 +182,20 @@ class GameState:
         #: How deep the current draw-causes-a-draw chain is.  Not game state —
         #: it never leaves a command — so it stays out of the snapshot.
         self._draw_depth: int = 0
+        #: Mod card uid -> the round it entered the rack.  Three of the mods
+        #: need to know not merely THAT they are active but WHEN they became
+        #: active: Paczka shows its window once on arrival, Squid Game starts
+        #: checking the round AFTER it appears, and Shady hides a pawn once and
+        #: never again.  One mapping serves all three, and dropping an entry
+        #: when its card leaves the rack is what makes a mod that comes back
+        #: later a fresh arrival rather than a spent one.
+        self.armed_mods: Dict[int, int] = {}
+        #: The colour Squid Game's automatic check is about to inspect, or
+        #: ``None``.  Computed from PUBLIC information in ``_begin_round`` so
+        #: every replica agrees on who is being checked; only the authority
+        #: turns it into a verdict, because only the authority knows the
+        #: hidden colour.  Cleared by whichever command settles it.
+        self.pending_lead_check: Optional[str] = None
 
         self.tokens: Dict[str, TokenState] = {}
         for i, pawn in enumerate(library.pawns):
@@ -302,6 +317,141 @@ class GameState:
     @property
     def mod_selection_open(self) -> bool:
         return self.pending_mod_selection is not None
+
+    # ── what the active mods change ──────────────────────────────────────────
+    @property
+    def active_mods(self) -> List[Card]:
+        """The mods in play, left slot first.  Empty slots are not mods."""
+        return [card for card in self.mod_slots if card is not None]
+
+    def mod_rule(self, key: str, default: Any = None) -> Any:
+        """What the rack says about one rule, or ``default`` when it is silent.
+
+        A mod changes the rules for as long as it sits in the rack, which is
+        exactly what a ``passive`` is — the same field ChatGPT uses to shrink
+        Piotrek's hand.  So the rules are DECLARED in cards.json and read here,
+        and no part of the engine ever asks a mod what it is called.  Adding a
+        mod that caps movement, or one that locks abilities, is a JSON entry.
+
+        The LEFT slot wins a disagreement, because it is the slot the most
+        recently installed mod takes (``_install_mod`` pushes into 0) and the
+        one Piotrek owns during a selection.  Nothing declares a conflicting
+        pair today; the rule exists so that the day something does, both
+        machines resolve it the same way instead of by dictionary order.
+        """
+        for card in self.active_mods:
+            value = card.passive.get(key)
+            if value is not None:
+                return value
+        return default
+
+    @property
+    def abilities_locked(self) -> bool:
+        """True while a mod forbids character abilities (Sesja na PG).
+
+        Remaining uses are NOT touched by this — the lock is a question asked
+        at the moment of use, so a player who still had two charges when the
+        mod arrived still has two when it leaves.
+        """
+        return bool(self.mod_rule("abilities_locked", False))
+
+    @property
+    def movement_cap(self) -> Optional[int]:
+        """Largest distance a movement CARD may declare (Masa solna).
+
+        ``None`` means uncapped.  It caps what is printed on the card, not the
+        whole move: a movement bonus is a status somebody spent an ability on,
+        not a movement card, and this must not silently cancel it.
+        """
+        value = self.mod_rule("movement_cap")
+        return None if value is None else max(0, int(value))
+
+    @property
+    def requires_neighbour(self) -> bool:
+        """True while lone pawns are pinned in place (Halloween)."""
+        return bool(self.mod_rule("require_neighbour", False))
+
+    @property
+    def reverses_backward_moves(self) -> bool:
+        """True while a backward card may be turned around (Speedrun)."""
+        return bool(self.mod_rule("reverse_backward", False))
+
+    @property
+    def chest_cards_revealed(self) -> bool:
+        """True while every Chest card is public knowledge (Paczka)."""
+        return bool(self.mod_rule("reveal_chest", False))
+
+    @property
+    def lead_check_only(self) -> bool:
+        """True while the ONLY way to check a colour is the automatic one.
+
+        Squid Game replaces the checking mechanic rather than adding to it:
+        stacking the whole table onto one field stops meaning anything, and the
+        pawn out in front is inspected once a round instead.  Both halves of
+        that are read from this one rule, so they cannot get out of step.
+        """
+        return bool(self.mod_rule("lead_check_only", False))
+
+    @property
+    def hides_leader(self) -> bool:
+        """True while a mod takes the leading pawn off the map (Shady)."""
+        return bool(self.mod_rule("hide_leader", False))
+
+    # ── pawns that are not on the map (Shady) ────────────────────────────────
+    def pawn_is_hidden(self, pawn_id: str) -> bool:
+        """Whether this pawn has been taken off the map for a round.
+
+        A hidden pawn is not merely invisible: it is ignored by movement, by
+        targeting, by the neighbour test and by checking.  Everything that
+        walks the pawn list asks this, which is why it is one question with one
+        answer rather than a condition repeated in six places.
+        """
+        return self.statuses.pawn_has(StatusKind.HIDDEN, pawn_id)
+
+    @property
+    def hidden_pawn_ids(self) -> Tuple[str, ...]:
+        return tuple(
+            status.subject_id
+            for status in self.statuses.of_kind(StatusKind.HIDDEN)
+        )
+
+    @property
+    def visible_pawns(self) -> List[Pawn]:
+        """Every pawn that is actually on the table.
+
+        Checking counts against this rather than against the palette, which is
+        the whole of Shady's exception to the checking rule: while a pawn is
+        off the map the hunters only have to gather the ones that are left.
+        """
+        return [pawn for pawn in self.library.pawns
+                if not self.pawn_is_hidden(pawn.id)]
+
+    def leading_pawn(self) -> Optional[str]:
+        """The single pawn furthest along the road, or ``None`` if it is a tie.
+
+        Squid Game checks the leader ONLY when the lead is unshared: two pawns
+        level with each other means there is no one pawn out in front, and the
+        round's check is skipped rather than being broken by a tie-break.  A
+        pawn still in the camp has not started and can never lead, and a hidden
+        pawn is not on the board to lead at all.
+
+        Public, deterministic and free of the hidden colour, so every replica
+        computes the same answer — which is what lets the check be armed on
+        every machine and judged on only one.
+        """
+        best: Optional[int] = None
+        leaders: List[str] = []
+        for pawn in self.visible_pawns:
+            index = self.board.position_of_pawn(pawn.id)
+            if index is None:
+                continue
+            if best is None or index > best:
+                best, leaders = index, [pawn.id]
+            elif index == best:
+                leaders.append(pawn.id)
+        if best is None or len(leaders) != 1:
+            return None
+        return leaders[0]
 
     def deck(self, deck_id: str) -> Deck:
         return self.decks[deck_id]
@@ -881,13 +1031,60 @@ class GameState:
         return events
 
     def _begin_round(self, round_number: int) -> List[ev.GameEvent]:
-        """Move to a new round, handing out a chest card if one is due."""
+        """Move to a new round, handing out a chest card if one is due.
+
+        The order here is the rules' order and not an arbitrary one:
+
+        1. pawns Shady hid last round come back FIRST, so everything after this
+           point sees a complete board;
+        2. Squid Game's automatic check is armed against that board, before
+           anybody has had a turn — which is what "once a round, before the
+           first player" means;
+        3. the Mod Patusa selection may then pause the round, and a mod chosen
+           in it takes effect from here;
+        4. the chest deals last, as it always did.
+        """
         self.round_number = max(1, round_number)
         self.turn_slot = 0
         events: List[ev.GameEvent] = [ev.RoundChanged(self.round_number)]
+        events.extend(self._restore_hidden_pawns(before_round=self.round_number))
+        events.extend(self._arm_lead_check())
         events.extend(self._open_mod_selection())
         events.extend(self._distribute_chest_card())
         return events
+
+    def _arm_lead_check(self) -> List[ev.GameEvent]:
+        """Name the pawn Squid Game inspects this round, if it inspects one.
+
+        Deciding WHO is checked is public and happens on every machine; whether
+        that pawn turns out to be Piotrek is not, and is left to the authority
+        through :func:`victory.review`.  Splitting it this way is what keeps the
+        secret a secret while every replica still agrees about what is going on.
+
+        The first check falls on the round AFTER the mod arrived, so a Squid
+        Game chosen in round 5 checks nothing until round 6.  A shared lead is
+        skipped outright rather than broken by a tie-break, and a colour that
+        has already been ruled out is not checked twice.
+        """
+        self.pending_lead_check = None
+        if not self.lead_check_only or not self.phase.playable:
+            return []
+        armed = [round_number for uid, round_number in self.armed_mods.items()
+                 if self._mod_in_rack(uid, "lead_check_only")]
+        if not armed or self.round_number <= min(armed):
+            return []
+
+        leader = self.leading_pawn()
+        if leader is None:
+            return [ev.LeadCheckAnnounced(pawn_id="", skipped=True)]
+        if leader in self.eliminated_pawns:
+            return [ev.LeadCheckAnnounced(pawn_id=leader, skipped=True)]
+        self.pending_lead_check = leader
+        return [ev.LeadCheckAnnounced(pawn_id=leader, skipped=False)]
+
+    def _mod_in_rack(self, uid: int, rule: str) -> bool:
+        return any(card.uid == uid and card.passive.get(rule)
+                   for card in self.active_mods)
 
     # ── choosing the Mods Patusa ─────────────────────────────────────────────
     def _open_mod_selection(self) -> List[ev.GameEvent]:
@@ -1057,6 +1254,7 @@ class GameState:
             discarded_uids=[c.uid for c in losers],
             tie_broken=tie_broken,
         ))
+        events.extend(self._sync_mod_states())
         return events
 
     def _finish_mod_selection(self) -> List[ev.GameEvent]:
@@ -1065,6 +1263,212 @@ class GameState:
             return []
         self.pending_mod_selection = None
         return [ev.ModSelectionFinished(selection.round_number)]
+
+    # ── mods that DO something the moment they arrive, or when they leave ────
+    def _sync_mod_states(self) -> List[ev.GameEvent]:
+        """Bring the one-off effects into line with what is in the rack.
+
+        Three mods are not pure passives.  Paczka shows a window as it arrives,
+        Squid Game has to remember WHICH ROUND it arrived in so its first check
+        falls on the next one, and Shady takes a pawn off the map once.  All
+        three are therefore about the TRANSITION into and out of the rack, not
+        about the rack's contents, and the difference between the two is what
+        this method computes.
+
+        Called after every change to ``mod_slots`` — the selection, PlaceMod
+        and Thunderfuck alike.  Doing it in one place is what stops a fourth
+        way into the rack from silently skipping an arrival, and it is also
+        what guarantees the departure half runs: a mod that leaves must leave
+        nothing behind (a hidden pawn is put back, a pending check is dropped),
+        because the rack is the only thing keeping its rule alive.
+        """
+        events: List[ev.GameEvent] = []
+        present = {card.uid: card for card in self.active_mods}
+
+        for uid in [uid for uid in self.armed_mods if uid not in present]:
+            del self.armed_mods[uid]
+
+        # A departure can remove the rule that a pending check depends on.  The
+        # check is dropped rather than honoured: it belongs to the mod, and the
+        # mod is gone.
+        if not self.lead_check_only and self.pending_lead_check is not None:
+            self.pending_lead_check = None
+        # Nothing on the table may keep a pawn off the map, so anybody Shady is
+        # still holding comes back at once.  Without this, replacing Shady mid
+        # round would strand a pawn nowhere for the rest of the match.
+        if not self.hides_leader:
+            events.extend(self._restore_hidden_pawns())
+
+        for uid, card in present.items():
+            if uid in self.armed_mods:
+                continue
+            self.armed_mods[uid] = self.round_number
+            events.extend(self._arm_mod(card))
+        return events
+
+    def _arm_mod(self, card: Card) -> List[ev.GameEvent]:
+        """Run whatever a mod does at the moment it reaches the rack.
+
+        Keyed on the card's declared ``passive``, never on its title (N98), so
+        a second mod that reveals the Chest or hides the leader is a JSON entry
+        exactly as a passive rule is.
+        """
+        events: List[ev.GameEvent] = []
+        if card.passive.get("reveal_chest"):
+            events.append(self._chest_reveal_event())
+        if card.passive.get("hide_leader"):
+            events.extend(self._hide_leading_pawn())
+        return events
+
+    # ── Paczka: every Chest card is face up ──────────────────────────────────
+    def _chest_reveal_event(self) -> ev.GameEvent:
+        """Who holds which Chest cards, for the window every player is shown.
+
+        DELIBERATELY BREAKS N81, which says a card title must never go into an
+        event the whole table sees.  That rule exists because only one player
+        was entitled to look; here the card IS the entitlement — Paczka's whole
+        text is that the Chest is public — so the exception is the mechanic,
+        not a leak.  It is also the ONLY effect allowed to do this: any other
+        event carrying Chest titles is a bug.
+
+        Players holding nothing are left out, because a list of empty names is
+        noise rather than information.
+        """
+        entries = [
+            ev.ChestHolding(
+                player_index=player.index,
+                player_name=player.name,
+                titles=[card.title for card in self.chest_cards(player)],
+            )
+            for player in self.players
+            if self.chest_cards(player)
+        ]
+        return ev.ChestCardsRevealed(entries)
+
+    # ── Shady: the leading pawn leaves the map for a round ───────────────────
+    def _shady_target(self) -> Optional[str]:
+        """The pawn Shady takes: the BOTTOM of the furthest occupied field.
+
+        Not the same question as :meth:`leading_pawn`.  Squid Game wants a pawn
+        that is unambiguously out in front and skips its check when the lead is
+        shared; Shady is told what to do about a shared field instead — it
+        takes the pawn at the bottom of the tower, so the example in the brief
+        (pink standing on green) removes green.
+
+        Ties between two fields of one widened position are broken by the field
+        index and then by the palette order, which is the tie-break the rest of
+        the engine already uses (L7) and is identical on every machine.
+        """
+        visible = {pawn.id for pawn in self.visible_pawns}
+        best_tile: Optional[Tile] = None
+        for tile in self.board.tiles:
+            occupants = [pawn for pawn in tile.stack if pawn in visible]
+            if not occupants:
+                continue
+            if best_tile is None or (tile.slot, -tile.index) > (best_tile.slot,
+                                                               -best_tile.index):
+                best_tile = tile
+        if best_tile is None:
+            return None
+        return next(pawn for pawn in best_tile.stack if pawn in visible)
+
+    def _hide_leading_pawn(self) -> List[ev.GameEvent]:
+        """Take the leading pawn off the map, remembering how to put it back.
+
+        Only the ONE pawn leaves.  Anything riding on it stays exactly where it
+        was and simply settles onto the field — which is what the brief's own
+        example describes (pink standing on green: "green disappears"), and
+        what makes the checking exception arithmetic work, since it is written
+        for exactly one absent pawn.  The riders are stored anyway, because the
+        brief asks for them and because a future reading that takes the tower
+        with it would need nothing more than this record.
+        """
+        pawn_id = self._shady_target()
+        if pawn_id is None or self.pawn_is_hidden(pawn_id):
+            return []
+        riders = list(self.board.carried_pawns(pawn_id))
+        tile = self.board.pawn_tile(pawn_id)
+        self.board.remove_pawn(pawn_id)
+        token = self.tokens.get(pawn_id)
+        if token is not None:
+            token.tile_index = None
+            token.held = False
+        self._sync_token_positions()
+        self.statuses.add(Status.for_pawn(
+            StatusKind.HIDDEN, pawn_id,
+            data={"riders": riders, "round": self.round_number,
+                  "tile": None if tile is None else tile.index},
+            source="Shady",
+        ))
+        return [ev.PawnHidden(pawn_id=pawn_id, riders=riders,
+                              round_number=self.round_number)]
+
+    def _restore_hidden_pawns(self, before_round: Optional[int] = None
+                              ) -> List[ev.GameEvent]:
+        """Put hidden pawns back on top of the pawn furthest to the rear.
+
+        The pawn does NOT go back where it came from: that is the point of the
+        card, and it is why this reads the board fresh instead of using the
+        field recorded when it left.
+
+        ``before_round`` restores only pawns hidden in an EARLIER round, which
+        is the ordinary end-of-round call; without it every hidden pawn comes
+        back, which is what a departing Shady needs.
+        """
+        events: List[ev.GameEvent] = []
+        for status in list(self.statuses.of_kind(StatusKind.HIDDEN)):
+            hidden_round = int(status.data.get("round", self.round_number))
+            if before_round is not None and hidden_round >= before_round:
+                continue
+            pawn_id = status.subject_id
+            self.statuses.discard(status)
+            events.extend(self._return_pawn_to_rear(pawn_id, status))
+        return events
+
+    def _return_pawn_to_rear(self, pawn_id: str,
+                             status: Status) -> List[ev.GameEvent]:
+        """Place a returning pawn on top of the rearmost pawn on the board."""
+        token = self.tokens.get(pawn_id)
+        if token is None:
+            return []
+        rear = self._rearmost_placed_pawn(exclude=pawn_id)
+        tile = self.board.pawn_tile(rear) if rear is not None else None
+        if tile is None:
+            # Nobody has left the camp, so there is no pawn to stand on.  The
+            # returning pawn waits in the camp as it did at the start of the
+            # game rather than materialising on the road.
+            slot = next((i for i, pawn in enumerate(self.library.pawns)
+                         if pawn.id == pawn_id), 0)
+            token.tile_index = None
+            token.position = self.board.camp_position(slot)
+            self._sync_token_positions()
+            return [ev.PawnRestored(pawn_id=pawn_id, tile_index=None, onto="")]
+        self.board.place_pawn(pawn_id, tile.index, on_top=True)
+        # The stack it was carrying is restored on top of it, in its old order,
+        # for the reading where the tower travels with the pawn.  Today nothing
+        # rides along — the riders stayed behind — so this is a no-op unless a
+        # rider happens to be standing on the same field again.
+        for rider in status.data.get("riders", []):
+            if self.board.pawn_tiles.get(rider) == tile.index:
+                self.board.place_pawn(rider, tile.index, on_top=True)
+        self._sync_token_positions()
+        token.tile_index = tile.index
+        return [ev.PawnRestored(pawn_id=pawn_id, tile_index=tile.index,
+                                onto=rear or "")]
+
+    def _rearmost_placed_pawn(self, exclude: str = "") -> Optional[str]:
+        """The pawn furthest from the finish that is actually on the board."""
+        best: Optional[Tuple[int, int, int, str]] = None
+        for order, pawn in enumerate(self.library.pawns):
+            if pawn.id == exclude or self.pawn_is_hidden(pawn.id):
+                continue
+            index = self.board.position_of_pawn(pawn.id)
+            if index is None:
+                continue
+            key = (index, self.board.stack_depth(pawn.id), order, pawn.id)
+            if best is None or key < best:
+                best = key
+        return best[3] if best is not None else None
 
     def chest_recipient_seats(self, round_number: Optional[int] = None
                               ) -> List[int]:
@@ -1164,6 +1568,15 @@ class GameState:
         if not card.ability_available:
             return [ev.ActionRejected(
                 f"Umiejętność „{card.skill or card.title}” została już zużyta",
+                command.kind)]
+        if self.abilities_locked:
+            # Sesja na PG.  Refused BEFORE anything resolves, so no charge is
+            # spent and nothing is animated: when the mod leaves the rack the
+            # player has exactly the uses they walked in with.  In the engine
+            # rather than in the interface for the usual reason — a client that
+            # simply does not grey the button must still be unable to act.
+            return [ev.ActionRejected(
+                "Sesja na PG — umiejętności postaci są zablokowane",
                 command.kind)]
 
         title = card.skill or card.title
@@ -1343,6 +1756,15 @@ class GameState:
     def _op_announce(self, op: effects.Announce, actor: int) -> List[ev.GameEvent]:
         return [ev.ActionRejected(op.text, "announce")]
 
+    def _op_fizzle(self, op: effects.Fizzle, actor: int) -> List[ev.GameEvent]:
+        """A move that legitimately did nothing (Halloween).
+
+        Changes no state on purpose.  The card around it is played, discarded
+        and followed by the usual refill and hand-over, because the effect
+        resolved — it simply resolved to nothing.
+        """
+        return [ev.MoveFizzled(op.reason, op.pawn_id)]
+
     def _op_play_random_card(
         self, op: effects.PlayRandomCard, actor: int
     ) -> List[ev.GameEvent]:
@@ -1367,7 +1789,11 @@ class GameState:
             ev.CardRevealed(actor, deck.id, card.uid, card.title, card.text,
                             announce_seconds=op.announce_seconds)
         ]
-        result = effects.resolve(self, card, actor)
+        # can_ask=False: the card was picked from ``resolves_without_asking``,
+        # which is a property of the printed card and cannot know that a mod
+        # has since given it a question to ask.  Without this, Speedrun turned
+        # every revealed backward card into "bez efektu".
+        result = effects.resolve(self, card, actor, can_ask=False)
         if result.ok:
             events.extend(self._execute(result, actor))
             events.append(
@@ -1499,7 +1925,7 @@ class GameState:
             caption=op.caption, forced=True,
         )]
 
-        result = effects.resolve(self, card, player.index)
+        result = effects.resolve(self, card, player.index, can_ask=False)
         player.remove_card(card)
         self.decks[card.deck_id].return_card(card)
         if isinstance(result, effects.Plan) and result.ok:
@@ -1545,6 +1971,7 @@ class GameState:
             ev.ModPlaced(player_index, 0, card.uid,
                          displaced.uid if displaced is not None else None)
         )
+        events.extend(self._sync_mod_states())
         return events
 
     def _discard_mod(self, command: cmd.DiscardMod) -> List[ev.GameEvent]:
@@ -1555,7 +1982,9 @@ class GameState:
             return [ev.ActionRejected("Slot jest pusty", command.kind)]
         self.decks[card.deck_id].return_card(card)
         self.mod_slots[command.slot] = None
-        return [ev.ModDiscarded(command.slot, card.uid)]
+        events: List[ev.GameEvent] = [ev.ModDiscarded(command.slot, card.uid)]
+        events.extend(self._sync_mod_states())
+        return events
 
     def _draw_character(self, command: cmd.DrawCharacter) -> List[ev.GameEvent]:
         player = self.player(command.player_index)
@@ -1956,6 +2385,13 @@ class GameState:
     def _eliminate_pawn(self, command: cmd.EliminatePawn) -> List[ev.GameEvent]:
         if self.library.pawn(command.pawn_id) is None:
             return [ev.ActionRejected("Nieznany kolor", command.kind)]
+        # The automatic check is settled by whatever it produced, here and in
+        # ``_declare_victory``.  It has to be cleared by a COMMAND rather than
+        # by the code that armed it, or the authority would clear it on its own
+        # copy and every replica would keep waiting for a check that already
+        # happened.
+        if self.pending_lead_check == command.pawn_id:
+            self.pending_lead_check = None
         if command.pawn_id in self.eliminated_pawns:
             # Not an error worth showing anybody: a colour is checked once, and
             # arriving here twice means a duplicate delivery, not a rules bug.
@@ -1975,6 +2411,7 @@ class GameState:
             return []
         self.victory = verdict
         self.phase = MatchPhase.ENDED
+        self.pending_lead_check = None
         # The reveal is now public, so the state may hold it: every client
         # learns the colour here and nowhere else.
         seat = self.player(verdict.piotrek_seat)
@@ -2031,6 +2468,14 @@ class GameState:
             # which is precisely the kind of drift that used to go unnoticed.
             "turn_slot": self.turn_slot,
             "statuses": self.statuses.to_list(),
+            # Which mods are armed, and the pending automatic check, are real
+            # shared state: two machines that disagree about the round a Squid
+            # Game arrived in disagree about which round it starts checking,
+            # and that would never show up as anything but a mysterious extra
+            # elimination on one screen.  Uids and a colour only — a uid is not
+            # a title, and the checked colour is public the moment it is named.
+            "armed_mods": sorted(self.armed_mods.items()),
+            "pending_lead_check": self.pending_lead_check,
             "ability_uses": {
                 p.index: [
                     card.uses_left
@@ -2054,6 +2499,7 @@ class GameState:
         effects.PlayRandomCard: _op_play_random_card,
         effects.DrawIntoMods: _op_draw_into_mods,
         effects.Announce: _op_announce,
+        effects.Fizzle: _op_fizzle,
     }
 
     _HANDLERS = {

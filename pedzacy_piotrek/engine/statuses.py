@@ -40,6 +40,7 @@ class StatusKind(str, Enum):
     FORBIDDEN_ADJACENCY = "forbidden_adjacency"   # two pawns may not neighbour
     CHECK_REFUSAL = "check_refusal"      # a check may be declined (Ice Block)
     TURN_INTERRUPT = "turn_interrupt"    # a card takes the player's next turn over
+    HIDDEN = "hidden"                    # a pawn is off the map entirely (Shady)
 
 
 class Subject(str, Enum):
@@ -274,4 +275,5 @@ STATUS_LABELS: Dict[StatusKind, str] = {
     StatusKind.FORBIDDEN_ADJACENCY: "Zakaz sąsiedztwa",
     StatusKind.CHECK_REFUSAL: "Odmowa sprawdzenia",
     StatusKind.TURN_INTERRUPT: "Tura przejęta",
+    StatusKind.HIDDEN: "Poza mapą",
 }

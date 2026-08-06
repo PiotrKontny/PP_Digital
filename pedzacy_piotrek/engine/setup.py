@@ -36,7 +36,8 @@ def new_seed() -> int:
     return int(time.time() * 1000) & 0x7FFFFFFF
 
 
-def build_decks(library: ContentLibrary, rng: random.Random) -> Dict[str, Deck]:
+def build_decks(library: ContentLibrary, rng: random.Random,
+                config: Optional[SessionConfig] = None) -> Dict[str, Deck]:
     """One deck per definition, each with its own RNG derived from the seed.
 
     Per-deck RNGs mean that drawing from the chest cannot shift the shuffle of
@@ -48,10 +49,18 @@ def build_decks(library: ContentLibrary, rng: random.Random) -> Dict[str, Deck]:
     one: a command says *which card* by uid, so the host and every client have
     to agree on the numbering.  Deck position gives that for free, and it is
     stable regardless of how many games the process has already built.
+
+    The Mody Patusa deck is the one deck whose composition the lobby sets, so
+    it is rebuilt from ``config.mod_counts`` before it is shuffled — before,
+    because a deck resized after shuffling would be a different pile on every
+    machine.  Everything else is exactly what the JSON says.
     """
+    mod_counts = dict(config.mod_counts) if config is not None else {}
     decks: Dict[str, Deck] = {}
     for ordinal, deck_id in enumerate(library.deck_order):
         definition = library.deck(deck_id)
+        if deck_id == settings.DECK_MODS and mod_counts:
+            definition = definition.with_counts(mod_counts)
         deck_rng = random.Random(rng.getrandbits(64))
         deck = Deck(definition, deck_rng)
         base = (ordinal + 1) * 10_000
@@ -212,7 +221,7 @@ def create_game(
     config = replace(config, seed=seed)
     rng = random.Random(seed)
 
-    decks = build_decks(library, rng)
+    decks = build_decks(library, rng, config)
 
     players: List[Player] = []
     for i in range(config.num_players):

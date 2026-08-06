@@ -149,10 +149,16 @@ def gathering_tile(state) -> Optional[Tile]:
 
     This is the hunters' move: they have to get the whole table into one tower
     before they may look underneath it.  A pawn still loose in the camp, or one
-    field short, means there is nothing to check — which is why this counts the
-    tower against the pawns that exist rather than against those on the board.
+    field short, means there is nothing to check.
+
+    It counts against the pawns that are ON THE TABLE, not against the palette.
+    Normally those are the same thing.  While Shady is holding a pawn off the
+    map they are not, and the hunters only have to gather the ones that are
+    left — five pawns onto one field instead of six.  That exception lasts
+    exactly as long as the pawn is away; it is not a rule of its own, which is
+    why it is one call to ``visible_pawns`` rather than a special case.
     """
-    pawns = [pawn.id for pawn in state.library.pawns]
+    pawns = [pawn.id for pawn in visible_pawns(state)]
     if len(pawns) < 2:
         return None
     tile = state.board.pawn_tile(pawns[0])
@@ -163,6 +169,12 @@ def gathering_tile(state) -> Optional[Tile]:
     if any(state.board.pawn_tiles.get(pawn) != tile.index for pawn in pawns):
         return None
     return tile
+
+
+def visible_pawns(state) -> List:
+    """Pawns that are actually on the table (Shady removes one for a round)."""
+    getter = getattr(state, "visible_pawns", None)
+    return list(getter) if getter is not None else list(state.library.pawns)
 
 
 def bottom_of(tile: Optional[Tile]) -> Optional[str]:
@@ -203,6 +215,13 @@ def review(state) -> List[cmd.Command]:
                                    piotrek_seat=seat if seat is not None else -1,
                                    piotrek_name=name)]
 
+    # Squid Game REPLACES the checking mechanic rather than adding to it: while
+    # it is in the rack, building a tower proves nothing and the only check in
+    # the game is the automatic one the round armed.  Both halves are read off
+    # the same rule, so the ordinary check cannot survive by accident.
+    if getattr(state, "lead_check_only", False):
+        return _lead_check(state, hidden, seat, name)
+
     tile = gathering_tile(state)
     bottom = bottom_of(tile)
     if bottom is None or not checkable(state, bottom):
@@ -214,3 +233,24 @@ def review(state) -> List[cmd.Command]:
                                    piotrek_seat=seat if seat is not None else -1,
                                    piotrek_name=name)]
     return [cmd.EliminatePawn(pawn_id=bottom)]
+
+
+def _lead_check(state, hidden: str, seat: Optional[int],
+                name: str) -> List[cmd.Command]:
+    """Settle the automatic check the round armed (Squid Game).
+
+    ``pending_lead_check`` names the colour; naming it was public and happened
+    on every machine, so the question is the same everywhere.  ANSWERING it
+    needs the hidden colour, so it happens here — on the authority — and comes
+    back as one of the two commands the checking rules already use, which is
+    what makes the result log, broadcast, replay and fingerprint like every
+    other check in the game.
+    """
+    checked = getattr(state, "pending_lead_check", None)
+    if not checked or not checkable(state, checked):
+        return []
+    if checked == hidden:
+        return [cmd.DeclareVictory(outcome=Outcome.HUNTERS.value, pawn_id=hidden,
+                                   piotrek_seat=seat if seat is not None else -1,
+                                   piotrek_name=name)]
+    return [cmd.EliminatePawn(pawn_id=checked)]

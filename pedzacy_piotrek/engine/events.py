@@ -169,6 +169,20 @@ class TokenWalked(GameEvent):
 
 
 @dataclass
+class MoveFizzled(GameEvent):
+    """A movement card resolved and moved nobody, on purpose.
+
+    Halloween's pinned pawns are the first case.  Distinct from
+    ``ActionRejected`` because nothing was rejected: the card was played, it is
+    on the discard pile and the turn has passed.  The view says so rather than
+    leaving the player to wonder whether the click registered.
+    """
+
+    reason: str
+    pawn_id: str = ""
+
+
+@dataclass
 class ChoiceRequired(GameEvent):
     """An action is waiting for a decision: which pawn, which field, how far.
 
@@ -416,6 +430,71 @@ class PawnEliminated(GameEvent):
     """
 
     pawn_id: str
+
+
+@dataclass
+class LeadCheckAnnounced(GameEvent):
+    """Squid Game looked at the front of the field at the start of a round.
+
+    Emitted on every machine, including when the check is SKIPPED — a round
+    where nothing happens because two pawns are level looks identical to a
+    broken mod otherwise, and the players deserve to be told which it was.
+
+    The verdict does not travel with it.  This says who is being checked; what
+    that turns out to mean arrives separately, as the ordinary
+    :class:`PawnEliminated` or :class:`MatchEnded`, because only the authority
+    can decide it.
+    """
+
+    pawn_id: str = ""
+    skipped: bool = False
+
+
+@dataclass
+class PawnHidden(GameEvent):
+    """A pawn left the map for a round (Shady)."""
+
+    pawn_id: str
+    riders: List[str] = field(default_factory=list)
+    round_number: int = 0
+
+
+@dataclass
+class PawnRestored(GameEvent):
+    """A hidden pawn came back, on top of the pawn furthest to the rear.
+
+    ``tile_index`` is ``None`` when there was nobody on the road to stand on
+    and the pawn went back to the camp instead.
+    """
+
+    pawn_id: str
+    tile_index: Optional[int] = None
+    onto: str = ""
+
+
+@dataclass
+class ChestHolding(GameEvent):
+    """One player's Chest cards, as shown by Paczka."""
+
+    player_index: int
+    player_name: str
+    titles: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ChestCardsRevealed(GameEvent):
+    """Paczka reached the rack: every Chest card is now public.
+
+    Carries card TITLES to the whole table, which every other event in this
+    game is forbidden to do (N81).  That is the mod's entire text rather than
+    an oversight — the Chest stops being hidden information while Paczka is in
+    play — and it is the only event allowed the exception.
+
+    Every machine builds the same list from its own replica and shows its own
+    window, dismissed independently.  Nothing about the game changes.
+    """
+
+    holdings: List[ChestHolding] = field(default_factory=list)
 
 
 @dataclass

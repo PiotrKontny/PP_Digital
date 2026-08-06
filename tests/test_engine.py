@@ -54,7 +54,12 @@ def test_deck_sizes_match_the_data_file(library):
     # 72 since stage 21: Thunderfuck went from one copy to three, because a
     # card that replaces the active mods is worth drawing only if it turns up.
     assert len(library.deck(settings.DECK_MOVEMENT).build_cards()) == 72
-    assert len(library.deck(settings.DECK_MODS).build_cards()) == 8
+    # 13 since stage 24: the Mody Patusa deck holds the copies the physical
+    # deck holds — Speedrun 2, Masa solna 2, AKO 1, Halloween 1, Sesja na PG 2,
+    # Paczka 2, Squid Game 1, Shady 2 — instead of one of each.  These are the
+    # DEFAULTS; the lobby may set any count per title, which is why the
+    # composition lives in cards.json rather than in Rules.
+    assert len(library.deck(settings.DECK_MODS).build_cards()) == 13
     # One blank placeholder card was dropped from the data file.
     # 16 since stage 23: every chest title went to two copies.  Eight could not
     # supply a six-player table once two cards go out per dealing round —

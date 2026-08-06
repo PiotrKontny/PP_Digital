@@ -31,8 +31,8 @@ from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
 from .match_overlays import MatchStartOverlay, VictoryOverlay
 from .overlays import (
-    CardPicker, ChestChoice, ChoicePrompt, ModChoice, PauseMenu, RevealOverlay,
-    RevealPhase,
+    CardPicker, ChestChoice, ChestHoldingView, ChestReveal, ChoicePrompt,
+    ModChoice, PauseMenu, RevealOverlay, RevealPhase,
 )
 from .hud import (
     CharacterPanel,
@@ -128,6 +128,8 @@ class GameScreen(Screen):
         self.mod_choice = ModChoice()
         #: Somebody else's cards, laid out to take one from (Spy).
         self.card_picker = CardPicker()
+        #: Paczka's read-only window: who holds which Chest cards.
+        self.chest_reveal = ChestReveal()
         self.pause_menu = PauseMenu()
         #: Before the first move and after the last one.  Both are drawn over
         #: the live table and both make the game unplayable while they are up —
@@ -181,6 +183,10 @@ class GameScreen(Screen):
         self.bus.subscribe(ev.MatchBegan, self._on_match_began)
         self.bus.subscribe(ev.PawnEliminated, self._on_pawn_eliminated)
         self.bus.subscribe(ev.MatchEnded, self._on_match_ended)
+        self.bus.subscribe(ev.ChestCardsRevealed, self._on_chest_revealed)
+        self.bus.subscribe(ev.LeadCheckAnnounced, self._on_lead_check)
+        self.bus.subscribe(ev.PawnHidden, self._on_pawn_hidden)
+        self.bus.subscribe(ev.PawnRestored, self._on_pawn_restored)
         if not self.state.phase.playable:
             # Joining a match that has not begun (the ordinary case online) or
             # one that is already over (a reconnection after the last move).
@@ -501,6 +507,49 @@ class GameScreen(Screen):
         self.mod_choice.hide()
         self.status_bar.notify("Mody Patusa aktywne — gramy dalej", duration=4.0)
 
+    # ── the Mody Patusa that announce themselves ─────────────────────────────
+    def _on_chest_revealed(self, event: ev.ChestCardsRevealed) -> None:
+        """Paczka arrived: show every machine the same list.
+
+        Not modal and not synchronised — it changes nothing, so each player
+        dismisses their own copy and the table carries on underneath.
+        """
+        self.chest_reveal.show([
+            ChestHoldingView(name=holding.player_name, titles=list(holding.titles))
+            for holding in event.holdings
+        ])
+
+    def _on_lead_check(self, event: ev.LeadCheckAnnounced) -> None:
+        """Say what the automatic check did, including when it did nothing.
+
+        A round where two pawns are level looks exactly like a broken mod
+        otherwise, so the skip is reported as plainly as the check.
+        """
+        if event.skipped and not event.pawn_id:
+            self.status_bar.notify(
+                "Squid Game: remis na czele — w tej rundzie nikt nie jest sprawdzany")
+        elif event.skipped:
+            self.status_bar.notify(
+                f"Squid Game: {self._pawn_name(event.pawn_id)} już sprawdzony")
+        else:
+            self.status_bar.notify(
+                f"Squid Game: sprawdzany pionek {self._pawn_name(event.pawn_id)}")
+
+    def _on_pawn_hidden(self, event: ev.PawnHidden) -> None:
+        self.status_bar.notify(
+            f"Shady: pionek {self._pawn_name(event.pawn_id)} znika z mapy na rundę")
+        self.board_view.forget_pawn(event.pawn_id)
+
+    def _on_pawn_restored(self, event: ev.PawnRestored) -> None:
+        where = (f" na pionek {self._pawn_name(event.onto)}" if event.onto else "")
+        self.status_bar.notify(
+            f"Shady: pionek {self._pawn_name(event.pawn_id)} wraca na mapę{where}")
+        self.board_view.forget_pawn(event.pawn_id)
+
+    def _pawn_name(self, pawn_id: str) -> str:
+        pawn = self.state.library.pawn(pawn_id)
+        return pawn.name if pawn is not None else pawn_id
+
     def _on_card_spotlighted(self, event: ev.CardSpotlighted) -> None:
         """A card the player did not choose, held up before it takes effect.
 
@@ -721,6 +770,14 @@ class GameScreen(Screen):
             self._handle_identity_event(event, mouse)
             return
 
+        # 1c. Paczka's window is informational, so it takes only the input that
+        #     dismisses it — the table underneath stays live and the other
+        #     players keep playing while somebody reads it.  Above the keyboard
+        #     dispatch so Esc and Enter close it rather than reaching the game.
+        if self.chest_reveal.active:
+            if self._handle_chest_reveal_event(event, mouse):
+                return
+
         if event.type == pygame.KEYDOWN:
             self._handle_key(event)
             return
@@ -880,6 +937,20 @@ class GameScreen(Screen):
             return
         self.choice_prompt.toggle(option)
         self.board_view.choice_selected = list(self.choice_prompt.selected)
+
+    def _handle_chest_reveal_event(self, event: pygame.event.Event,
+                                   mouse: Tuple[int, int]) -> bool:
+        """Dismiss Paczka's window.  Returns whether the event was consumed."""
+        if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE,
+                                                          pygame.K_RETURN):
+            self.chest_reveal.hide()
+            return True
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return False
+        if self.chest_reveal.ok_hit(self.app.layout, mouse):
+            self.chest_reveal.hide()
+            return True
+        return False
 
     def _handle_card_picker_event(self, event: pygame.event.Event,
                                   mouse: Tuple[int, int]) -> None:
@@ -1046,6 +1117,12 @@ class GameScreen(Screen):
             return False
         if not card.ability_available:
             self.status_bar.notify("Ta umiejętność została już zużyta")
+            return True
+        if self.state.abilities_locked:
+            # Sesja na PG.  The engine refuses this too — this only saves the
+            # round trip and says something more useful than a rejection.
+            self.status_bar.notify(
+                "Sesja na PG — umiejętności postaci są zablokowane")
             return True
         self.submit(cmd.UseAbility(player_index=player.index, source=source))
         return True
@@ -1219,6 +1296,7 @@ class GameScreen(Screen):
         self.chest_choice.update(dt, self.app.layout, mouse)
         self.mod_choice.update(dt, self.app.layout, mouse)
         self.card_picker.update(dt, self.app.layout, mouse)
+        self.chest_reveal.update(dt)
         if self._spotlight_left > 0.0:
             # Counts down in real time and only affects the picture: the walk
             # it is holding back has already happened as far as the rules are
@@ -1342,6 +1420,8 @@ class GameScreen(Screen):
                              surface, ctx.mouse)
         self.card_picker.draw(self.app.renderer, self.cards, self.app.layout,
                               surface, ctx.mouse)
+        self.chest_reveal.draw(self.app.renderer, self.app.layout, surface,
+                               ctx.mouse)
         self._draw_connection_banner(ctx)
         # Above everything except the pause menu: these two ARE the screen
         # while they are up.

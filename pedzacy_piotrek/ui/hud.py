@@ -539,7 +539,12 @@ class CharacterPanel(Panel):
 
         left = source_card.uses_left
         total = source_card.uses_total
-        available = source_card.ability_available
+        # Sesja na PG greys the button exactly the way spending the last use
+        # does — same ``enabled=False``, same styling — but it is a DIFFERENT
+        # state: the charges are untouched and come back when the mod leaves,
+        # so the caption still shows how many are left rather than "ZUŻYTE".
+        locked = ctx.state.abilities_locked
+        available = source_card.ability_available and not locked
         hovered = rect.collidepoint(ctx.mouse) and available
 
         style = r.emphasis(
@@ -549,7 +554,9 @@ class CharacterPanel(Panel):
         )
         drawn = r.interactive_panel(rect, style, surface, radius=8)
 
-        if total is None:
+        if locked and source_card.ability_available:
+            label = "SESJA NA PG"
+        elif total is None:
             label = "UŻYJ UMIEJĘTNOŚCI"
         elif available:
             label = f"UŻYJ UMIEJĘTNOŚCI ({left}/{total})"
