@@ -31,7 +31,7 @@ from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
 from .match_overlays import MatchStartOverlay, VictoryOverlay
 from .overlays import (
-    CardPicker, ChestChoice, ChoicePrompt, PauseMenu, RevealOverlay,
+    CardPicker, ChestChoice, ChoicePrompt, ModChoice, PauseMenu, RevealOverlay,
     RevealPhase,
 )
 from .hud import (
@@ -124,6 +124,8 @@ class GameScreen(Screen):
         self.choice_prompt = ChoicePrompt()
         self.reveal = RevealOverlay()
         self.chest_choice = ChestChoice()
+        #: The Mod Patusa selection that pauses a round.
+        self.mod_choice = ModChoice()
         #: Somebody else's cards, laid out to take one from (Spy).
         self.card_picker = CardPicker()
         self.pause_menu = PauseMenu()
@@ -167,6 +169,10 @@ class GameScreen(Screen):
         self.bus.subscribe(ev.CardTransformed, self._on_card_transformed)
         self.bus.subscribe(ev.CardRevealed, self._on_card_revealed)
         self.bus.subscribe(ev.ChestLimitReached, self._on_chest_limit)
+        self.bus.subscribe(ev.ModSelectionStarted, self._on_mod_selection_started)
+        self.bus.subscribe(ev.ModVoteCast, self._on_mod_vote_cast)
+        self.bus.subscribe(ev.ModSelectionResolved, self._on_mod_selection_resolved)
+        self.bus.subscribe(ev.ModSelectionFinished, self._on_mod_selection_finished)
         self.bus.subscribe(ev.CardSpotlighted, self._on_card_spotlighted)
         self.bus.subscribe(ev.TurnSkipped, self._on_turn_skipped)
         self.bus.subscribe(ev.CardStolen, self._on_card_stolen)
@@ -374,6 +380,121 @@ class GameScreen(Screen):
         self.view_seat = event.player_index
         self.chest_choice.show(cards, event.limit, event.new_card_uid)
 
+    def _on_mod_selection_started(self, event: ev.ModSelectionStarted) -> None:
+        """The round paused: both factions now choose a Mod Patusa."""
+        self._sync_mod_overlay()
+        self.status_bar.notify("Wybór Modów Patusa", duration=4.0)
+
+    def _mod_side_for_this_machine(self) -> Tuple[str, List[int]]:
+        """Which half of the selection this seat should be looking at.
+
+        A machine is shown whatever it can still act on: Piotrek's three cards
+        while he has not picked, then the hunters' three while a seat it owns
+        has not voted.  Hot-seat play controls every seat, so it walks through
+        both halves in turn — which is the only way one person at one keyboard
+        can answer for a whole table.
+
+        Which side a machine sees is decided by the seat it owns and nothing
+        else, so Piotrek's three cards are laid out on his machine alone,
+        exactly as the chest limit only opens where the hand overflowed.
+        """
+        state = self.state
+        selection = state.pending_mod_selection
+        if selection is None:
+            return ("", [])
+        piotrek = selection.piotrek_seat
+        if (not selection.piotrek_done and piotrek is not None
+                and state.may_control(piotrek) and selection.piotrek_cards):
+            return ("piotrek", [c.uid for c in selection.piotrek_cards])
+        if not selection.hunters_done and selection.hunter_cards:
+            mine = any(state.may_control(seat) for seat in selection.hunter_seats)
+            # A seat with nothing left to decide still watches the vote, so a
+            # paused table never looks like a frozen one.
+            return ("hunters" if mine else "waiting",
+                    [c.uid for c in selection.hunter_cards])
+        return ("waiting", [c.uid for c in selection.hunter_cards])
+
+    def _sync_mod_overlay(self) -> None:
+        """Put the overlay on the right side of the selection, and refresh it.
+
+        Driven by the state rather than by the event that got us here, so a
+        client replaying several commands in one frame — or reconnecting
+        mid-selection — ends up looking at the right thing.
+        """
+        selection = self.state.pending_mod_selection
+        if selection is None:
+            self.mod_choice.hide()
+            return
+        mode, uids = self._mod_side_for_this_machine()
+        if not uids:
+            self.mod_choice.hide()
+            return
+
+        pool = (selection.piotrek_cards if mode == "piotrek"
+                else selection.hunter_cards)
+        cards = [card for card in pool if card.uid in set(uids)]
+        if not cards:
+            self.mod_choice.hide()
+            return
+
+        # Rebuilt only when the side actually changes: ``show`` resets the
+        # animations, and doing that on every vote would make the counters
+        # jump instead of counting.
+        if not self.mod_choice.active or self.mod_choice.mode != mode:
+            titles = {
+                "piotrek": "Twój Mod Patusa",
+                "hunters": "Mod Patusa Oprawców",
+                "waiting": "Mody Patusa",
+            }
+            captions = {
+                "piotrek": "wybierasz jeden — pozostałe odpadają",
+                "hunters": "głosujcie — wygrywa Mod z największą liczbą głosów",
+                "waiting": "Oprawcy głosują nad swoim Modem",
+            }
+            self.mod_choice.show(cards, mode, titles.get(mode, "Mody Patusa"),
+                                 captions.get(mode, ""))
+
+        self.mod_choice.set_tally(selection.tally(), len(selection.votes),
+                                  len(selection.hunter_seats))
+        self.mod_choice.settled = (mode == "waiting")
+        self._sync_my_vote()
+
+    def _sync_my_vote(self) -> None:
+        """Show the tick against the vote belonging to whoever votes next.
+
+        Hot-seat play controls every seat, so "my vote" has to mean the seat
+        the NEXT click will speak for, not simply the first controlled seat
+        that has voted — otherwise the green tick would stay stuck on the first
+        hunter's choice while the person at the keyboard voted for the rest.
+        """
+        selection = self.state.pending_mod_selection
+        if selection is None or self.mod_choice.mode != "hunters":
+            return
+        seat = self._voting_seat()
+        self.mod_choice.my_vote = (None if seat is None
+                                   else selection.votes.get(seat))
+
+    def _on_mod_vote_cast(self, event: ev.ModVoteCast) -> None:
+        """A hunter voted.  Everybody's counters move, including watchers'."""
+        if not self.mod_choice.active:
+            return
+        self.mod_choice.set_tally(dict(event.tally), event.voted, event.voters)
+        self._sync_my_vote()
+
+    def _on_mod_selection_resolved(self, event: ev.ModSelectionResolved) -> None:
+        """One faction settled.  Say which card won, then move to the other."""
+        side = "Piotrek" if event.faction == "piotrek" else "Oprawcy"
+        because = " (remis — wygrywa pierwszy z lewej)" if event.tie_broken else ""
+        self.status_bar.notify(f"{side}: {event.title}{because}", duration=5.0)
+        # Left up rather than closed: the other side may still be choosing, and
+        # a panel that vanished mid-selection would look like a crash.  In
+        # hot-seat this is what hands the same player the hunters' vote.
+        self._sync_mod_overlay()
+
+    def _on_mod_selection_finished(self, event: ev.ModSelectionFinished) -> None:
+        self.mod_choice.hide()
+        self.status_bar.notify("Mody Patusa aktywne — gramy dalej", duration=4.0)
+
     def _on_card_spotlighted(self, event: ev.CardSpotlighted) -> None:
         """A card the player did not choose, held up before it takes effect.
 
@@ -475,6 +596,7 @@ class GameScreen(Screen):
     def _on_match_ended(self, event: ev.MatchEnded) -> None:
         self._clear_choice_ui()
         self.chest_choice.hide()
+        self.mod_choice.hide()
         self.reveal.dismiss()
         self._sync_match_overlays()
 
@@ -602,6 +724,14 @@ class GameScreen(Screen):
         if self.chest_choice.active:
             self._handle_chest_event(event, mouse)
             return
+
+        # 2a-i. The Mod Patusa selection pauses the round.  Unlike the chest
+        #       limit it does NOT swallow everything: a hunter waiting on four
+        #       other votes should still be able to look around the board, so
+        #       navigation falls through the way it does for a pending choice.
+        if self.mod_choice.active:
+            if self._handle_mod_choice_event(event, mouse):
+                return
 
         # 2a. Somebody else's hand is fully modal too: it is showing hidden
         #     information, so nothing else may happen behind it.
@@ -759,6 +889,59 @@ class GameScreen(Screen):
         if uid is not None:
             self._resolve_choice(str(uid))
 
+    def _handle_mod_choice_event(self, event: pygame.event.Event,
+                                 mouse: Tuple[int, int]) -> bool:
+        """A click on a Mod card: Piotrek's pick, or one hunter's vote.
+
+        Returns whether the event was consumed.  Anything that is not a click on
+        a card falls through so the board can still be panned and zoomed while
+        the table waits for the last vote.
+        """
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return False
+        if not self.mod_choice.interactive:
+            return False
+        uid = self.mod_choice.card_at(self.app.layout, mouse)
+        if uid is None:
+            return False
+
+        if self.mod_choice.mode == "piotrek":
+            seat = self.state.piotrek_seat
+            if seat is None:
+                return False
+            self.submit(cmd.ChooseMod(player_index=seat, card_uid=uid))
+            return True
+
+        seat = self._voting_seat()
+        if seat is None:
+            self.status_bar.notify("Nie głosujesz w tym wyborze")
+            return True
+        # Shown immediately rather than waiting for the event: over a network
+        # the tick would otherwise lag a round trip behind the click.  The
+        # engine's answer replaces it a moment later either way, and in
+        # hot-seat that answer moves the tick on to the next hunter.
+        self.mod_choice.my_vote = uid
+        self.submit(cmd.VoteMod(player_index=seat, card_uid=uid))
+        self._sync_my_vote()
+        return True
+
+    def _voting_seat(self) -> Optional[int]:
+        """Which hunter seat this machine votes with.
+
+        Hot-seat play controls every seat, so the vote goes to whichever hunter
+        has not voted yet — that is what lets one person work through all the
+        votes at one keyboard without a seat picker.
+        """
+        selection = self.state.pending_mod_selection
+        if selection is None:
+            return None
+        mine = [seat for seat in selection.hunter_seats
+                if self.state.may_control(seat)]
+        if not mine:
+            return None
+        return next((seat for seat in mine if seat not in selection.votes),
+                    mine[0])
+
     def _handle_chest_event(self, event: pygame.event.Event,
                             mouse: Tuple[int, int]) -> None:
         if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
@@ -781,6 +964,7 @@ class GameScreen(Screen):
         return (self.state.may_control(seat)
                 and self.chest_choice.active is False
                 and self.card_picker.active is False
+                and self.state.pending_mod_selection is None
                 and self.pending_choice is None)
 
     def _end_turn_click(self, mouse: Tuple[int, int]) -> bool:
@@ -996,6 +1180,7 @@ class GameScreen(Screen):
         self.victory.update(dt, mouse)
         self.reveal.update(dt)
         self.chest_choice.update(dt, self.app.layout, mouse)
+        self.mod_choice.update(dt, self.app.layout, mouse)
         self.card_picker.update(dt, self.app.layout, mouse)
         if self._spotlight_left > 0.0:
             # Counts down in real time and only affects the picture: the walk
@@ -1116,6 +1301,8 @@ class GameScreen(Screen):
         self.reveal.draw(self.app.renderer, self.cards, self.app.layout, surface)
         self.chest_choice.draw(self.app.renderer, self.cards, self.app.layout,
                                surface, ctx.mouse)
+        self.mod_choice.draw(self.app.renderer, self.cards, self.app.layout,
+                             surface, ctx.mouse)
         self.card_picker.draw(self.app.renderer, self.cards, self.app.layout,
                               surface, ctx.mouse)
         self._draw_connection_banner(ctx)

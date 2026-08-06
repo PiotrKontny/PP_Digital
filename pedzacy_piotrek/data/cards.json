@@ -67,7 +67,7 @@
         {
           "title": "Thunderfuck",
           "text": "Dobierz nowy Mod Patusa",
-          "count": 1,
+          "count": 3,
           "effect": {
             "type": "draw_into_mods",
             "deck": "mods"

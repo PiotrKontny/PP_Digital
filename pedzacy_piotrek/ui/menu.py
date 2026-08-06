@@ -33,6 +33,9 @@ DROPDOWN_H = 26
 
 
 class MenuScreen(Screen):
+    #: How far the two Mod Patusa steppers sit either side of the centre line.
+    MOD_SPLIT = 150
+
     def __init__(
         self,
         app: App,
@@ -47,6 +50,10 @@ class MenuScreen(Screen):
         self.num_players = RULES.max_players
         self.board_cells = RULES.board_cells_default
         self.chest_round = RULES.chest_open_default
+        #: When the table first pauses to choose Mody Patusa, and how many
+        #: rounds apart the pauses are after that.
+        self.mod_first = RULES.mod_round_first_default
+        self.mod_interval = RULES.mod_round_interval_default
         #: Percentage of rows widened into a doubled position (12a / 12b).
         self.double_percent = RULES.double_frequency_default
         #: Hot-seat editing.  On, the game behaves as the prototype did; off,
@@ -64,6 +71,13 @@ class MenuScreen(Screen):
         self.players_stepper = Stepper(centre, self.players_row_y, r=r)
         self.cells_stepper = Stepper(centre, self.cells_row_y, big_steps=True, r=r)
         self.chest_stepper = Stepper(centre, self.chest_row_y, r=r)
+        # Two numbers, one row: "od rundy 3, co 2 rundy" is a single sentence
+        # and reads as one setting, and a sixth full-width row pushed the Start
+        # button off the bottom of a 1280x760 window.
+        self.mod_first_stepper = Stepper(centre - self.MOD_SPLIT, self.mod_row_y,
+                                         value_w=64, r=r)
+        self.mod_interval_stepper = Stepper(centre + self.MOD_SPLIT, self.mod_row_y,
+                                            value_w=64, r=r)
         self.doubles_stepper = Stepper(centre, self.doubles_row_y, big_steps=True, r=r)
         self.edit_checkbox = Checkbox(
             pygame.Rect(centre - 150, self.edit_row_y, CHECKBOX_SIZE, CHECKBOX_SIZE),
@@ -99,7 +113,6 @@ class MenuScreen(Screen):
         height = layout.win_h
         label_h = r.fonts.get(18).get_height()
         stepper_h = 40
-        row_label_gap = 6
         margin = 14
 
         # Measured, not assumed: the Start button is sized to its caption and
@@ -111,10 +124,15 @@ class MenuScreen(Screen):
         top = content_top(r, layout)
         preferred_step = ROW_STEP if height >= 900 else 34
 
-        for gap in range(28, 3, -2):
+        for gap in range(28, 1, -2):
             y = top
             rows = []
-            for _ in range(4):
+            # The gap between a row's caption and its stepper is the first
+            # thing to give when the window is short: losing four pixels there
+            # five times over is invisible, where shrinking the character rows
+            # any further would start overlapping the dropdowns.
+            row_label_gap = 6 if gap >= 10 else 2
+            for _ in range(5):
                 rows.append(y + label_h + row_label_gap)
                 y += label_h + row_label_gap + stepper_h + gap
             edit_row_y = y
@@ -125,10 +143,20 @@ class MenuScreen(Screen):
 
             available = height - margin - self.footer_h - char_rows_top
             step = min(preferred_step, available // max(1, RULES.max_players))
-            if step >= 24 or gap <= 5:
-                self.row_step = max(20, step)
+            # ``max(20, step)`` is a floor on legibility, so a cramped window
+            # can want more room than there is.  Accepting on ``step`` alone
+            # therefore accepted layouts whose footer hung off the bottom — it
+            # went unnoticed until a fifth settings row made the overflow big
+            # enough to see.  Check the real bottom edge instead, and only fall
+            # back to the tightest layout once nothing else fits.
+            row_step = max(20, step)
+            bottom = (char_rows_top + RULES.max_players * row_step
+                      + self.footer_h)
+            fits = bottom <= height - margin
+            if (fits and step >= 24) or gap <= 3:
+                self.row_step = row_step
                 (self.players_row_y, self.cells_row_y,
-                 self.chest_row_y, self.doubles_row_y) = rows
+                 self.chest_row_y, self.mod_row_y, self.doubles_row_y) = rows
                 self.edit_row_y = edit_row_y
                 self.char_header_y = char_header_y
                 self.char_rows_top = char_rows_top
@@ -145,6 +173,13 @@ class MenuScreen(Screen):
         self.players_stepper = Stepper(centre, self.players_row_y, r=r)
         self.cells_stepper = Stepper(centre, self.cells_row_y, big_steps=True, r=r)
         self.chest_stepper = Stepper(centre, self.chest_row_y, r=r)
+        # Two numbers, one row: "od rundy 3, co 2 rundy" is a single sentence
+        # and reads as one setting, and a sixth full-width row pushed the Start
+        # button off the bottom of a 1280x760 window.
+        self.mod_first_stepper = Stepper(centre - self.MOD_SPLIT, self.mod_row_y,
+                                         value_w=64, r=r)
+        self.mod_interval_stepper = Stepper(centre + self.MOD_SPLIT, self.mod_row_y,
+                                            value_w=64, r=r)
         self.doubles_stepper = Stepper(centre, self.doubles_row_y, big_steps=True, r=r)
         self.edit_checkbox.rect.topleft = (centre - 150, self.edit_row_y)
         self.debug_checkbox.rect.topleft = (centre + 150, self.edit_row_y)
@@ -274,6 +309,17 @@ class MenuScreen(Screen):
             self.chest_round = max(RULES.chest_open_min, self.chest_round + delta)
             return
 
+        delta = self.mod_first_stepper.hit(mouse)
+        if delta:
+            self.mod_first = max(RULES.mod_round_first_min, self.mod_first + delta)
+            return
+
+        delta = self.mod_interval_stepper.hit(mouse)
+        if delta:
+            self.mod_interval = max(RULES.mod_round_interval_min,
+                                    self.mod_interval + delta)
+            return
+
         if self.edit_checkbox.hit(mouse):
             self.edit_mode = not self.edit_mode
             return
@@ -315,6 +361,8 @@ class MenuScreen(Screen):
             num_players=self.num_players,
             board_cells=self.board_cells,
             chest_open_round=self.chest_round,
+            mod_round_first=self.mod_first,
+            mod_round_interval=self.mod_interval,
             character_choices=list(self.choices[: self.num_players]),
             double_frequency=self.double_percent / 100.0,
             edit_mode=self.edit_mode,
@@ -355,6 +403,12 @@ class MenuScreen(Screen):
                r.fonts.get(18), theme.text_light, surface,
                midbottom=(centre, self.chest_row_y - 6))
         self.chest_stepper.draw(r, str(self.chest_round), mouse, surface)
+
+        r.text("Wybór Modów Patusa — od rundy / co ile rund", r.fonts.get(18),
+               theme.text_light, surface,
+               midbottom=(centre, self.mod_row_y - 6))
+        self.mod_first_stepper.draw(r, str(self.mod_first), mouse, surface)
+        self.mod_interval_stepper.draw(r, str(self.mod_interval), mouse, surface)
 
         r.text("Jak często pola podwójne (12a / 12b)", r.fonts.get(18),
                theme.text_light, surface, midbottom=(centre, self.doubles_row_y - 6))

@@ -567,6 +567,45 @@ class Layout:
         panel = self.card_picker_panel(count)
         return pygame.Rect(panel.centerx - 110, panel.bottom - 56, 220, 40)
 
+    # ── choosing the Mods Patusa ─────────────────────────────────────────────
+    # Same furniture as the card picker, one size down and with room under the
+    # panel for the vote tally.  Reusing ``card_picker_card_size`` is what keeps
+    # three mods looking like three chest cards instead of like a fourth kind of
+    # card lineup.
+    def mod_choice_panel(self, count: int) -> pygame.Rect:
+        card_w, card_h = self.mod_choice_card_size(count)
+        gap = self.picker_gap
+        width = count * card_w + (count + 1) * gap
+        height = card_h + 168
+        return pygame.Rect(
+            self.win_w // 2 - width // 2,
+            self.win_h // 2 - height // 2,
+            width, height,
+        )
+
+    def mod_choice_card_size(self, count: int) -> Tuple[int, int]:
+        """A little shorter than the picker's, to leave room for the counters.
+
+        The vote badge sits in the card's top-right corner and the tally under
+        its bottom edge, so the panel needs vertical room the picker does not.
+        """
+        width, height = self.card_picker_card_size(count)
+        height = int(height * 0.88)
+        width = int(height / CARD_ASPECT)
+        return (width, height)
+
+    def mod_choice_card_rect(self, index: int, count: int) -> pygame.Rect:
+        panel = self.mod_choice_panel(count)
+        card_w, card_h = self.mod_choice_card_size(count)
+        x = panel.left + self.picker_gap + index * (card_w + self.picker_gap)
+        return pygame.Rect(x, panel.top + 72, card_w, card_h)
+
+    def mod_vote_badge_rect(self, index: int, count: int) -> pygame.Rect:
+        """The tick in a card's upper-right corner — one hunter, one card."""
+        card = self.mod_choice_card_rect(index, count)
+        size = int(_clamp(card.width * 0.22, 22, 40))
+        return pygame.Rect(card.right - size - 6, card.top + 6, size, size)
+
     def choice_confirm_rect(self) -> pygame.Rect:
         """Confirm button for a multi-select question, inside the prompt strip.
 

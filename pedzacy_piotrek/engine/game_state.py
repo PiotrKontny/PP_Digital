@@ -54,6 +54,73 @@ MAX_DRAW_CHAIN = 8
 
 
 @dataclass
+class ModSelection:
+    """A paused round while both factions choose their Mod Patusa.
+
+    Piotrek picks one of three by clicking; the hunters vote on three of their
+    own and the count decides.  The two halves finish independently — Piotrek
+    does not wait for the vote and the vote does not wait for Piotrek — and the
+    selection is over when both have.
+
+    Everything here is REAL GAME STATE and travels in the snapshot: a client
+    that rebuilt its replica mid-selection and did not know a vote had been cast
+    would disagree with the server about who won it.
+    """
+
+    round_number: int
+    #: Seat holding Piotrek, or ``None`` in a table that has no Piotrek.
+    piotrek_seat: Optional[int] = None
+    #: The three cards each faction was dealt, in the order they were dealt —
+    #: which is the order they are drawn in, and therefore what "LEFTMOST" means
+    #: when a vote ties.
+    piotrek_cards: List[Card] = field(default_factory=list)
+    hunter_cards: List[Card] = field(default_factory=list)
+    #: Seats entitled to vote.  Fixed when the selection opens, so a seat that
+    #: somehow changes faction mid-selection cannot stall it for ever.
+    hunter_seats: List[int] = field(default_factory=list)
+    #: seat → uid.  A seat appears once; voting again replaces its entry.
+    votes: Dict[int, int] = field(default_factory=dict)
+    piotrek_done: bool = False
+    hunters_done: bool = False
+
+    @property
+    def finished(self) -> bool:
+        return self.piotrek_done and self.hunters_done
+
+    @property
+    def everyone_voted(self) -> bool:
+        return bool(self.hunter_seats) and len(self.votes) >= len(self.hunter_seats)
+
+    def tally(self) -> Dict[int, int]:
+        """uid → votes, including the cards nobody picked."""
+        counts = {card.uid: 0 for card in self.hunter_cards}
+        for uid in self.votes.values():
+            if uid in counts:
+                counts[uid] += 1
+        return counts
+
+    def winner(self) -> Optional[Card]:
+        """The most-voted card; ties go to the LEFTMOST of the tied cards.
+
+        ``max`` over the cards in dealt order does exactly that, because it
+        keeps the first maximum it meets — the leftmost tied card is the one
+        already sitting furthest left on screen.
+        """
+        if not self.hunter_cards:
+            return None
+        counts = self.tally()
+        return max(self.hunter_cards, key=lambda card: counts.get(card.uid, 0))
+
+    def is_tied(self) -> bool:
+        """Whether the winner only won because it was leftmost."""
+        counts = self.tally()
+        if not counts:
+            return False
+        best = max(counts.values())
+        return sum(1 for value in counts.values() if value == best) > 1
+
+
+@dataclass
 class TokenState:
     """A pawn on (or beside) the board."""
 
@@ -103,6 +170,8 @@ class GameState:
         self.statuses = StatusTracker()
         #: Chest cards waiting for their owner to choose which to keep.
         self.pending_chest_choice: Optional[Tuple[int, List[int]]] = None
+        #: The round is paused while both factions pick a Mod Patusa.
+        self.pending_mod_selection: Optional[ModSelection] = None
         #: How deep the current draw-causes-a-draw chain is.  Not game state —
         #: it never leaves a command — so it stays out of the snapshot.
         self._draw_depth: int = 0
@@ -155,6 +224,43 @@ class GameState:
     @property
     def chest_is_open(self) -> bool:
         return self.round_number >= self.chest_open_round
+
+    # ── the Mod Patusa schedule ──────────────────────────────────────────────
+    @property
+    def mod_round_first(self) -> int:
+        return max(RULES.mod_round_first_min, int(self.config.mod_round_first))
+
+    @property
+    def mod_round_interval(self) -> int:
+        return max(RULES.mod_round_interval_min, int(self.config.mod_round_interval))
+
+    def is_mod_round(self, round_number: Optional[int] = None) -> bool:
+        """Whether this round pauses for a Mod Patusa selection.
+
+        Rounds before the first one never do; from there it is every
+        ``mod_round_interval``-th round, so the defaults (3, 2) give 3, 5, 7…
+        """
+        number = round_number if round_number is not None else self.round_number
+        if number < self.mod_round_first:
+            return False
+        return (number - self.mod_round_first) % self.mod_round_interval == 0
+
+    def next_mod_round(self, after: Optional[int] = None) -> int:
+        """The next round that will pause, counting the current one.
+
+        The round panel wants to say 'next mods: round 5' the way it already
+        announces the chest, so the arithmetic lives here rather than being
+        re-derived in the interface.
+        """
+        number = after if after is not None else self.round_number
+        if number <= self.mod_round_first:
+            return self.mod_round_first
+        gap = (number - self.mod_round_first) % self.mod_round_interval
+        return number if gap == 0 else number + (self.mod_round_interval - gap)
+
+    @property
+    def mod_selection_open(self) -> bool:
+        return self.pending_mod_selection is not None
 
     def deck(self, deck_id: str) -> Deck:
         return self.decks[deck_id]
@@ -334,7 +440,7 @@ class GameState:
         cmd.DrawCard, cmd.DiscardCard, cmd.PlayCard, cmd.UseAbility,
         cmd.PlaceMod, cmd.KeepChestCards, cmd.DrawCharacter, cmd.DrawSkill,
         cmd.DiscardTopCharacterCard, cmd.ToggleMark, cmd.RenamePlayer,
-        cmd.EndTurn,
+        cmd.EndTurn, cmd.ChooseMod, cmd.VoteMod,
     )
 
     #: Commands that are a *move*.  Outside edit mode they may only be issued
@@ -732,8 +838,186 @@ class GameState:
         self.round_number = max(1, round_number)
         self.turn_slot = 0
         events: List[ev.GameEvent] = [ev.RoundChanged(self.round_number)]
+        events.extend(self._open_mod_selection())
         events.extend(self._distribute_chest_card())
         return events
+
+    # ── choosing the Mods Patusa ─────────────────────────────────────────────
+    def _open_mod_selection(self) -> List[ev.GameEvent]:
+        """Pause the round and deal both factions three Mods Patusa each.
+
+        Six cards leave the deck at once and only two come back into play; the
+        four losers are discarded when their side settles, so the deck sees the
+        same cards again after a reshuffle rather than losing them.
+
+        Nothing happens on a round that is not a mod round, on a table with no
+        mods deck, or while a selection is somehow already open — the last of
+        which would otherwise strand the first selection's cards outside every
+        pile at once.
+        """
+        if not self.is_mod_round() or self.pending_mod_selection is not None:
+            return []
+        deck = self.decks.get(settings.DECK_MODS)
+        if deck is None:
+            return []
+
+        events: List[ev.GameEvent] = []
+        wanted = max(1, int(RULES.mod_choices))
+
+        def deal(count: int) -> List[Card]:
+            drawn: List[Card] = []
+            for _ in range(count):
+                needed_reshuffle = not deck.draw_pile and bool(deck.discard_pile)
+                card = deck.take_card()
+                if card is None:
+                    break
+                if needed_reshuffle:
+                    events.append(ev.DeckReshuffled(deck.id))
+                drawn.append(card)
+            return drawn
+
+        piotrek_seat = self.piotrek_seat
+        hunter_seats = [p.index for p in self.players if not p.is_piotrek]
+        piotrek_cards = deal(wanted) if piotrek_seat is not None else []
+        hunter_cards = deal(wanted) if hunter_seats else []
+
+        if not piotrek_cards and not hunter_cards:
+            # An exhausted mods deck must not stop the round: put back whatever
+            # was dealt and carry on as though this round were not a mod round.
+            return []
+
+        selection = ModSelection(
+            round_number=self.round_number,
+            piotrek_seat=piotrek_seat,
+            piotrek_cards=piotrek_cards,
+            hunter_cards=hunter_cards,
+            hunter_seats=hunter_seats,
+        )
+        # A side with nobody to decide it, or no cards to decide between, is
+        # finished the moment it opens.  Without this a table with no Piotrek
+        # (or no hunters) would wait for a decision that can never arrive.
+        if not piotrek_cards or piotrek_seat is None:
+            selection.piotrek_done = True
+        if not hunter_cards or not hunter_seats:
+            selection.hunters_done = True
+        self.pending_mod_selection = selection
+
+        events.append(ev.ModSelectionStarted(
+            round_number=self.round_number,
+            piotrek_seat=piotrek_seat,
+            piotrek_uids=[c.uid for c in piotrek_cards],
+            hunter_uids=[c.uid for c in hunter_cards],
+            hunter_seats=list(hunter_seats),
+        ))
+        if selection.finished:
+            events.extend(self._finish_mod_selection())
+        return events
+
+    def _choose_mod(self, command: cmd.ChooseMod) -> List[ev.GameEvent]:
+        """Piotrek's pick.  The chosen card goes LEFT, the other two are gone."""
+        selection = self.pending_mod_selection
+        if selection is None:
+            return [ev.ActionRejected("Nie wybiera się teraz Modów Patusa",
+                                      command.kind)]
+        if selection.piotrek_done:
+            return [ev.ActionRejected("Mod Patusa jest już wybrany", command.kind)]
+        if selection.piotrek_seat is None or command.player_index != selection.piotrek_seat:
+            return [ev.ActionRejected("Tylko Piotrek wybiera ten Mod Patusa",
+                                      command.kind)]
+        chosen = next((c for c in selection.piotrek_cards
+                       if c.uid == command.card_uid), None)
+        if chosen is None:
+            return [ev.ActionRejected("Tej karty nie ma wśród wylosowanych",
+                                      command.kind)]
+
+        events = self._settle_mod_side(
+            selection, chosen, selection.piotrek_cards, slot=0, faction="piotrek"
+        )
+        selection.piotrek_done = True
+        if selection.finished:
+            events.extend(self._finish_mod_selection())
+        return events
+
+    def _vote_mod(self, command: cmd.VoteMod) -> List[ev.GameEvent]:
+        """One hunter's vote.  The last vote in also decides the winner."""
+        selection = self.pending_mod_selection
+        if selection is None:
+            return [ev.ActionRejected("Nie głosuje się teraz nad Modem Patusa",
+                                      command.kind)]
+        if selection.hunters_done:
+            return [ev.ActionRejected("Głosowanie już się zakończyło", command.kind)]
+        if command.player_index not in selection.hunter_seats:
+            return [ev.ActionRejected("Tylko Oprawcy głosują nad tym Modem Patusa",
+                                      command.kind)]
+        chosen = next((c for c in selection.hunter_cards
+                       if c.uid == command.card_uid), None)
+        if chosen is None:
+            return [ev.ActionRejected("Tej karty nie ma wśród wylosowanych",
+                                      command.kind)]
+
+        # Replaces rather than refuses: changing your mind is allowed right up
+        # until the last hunter votes, and that is the same command again.
+        selection.votes[command.player_index] = chosen.uid
+        events: List[ev.GameEvent] = [ev.ModVoteCast(
+            player_index=command.player_index,
+            card_uid=chosen.uid,
+            tally=selection.tally(),
+            voted=len(selection.votes),
+            voters=len(selection.hunter_seats),
+        )]
+        if not selection.everyone_voted:
+            return events
+
+        winner = selection.winner()
+        if winner is not None:
+            tied = selection.is_tied()
+            events.extend(self._settle_mod_side(
+                selection, winner, selection.hunter_cards, slot=1,
+                faction="hunters", tie_broken=tied,
+            ))
+        selection.hunters_done = True
+        if selection.finished:
+            events.extend(self._finish_mod_selection())
+        return events
+
+    def _settle_mod_side(self, selection: ModSelection, chosen: Card,
+                         candidates: List[Card], slot: int, faction: str,
+                         tie_broken: bool = False) -> List[ev.GameEvent]:
+        """Install the winning card in its slot and discard the losers.
+
+        The slot is written directly rather than pushed through
+        ``_install_mod``: the two factions own one slot each for the rest of the
+        game, so Piotrek choosing a card must not shunt the hunters' card along
+        the rack the way Thunderfuck does.
+        """
+        events: List[ev.GameEvent] = []
+        if 0 <= slot < len(self.mod_slots):
+            previous = self.mod_slots[slot]
+            if previous is not None:
+                self.decks[previous.deck_id].return_card(previous)
+                events.append(ev.ModDiscarded(slot, previous.uid))
+            self.mod_slots[slot] = chosen
+
+        losers = [card for card in candidates if card.uid != chosen.uid]
+        for card in losers:
+            self.decks[card.deck_id].return_card(card)
+
+        events.append(ev.ModSelectionResolved(
+            faction=faction,
+            slot=slot,
+            card_uid=chosen.uid,
+            title=chosen.title,
+            discarded_uids=[c.uid for c in losers],
+            tie_broken=tie_broken,
+        ))
+        return events
+
+    def _finish_mod_selection(self) -> List[ev.GameEvent]:
+        selection = self.pending_mod_selection
+        if selection is None:
+            return []
+        self.pending_mod_selection = None
+        return [ev.ModSelectionFinished(selection.round_number)]
 
     def _distribute_chest_card(self) -> List[ev.GameEvent]:
         """Give this round's chest card to the hunter whose turn it is to get one.
@@ -938,7 +1222,22 @@ class GameState:
     def _op_draw_into_mods(
         self, op: effects.DrawIntoMods, actor: int
     ) -> List[ev.GameEvent]:
-        """Draw a mod and slot it into the rack."""
+        """Thunderfuck: shift a fresh mod in from the left.
+
+        With an EMPTY rack this does nothing at all — the card is still played
+        and discarded, it simply has no mods to replace.  That is the rule from
+        the physical game and it is deliberate: Thunderfuck REPLACES what is in
+        play, so before the first selection there is nothing for it to act on
+        and it must not quietly seed the rack ahead of schedule.
+
+        With anything in the rack the whole rack shifts one place right: the new
+        card takes the LEFT slot, the old LEFT moves to the RIGHT, and whatever
+        was on the RIGHT is discarded.  That is exactly the push
+        ``_install_mod`` already performs, so this passes the decision straight
+        to it rather than restating it.
+        """
+        if not any(self.mod_slots):
+            return []
         deck = self.decks.get(op.deck_id)
         if deck is None:
             return [ev.ActionRejected("Nieznana talia", "draw_into_mods")]
@@ -951,7 +1250,7 @@ class GameState:
         if needed_reshuffle:
             events.append(ev.DeckReshuffled(deck.id))
         events.append(ev.CardDrawn(actor, deck.id, card.uid))
-        events.extend(self._install_mod(card, actor, prefer_free_slot=True))
+        events.extend(self._install_mod(card, actor))
         return events
 
     def _op_turn_lost(self, op: effects.TurnLost, actor: int) -> List[ev.GameEvent]:
@@ -1140,24 +1439,17 @@ class GameState:
         player.remove_card(card)
         return self._install_mod(card, player.index)
 
-    def _install_mod(self, card: Card, player_index: int,
-                     prefer_free_slot: bool = False) -> List[ev.GameEvent]:
-        """Put a card into the mod rack.
+    def _install_mod(self, card: Card, player_index: int) -> List[ev.GameEvent]:
+        """Push a card into slot 0; the rack shifts right, overflow is discarded.
 
-        Two ways in, one implementation.  A card played by hand always pushes
-        into slot 0 and shifts the rack right, discarding the overflow — the
-        prototype's rule.  A card that arrives on its own (Thunderfuck) takes
-        the first free slot if there is one, and otherwise falls back to that
-        same push, so it never quietly vanishes.
+        One way in and one implementation.  Thunderfuck used to take the first
+        FREE slot instead, which put a new mod on the right while the left one
+        stayed put — the opposite of the rule, and invisible until the rack was
+        half full.  Both callers now push, and the selection (which owns one
+        slot per faction and must not shunt the other along) writes its slot
+        directly instead of coming through here.
         """
         events: List[ev.GameEvent] = []
-        if prefer_free_slot:
-            for index, occupant in enumerate(self.mod_slots):
-                if occupant is None:
-                    self.mod_slots[index] = card
-                    events.append(ev.ModPlaced(player_index, index, card.uid, None))
-                    return events
-
         displaced = self.mod_slots[-1]
         if displaced is not None:
             self.decks[displaced.deck_id].return_card(displaced)
@@ -1343,12 +1635,29 @@ class GameState:
             return "Gra została zakończona"
         return None
 
+    def _mod_selection_refusal(self, command: cmd.Command) -> Optional[str]:
+        """Why a move must wait for the Mod Patusa selection to finish.
+
+        The round genuinely pauses, so this holds against a client that simply
+        does not draw the overlay.  Voting and choosing are obviously exempt —
+        they are how the pause ends — and so is renaming yourself, which is
+        bookkeeping rather than a move.
+        """
+        if self.pending_mod_selection is None:
+            return None
+        if not isinstance(command, self._TURN_BOUND):
+            return None
+        return "Najpierw wybierzcie Mody Patusa"
+
     def _authorise(self, command: cmd.Command) -> Optional[ev.GameEvent]:
         """Is this machine allowed to issue this command right now?"""
         if not isinstance(command, cmd.AUTHORITY_ONLY):
             problem = self._phase_refusal()
             if problem is not None:
                 return ev.ActionRejected(problem, command.kind)
+            paused = self._mod_selection_refusal(command)
+            if paused is not None:
+                return ev.ActionRejected(paused, command.kind)
         if isinstance(command, self._OWNED_BY_PLAYER):
             refusal = self._reject_foreign(
                 getattr(command, "player_index", 0), command.kind
@@ -1382,6 +1691,9 @@ class GameState:
         problem = self._phase_refusal()
         if problem is not None:
             return problem
+        paused = self._mod_selection_refusal(command)
+        if paused is not None:
+            return paused
         index = getattr(command, "player_index", None)
         if index is not None and int(index) != seat:
             return "To nie jest twoje miejsce przy stole"
@@ -1567,6 +1879,20 @@ class GameState:
                 for tid, t in self.tokens.items()
             },
             "mod_slots": [c.uid if c else None for c in self.mod_slots],
+            # An open selection is real turn state: two machines that disagree
+            # about who has voted disagree about which mod is about to be in
+            # play.  The candidate uids are here, but a uid is not a title —
+            # nothing in the fingerprint says what Piotrek was offered.
+            "mod_selection": None if self.pending_mod_selection is None else {
+                "round": self.pending_mod_selection.round_number,
+                "piotrek": [c.uid for c in self.pending_mod_selection.piotrek_cards],
+                "hunters": [c.uid for c in self.pending_mod_selection.hunter_cards],
+                "votes": {str(seat): uid
+                          for seat, uid in sorted(
+                              self.pending_mod_selection.votes.items())},
+                "piotrek_done": self.pending_mod_selection.piotrek_done,
+                "hunters_done": self.pending_mod_selection.hunters_done,
+            },
             "decks": {
                 did: {"draw": d.draw_count, "discard": d.discard_count}
                 for did, d in self.decks.items()
@@ -1623,6 +1949,8 @@ class GameState:
         cmd.EndTurn: _end_turn_command,
         cmd.PlaceMod: _place_mod,
         cmd.DiscardMod: _discard_mod,
+        cmd.ChooseMod: _choose_mod,
+        cmd.VoteMod: _vote_mod,
         cmd.KeepChestCards: _keep_chest_cards,
         cmd.DrawCharacter: _draw_character,
         cmd.DrawSkill: _draw_skill,

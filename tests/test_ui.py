@@ -1294,6 +1294,145 @@ def test_keeping_a_chest_card_discards_the_others(screen):
     assert state.deck(settings.DECK_CHEST).discard_count >= 1
 
 
+# ── choosing the Mods Patusa ─────────────────────────────────────────────────
+def open_mod_selection(screen, round_number: int = 3):
+    """Walk the table into a mod round and let the overlay open."""
+    events = screen.state._begin_round(round_number)
+    screen.bus.emit_all(events)
+    frame(screen)
+    return screen.state.pending_mod_selection
+
+
+def test_a_mod_round_opens_the_selection_overlay(screen):
+    open_mod_selection(screen)
+    assert screen.mod_choice.active
+    assert len(screen.mod_choice.cards) == RULES.mod_choices
+
+
+def test_clicking_a_card_gives_piotrek_the_left_slot(screen):
+    """Hot-seat shows Piotrek's side first, because his choice needs no vote."""
+    selection = open_mod_selection(screen)
+    assert screen.mod_choice.mode == "piotrek"
+    layout = screen.app.layout
+    wanted = screen.mod_choice.cards[1].uid
+
+    click(screen, layout.mod_choice_card_rect(1, RULES.mod_choices).center)
+    assert screen.state.mod_slots[0] is not None
+    assert screen.state.mod_slots[0].uid == wanted
+    # The other two are out of play.
+    assert screen.state.deck(settings.DECK_MODS).discard_count >= 2
+
+
+def test_the_overlay_moves_on_to_the_vote_once_piotrek_has_picked(screen):
+    selection = open_mod_selection(screen)
+    layout = screen.app.layout
+    click(screen, layout.mod_choice_card_rect(0, RULES.mod_choices).center)
+    frame(screen)
+
+    # Piotrek's side is settled; the hunters still have to vote, so the table
+    # is still paused and the overlay is still up.
+    assert screen.state.pending_mod_selection is not None
+    assert screen.mod_choice.active
+    # ...and at one keyboard it must hand the same person the vote, or the
+    # selection could never finish.  It used to sit on Piotrek's spent cards.
+    assert screen.mod_choice.mode == "hunters"
+    assert not screen.mod_choice.settled
+    assert {c.uid for c in screen.mod_choice.cards} == \
+        {c.uid for c in selection.hunter_cards}
+
+
+def test_hot_seat_clicks_through_one_vote_per_hunter(screen):
+    """Every hunter votes, so one person at one keyboard votes for each in turn."""
+    selection = open_mod_selection(screen)
+    layout = screen.app.layout
+    click(screen, layout.mod_choice_card_rect(0, RULES.mod_choices).center)
+    frame(screen)
+
+    hunters = len(selection.hunter_seats)
+    for n in range(hunters):
+        assert screen.mod_choice.voted == n
+        click(screen, layout.mod_choice_card_rect(1, RULES.mod_choices).center)
+        frame(screen)
+
+    # The last click finished it: every hunter voted exactly once.
+    assert len(selection.votes) == hunters
+    assert screen.state.pending_mod_selection is None
+
+
+def test_votes_show_up_on_the_overlay_with_a_running_count(screen):
+    selection = open_mod_selection(screen)
+    seats = selection.hunter_seats
+    uids = [c.uid for c in selection.hunter_cards]
+
+    screen.submit(cmd.VoteMod(player_index=seats[0], card_uid=uids[1]))
+    frame(screen)
+    assert screen.mod_choice.tally[uids[1]] == 1
+    assert screen.mod_choice.voted == 1
+    assert screen.mod_choice.voters == len(seats)
+
+
+def test_the_overlay_closes_when_both_factions_have_chosen(screen):
+    selection = open_mod_selection(screen)
+    layout = screen.app.layout
+    click(screen, layout.mod_choice_card_rect(0, RULES.mod_choices).center)
+
+    uids = [c.uid for c in selection.hunter_cards]
+    for seat in list(selection.hunter_seats):
+        screen.submit(cmd.VoteMod(player_index=seat, card_uid=uids[0]))
+    frame(screen)
+
+    assert not screen.mod_choice.active
+    assert screen.state.pending_mod_selection is None
+    assert screen.state.mod_slots[0] is not None
+    assert screen.state.mod_slots[1] is not None
+
+
+def test_the_table_is_paused_while_the_selection_is_open(screen):
+    """Drawing a card is refused, and the end-turn button goes dead."""
+    open_mod_selection(screen)
+    state = screen.state
+    before = state.deck(settings.DECK_MOVEMENT).draw_count
+
+    click(screen, screen.app.layout.deck_draw_rect(0).center)
+    assert state.deck(settings.DECK_MOVEMENT).draw_count == before
+    assert not screen.can_end_turn
+
+
+def test_the_board_can_still_be_looked_at_while_voting(screen):
+    """Unlike the chest limit, the pause is not a blindfold.
+
+    A hunter waiting on four other votes should still be able to pan and zoom,
+    so anything that is not a click on one of the three cards falls through the
+    overlay to the board underneath.
+    """
+    open_mod_selection(screen)
+    mouse = (960, 540)
+    wheel = pygame.event.Event(pygame.MOUSEWHEEL, y=1, x=0)
+    assert not screen._handle_mod_choice_event(wheel, mouse)
+
+    # A click away from the cards is not swallowed either.
+    panel = screen.app.layout.mod_choice_panel(RULES.mod_choices)
+    away = (panel.centerx, panel.bottom + 40)
+    stray = pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=away, button=1)
+    assert not screen._handle_mod_choice_event(stray, away)
+
+    # ...but a click on a card is, and it acts.
+    card = screen.app.layout.mod_choice_card_rect(0, RULES.mod_choices).center
+    on_card = pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=card, button=1)
+    assert screen._handle_mod_choice_event(on_card, card)
+
+
+def test_the_overlay_survives_a_resize(screen):
+    """The card rects are recomputed from the layout, never remembered."""
+    open_mod_selection(screen)
+    screen.app.resize((1280, 760))
+    screen.on_resize()
+    frame(screen)
+    assert screen.mod_choice.active
+    rect = screen.app.layout.mod_choice_card_rect(0, RULES.mod_choices)
+    assert screen.app.layout.mod_choice_panel(RULES.mod_choices).contains(rect)
+
+
 # ── reveals ──────────────────────────────────────────────────────────────────
 def test_gamechanger_is_announced_before_it_reaches_the_hand(screen):
     state = screen.state

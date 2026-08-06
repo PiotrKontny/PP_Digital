@@ -2206,3 +2206,110 @@ test, and the first version of that test passed against the bug.
   wrong circle for the whole life of the bug. That fixed itself.
 - `next_seat()` survives as a look-ahead that does NOT move the cursor. If you
   need to advance, use `next_turn()`; the type is the reminder.
+
+---
+
+## Stage 21 — The Mod Patusa selection, hunter voting, and Thunderfuck
+**Date:** 2026-08-06
+
+### Starting point
+Mods Patusa existed as a deck and a two-slot rack, but nothing put them into
+play the way the physical game does. A mod reached the rack only by being
+played from a hand or drawn by Thunderfuck — never by being *chosen*. The
+round that pauses so both factions pick a mod simply did not exist.
+
+Thunderfuck was implemented, and implemented wrongly: it filled the first FREE
+slot, which put a new mod on the right while the left one stayed put. That is
+the opposite of the rule, and it was invisible until the rack was half full.
+
+### Implemented features
+
+**1. The Mod Patusa selection.** Every second round from the third — both
+numbers configurable in the lobby — `_begin_round` deals three mods to each
+faction and parks a `ModSelection` on `pending_mod_selection`. While it exists
+the table is paused: `_mod_selection_refusal` refuses every `_TURN_BOUND`
+command from both `_authorise` and `authorise_remote`, so the pause holds
+against a client that never draws the overlay.
+
+**2. Piotrek's half.** Three cards, on his machine only. `ChooseMod` puts the
+chosen one in the LEFT slot and discards the other two. The engine validates
+the uid against what it dealt, so a client cannot name a card it was never
+offered.
+
+**3. Hunter voting.** `VoteMod` replaces that seat's entry rather than being
+refused, which is what makes changing a vote work. Votes are public and every
+`ModVoteCast` carries the whole tally, so no two screens can disagree about the
+count. The last vote decides: most votes wins, ties go to the LEFTMOST tied
+card. That falls out of `max` over the cards in dealt order — it is the
+iteration order, not a sort.
+
+**4. Slot ownership.** Each faction owns one slot for the rest of the game, so
+`_settle_mod_side` writes its slot directly instead of pushing. Pushing would
+have made Piotrek's choice shunt the hunters' card along the rack.
+
+**5. Thunderfuck, rewritten.** One copy became three. With an EMPTY rack it now
+does nothing at all — it *replaces* active mods, and before the first selection
+there is nothing to replace, so seeding the rack would put a mod in play that
+nobody chose. With anything in the rack: new card to LEFT, old LEFT to RIGHT,
+old RIGHT discarded, on anybody's turn. The `prefer_free_slot` branch of
+`_install_mod` is gone; it had no other caller.
+
+**6. The overlay.** One `ModChoice` serves both factions — the same picture with
+a different rule underneath — built on the card-picker geometry so three mods
+look like three chest cards. Vote ticks in each card's upper-right corner,
+running counts beneath, eased badges and pulses on every change.
+`_sync_mod_overlay` decides which half a machine sees FROM THE STATE, so a
+client replaying several commands in one frame lands on the right side.
+
+Unlike the chest limit the pause is not modal: `_handle_mod_choice_event`
+reports whether it consumed the event, and anything that is not a click on one
+of the three cards falls through to the board. A hunter waiting on four other
+votes can still pan and zoom.
+
+**7. Settings.** `mod_round_first` (3) and `mod_round_interval` (2) reach the
+engine from both the hot-seat menu and the network host screen, through
+`SessionConfig` → `LobbyState` → `Room.set_settings`.
+
+### Two bugs found on the way
+
+**The hot-seat hand-off.** The first version marked Piotrek's side "settled"
+and stopped there. In edit mode one person owns every seat, so the panel sat on
+his spent cards and the vote could never be cast — which froze the table, since
+the pause only lifts when both sides have chosen. Caught by rendering the flow
+to PNGs and noticing two screenshots were byte-identical. `_voting_seat()` now
+routes each click to the next hunter who has not voted.
+
+**The menu's fitting loop.** It accepted a layout on row height alone and never
+checked whether the footer fit, so it had been quietly accepting overflowing
+layouts. A fifth settings row made the overflow big enough to see. It now
+checks the real bottom edge; the two mod numbers share one row on both screens
+because they read as one setting.
+
+### Tests
+**746 passing** (704 before, +42), ~135 s.
+
+- `tests/test_mod_selection.py` — 31 new: the schedule, what each faction is
+  dealt, slot ownership, one-vote-per-hunter and changing it, the leftmost
+  tie-break, the pause locally and remotely, and the snapshot.
+- `tests/test_ui.py` — 10 new: the overlay opening, clicking through Piotrek's
+  pick, the hot-seat hand-off to the vote, counters, closing, the pause, the
+  non-modal routing, resize.
+- `tests/test_abilities.py` — the three Thunderfuck tests rewritten against the
+  new rule, plus two more (any player's turn, three copies in the deck).
+
+Sixteen existing tests broke on the pause, all correctly: they walk many rounds
+and now stop in round 3. Three suites opt out with `mod_round_first=10_000`,
+the idiom already used for the chest. No test was deleted or weakened.
+
+### Verification
+- 746 tests; the selection rendered to PNGs at 1920×1080 and inspected;
+  `test_menu_layout` green at all four resolutions after the layout fix.
+- Lobby settings round-trip checked end to end: `to_dict` → `from_dict` →
+  `to_config`.
+
+### Notes
+- The mod rack heading now says when the next selection is due
+  (`next_mod_round`), the way the turn bar already announces the chest.
+- An open selection is in the fingerprint — candidates, votes, both done flags —
+  but it carries UIDs, not titles, so nothing in the snapshot reveals what
+  Piotrek was offered.

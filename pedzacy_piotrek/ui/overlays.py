@@ -17,6 +17,9 @@ let a remote player's decision appear on everybody's table later.
 * :class:`CardPicker` — a row of somebody else's cards to choose one from
   (Spy).  Deliberately generic: it is handed a list of cards and a title and
   knows nothing about which card opened it.
+* :class:`ModChoice` — the Mod Patusa selection that pauses a round.  One
+  overlay serves both factions: Piotrek clicks to keep, hunters click to vote
+  and watch the count build up.
 """
 
 from __future__ import annotations
@@ -563,6 +566,230 @@ class ChestChoice:
         r.fit_spaced_text("ZATWIERDŹ" if enabled else f"WYBIERZ {self.limit}",
                           drawn, style.text, surface, base_size=17, spacing=2,
                           padding=14)
+
+
+# ── choosing the Mods Patusa ─────────────────────────────────────────────────
+class ModChoice:
+    """Three Mods Patusa to choose from — by clicking, or by voting.
+
+    ONE overlay for both factions, because they are the same picture with a
+    different rule underneath.  Piotrek clicks a card and it is his; a hunter
+    clicks a card and that is a vote, which shows up on every hunter's screen
+    with a running count.  Splitting them into two overlays would have meant
+    maintaining the same card lineup twice.
+
+    Like every other overlay here it is told nothing about *why* it is open: it
+    is handed cards, a mode and a tally, and it answers with a uid.  Whether
+    that uid becomes a ``ChooseMod`` or a ``VoteMod`` is the screen's problem.
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self.cards: List[Card] = []
+        #: "piotrek" — click to keep; "hunters" — click to vote; "waiting" —
+        #: this seat has nothing to decide and is watching the other side.
+        self.mode = "piotrek"
+        self.title = ""
+        self.caption = ""
+        #: uid → votes, straight from the engine.  Never counted here: the
+        #: engine owns the tally, and a screen that recomputed it would be a
+        #: second opinion about who won.
+        self.tally: Dict[int, int] = {}
+        #: The uid this seat voted for, so its own tick can be picked out.
+        self.my_vote: Optional[int] = None
+        self.voted = 0
+        self.voters = 0
+        #: Set once this seat has committed, which greys the panel out without
+        #: closing it — the vote is still running and the counts still move.
+        self.settled = False
+        self.appear = 0.0
+        self.elapsed = 0.0
+        self.hover: Dict[int, float] = {}
+        #: Per-card animation of the vote badge, so a tick grows in rather than
+        #: appearing between two frames.
+        self.badge: Dict[int, float] = {}
+        #: Cards that just gained or lost a vote, pulsed for a moment.
+        self.pulse: Dict[int, float] = {}
+
+    def show(self, cards: Sequence[Card], mode: str, title: str,
+             caption: str = "") -> None:
+        self.active = True
+        self.cards = list(cards)
+        self.mode = mode
+        self.title = title
+        self.caption = caption
+        self.tally = {card.uid: 0 for card in self.cards}
+        self.my_vote = None
+        self.voted = 0
+        self.voters = 0
+        self.settled = False
+        self.appear = 0.0
+        self.elapsed = 0.0
+        self.hover = {}
+        self.badge = {}
+        self.pulse = {}
+
+    def hide(self) -> None:
+        self.active = False
+        self.cards = []
+        self.hover = {}
+        self.badge = {}
+        self.pulse = {}
+
+    def set_tally(self, tally: Dict[int, int], voted: int, voters: int) -> None:
+        """Adopt the engine's counts, pulsing whatever changed."""
+        for uid, count in tally.items():
+            if count != self.tally.get(uid, 0):
+                self.pulse[uid] = 1.0
+        self.tally = dict(tally)
+        self.voted = voted
+        self.voters = voters
+
+    @property
+    def interactive(self) -> bool:
+        """Whether a click on a card means anything for this seat."""
+        return self.active and not self.settled and self.mode in ("piotrek", "hunters")
+
+    def card_at(self, layout: Layout, position: Tuple[int, int]) -> Optional[int]:
+        count = len(self.cards)
+        for index, card in enumerate(self.cards):
+            if layout.mod_choice_card_rect(index, count).collidepoint(position):
+                return card.uid
+        return None
+
+    def update(self, dt: float, layout: Layout, mouse: Tuple[int, int]) -> None:
+        if not self.active:
+            return
+        self.appear = approach(self.appear, 1.0, 12.0, dt)
+        self.elapsed += dt
+        count = len(self.cards)
+        live = self.interactive
+        for index, card in enumerate(self.cards):
+            rect = layout.mod_choice_card_rect(index, count)
+            wanted = 1.0 if (live and rect.collidepoint(mouse)) else 0.0
+            self.hover[card.uid] = approach(self.hover.get(card.uid, 0.0),
+                                            wanted, 16.0, dt)
+            # A badge is only shown for a card with votes on it; easing the
+            # target rather than the presence is what makes it grow and shrink
+            # instead of blinking.
+            target = 1.0 if self.tally.get(card.uid, 0) > 0 else 0.0
+            self.badge[card.uid] = approach(self.badge.get(card.uid, 0.0),
+                                            target, 12.0, dt)
+            self.pulse[card.uid] = approach(self.pulse.get(card.uid, 0.0),
+                                            0.0, 3.2, dt)
+
+    def draw(self, r: Renderer, cards: CardRenderer, layout: Layout,
+             surface: pygame.Surface, mouse: Tuple[int, int]) -> None:
+        if not self.active:
+            return
+        theme = r.theme
+        count = len(self.cards)
+        if count == 0:
+            return
+        panel = layout.mod_choice_panel(count)
+        _dim(surface, surface.get_rect(), int(165 * min(1.0, self.appear)))
+        r.premium_panel(panel, surface, radius=16, border=theme.brass_light,
+                        glow=theme.brass, glow_strength=0.4, shadow=22)
+
+        r.spaced_text(self.title.upper(), r.fonts.get(22, bold=True),
+                      theme.brass_bright, surface,
+                      center=(panel.centerx, panel.top + 26), spacing=3,
+                      shadow=True)
+        if self.caption:
+            r.text(self.caption, r.fonts.deck(), theme.text_dim, surface,
+                   midtop=(panel.centerx, panel.top + 42))
+
+        for index, card in enumerate(self.cards):
+            self._draw_card(r, cards, layout, surface, index, card, count)
+
+        self._draw_footer(r, layout, surface, panel)
+
+    def _draw_card(self, r: Renderer, cards: CardRenderer, layout: Layout,
+                   surface: pygame.Surface, index: int, card: Card,
+                   count: int) -> None:
+        theme = r.theme
+        rect = layout.mod_choice_card_rect(index, count)
+        hover = self.hover.get(card.uid, 0.0)
+        votes = self.tally.get(card.uid, 0)
+        mine = self.my_vote == card.uid
+        lift = int(12 * hover + (10 if mine else 0))
+        draw_rect = rect.move(0, -lift)
+
+        if mine or hover > 0.02:
+            r.shape_glow(draw_rect, theme.valid if mine else theme.prompt,
+                         surface, radius=10,
+                         strength=0.7 if mine else 0.45 * hover)
+        cards.draw_in(card, draw_rect, surface,
+                      highlighted=mine or hover > 0.5,
+                      border_color=theme.deck_colors.get(card.deck_id))
+        if mine:
+            pygame.draw.rect(surface, theme.valid, draw_rect.inflate(6, 6), 3,
+                             border_radius=10)
+
+        self._draw_badge(r, layout, surface, index, count, votes, mine, lift)
+        if self.mode != "piotrek":
+            self._draw_tally(r, surface, draw_rect, votes)
+
+    def _draw_badge(self, r: Renderer, layout: Layout, surface: pygame.Surface,
+                    index: int, count: int, votes: int, mine: bool,
+                    lift: int) -> None:
+        """The tick in the corner: present when anybody voted, green when it is yours.
+
+        Piotrek's side has no votes to show, so it gets no badge at all rather
+        than a badge that always reads zero.
+        """
+        if self.mode == "piotrek":
+            return
+        grown = self.badge.get(self.cards[index].uid, 0.0)
+        if grown <= 0.02 and not mine:
+            return
+        theme = r.theme
+        badge = layout.mod_vote_badge_rect(index, count).move(0, -lift)
+        pulse = self.pulse.get(self.cards[index].uid, 0.0)
+        scale = 0.7 + 0.3 * min(1.0, grown) + 0.12 * pulse
+        size = max(6, int(badge.width * scale))
+        badge = pygame.Rect(0, 0, size, size)
+        badge.center = layout.mod_vote_badge_rect(index, count).move(0, -lift).center
+
+        colour = theme.valid if mine else theme.brass_light
+        pygame.draw.circle(surface, darken(colour, 0.45), badge.center,
+                           badge.width // 2)
+        pygame.draw.circle(surface, colour, badge.center, badge.width // 2, 2)
+        # A tick rather than a number: the count lives under the card, and two
+        # numbers on one card is one too many.
+        left = (badge.left + badge.width * 0.26, badge.centery)
+        mid = (badge.centerx - badge.width * 0.02, badge.bottom - badge.height * 0.3)
+        right = (badge.right - badge.width * 0.24, badge.top + badge.height * 0.3)
+        pygame.draw.lines(surface, colour, False, [left, mid, right],
+                          max(2, badge.width // 9))
+
+    def _draw_tally(self, r: Renderer, surface: pygame.Surface,
+                    rect: pygame.Rect, votes: int) -> None:
+        """The running count under a card, in words a table can read at a glance."""
+        theme = r.theme
+        colour = theme.valid if votes else theme.text_dim
+        label = "1 głos" if votes == 1 else f"{votes} głosy" if 2 <= votes <= 4 \
+            else f"{votes} głosów"
+        r.text(label, r.fonts.get(17, bold=True), colour, surface,
+               midtop=(rect.centerx, rect.bottom + 8), shadow=votes > 0)
+
+    def _draw_footer(self, r: Renderer, layout: Layout, surface: pygame.Surface,
+                     panel: pygame.Rect) -> None:
+        theme = r.theme
+        if self.mode == "piotrek":
+            note = ("kliknij Mod, który wchodzi do gry"
+                    if not self.settled else "wybrano — czekamy na Oprawców")
+        elif self.mode == "hunters":
+            if self.settled:
+                note = "głosowanie zakończone"
+            else:
+                note = (f"kliknij Mod, na który głosujesz  ·  "
+                        f"zagłosowało {self.voted}/{self.voters}"
+                        "  ·  możesz zmienić głos")
+        else:
+            note = "czekamy na wybór Modów Patusa…"
+        r.text(note, r.fonts.label(), theme.text_dim, surface,
+               midbottom=(panel.centerx, panel.bottom - 16))
 
 
 # ── pause / leave ────────────────────────────────────────────────────────────

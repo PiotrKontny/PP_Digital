@@ -74,6 +74,58 @@ class ModDiscarded(GameEvent):
 
 
 @dataclass
+class ModSelectionStarted(GameEvent):
+    """The round paused: both factions now choose a Mod Patusa.
+
+    Two lists of candidates, because the two factions choose from different
+    cards.  Piotrek's are secret and the hunters' are not; keeping them in one
+    event is safe because every machine still only DRAWS what its own seat is
+    entitled to see, exactly as the chest limit does.
+    """
+
+    round_number: int
+    piotrek_seat: Optional[int] = None
+    piotrek_uids: List[int] = field(default_factory=list)
+    hunter_uids: List[int] = field(default_factory=list)
+    hunter_seats: List[int] = field(default_factory=list)
+
+
+@dataclass
+class ModVoteCast(GameEvent):
+    """A hunter voted, or changed their vote.  Everybody sees this."""
+
+    player_index: int
+    card_uid: int
+    #: uid → number of votes, after this vote landed.
+    tally: Dict[int, int] = field(default_factory=dict)
+    voted: int = 0
+    voters: int = 0
+
+
+@dataclass
+class ModSelectionResolved(GameEvent):
+    """One side settled on a card, which is now in its slot.
+
+    ``faction`` is "piotrek" or "hunters"; the slot is 0 for Piotrek (LEFT) and
+    1 for the hunters (RIGHT).  ``discarded_uids`` are the candidates that lost.
+    """
+
+    faction: str
+    slot: int
+    card_uid: int
+    title: str = ""
+    discarded_uids: List[int] = field(default_factory=list)
+    tie_broken: bool = False
+
+
+@dataclass
+class ModSelectionFinished(GameEvent):
+    """Both factions have chosen; the table may move again."""
+
+    round_number: int
+
+
+@dataclass
 class CharacterChanged(GameEvent):
     player_index: int
     title: Optional[str]

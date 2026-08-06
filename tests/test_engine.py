@@ -51,7 +51,9 @@ def test_deck_sizes_match_the_data_file(library):
     Hard-coded here on purpose: a balance edit that changes a count should make
     somebody confirm the new number, not slip through unnoticed.
     """
-    assert len(library.deck(settings.DECK_MOVEMENT).build_cards()) == 70
+    # 72 since stage 21: Thunderfuck went from one copy to three, because a
+    # card that replaces the active mods is worth drawing only if it turns up.
+    assert len(library.deck(settings.DECK_MOVEMENT).build_cards()) == 72
     assert len(library.deck(settings.DECK_MODS).build_cards()) == 8
     # One blank placeholder card was dropped from the data file.
     assert len(library.deck(settings.DECK_CHEST).build_cards()) == 8

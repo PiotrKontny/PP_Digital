@@ -36,16 +36,24 @@ from pedzacy_piotrek.cards.loader import ContentLibrary
 
 
 def make(players: int = 6, seed: int = 5, **kwargs):
-    """A game whose chest never opens, so nothing interrupts the turn loop.
+    """A game that never interrupts the turn loop, so the walk can get somewhere.
 
-    The chest hand-out can raise the hand limit and park a keep-or-discard
-    prompt in front of the player, and ``EndTurn`` is then correctly refused
-    until it is answered.  That is real behaviour and has its own tests; here
-    it would only stop the walk before it got anywhere interesting.
+    Two things would otherwise stop it, and both are real behaviour with tests
+    of their own:
+
+    * the chest hand-out can raise the hand limit and park a keep-or-discard
+      prompt in front of the player, and ``EndTurn`` is then correctly refused
+      until it is answered;
+    * a Mod Patusa round pauses the table outright until both factions have
+      chosen, which refuses ``EndTurn`` for exactly the same reason.
+
+    Pushing both out past any round these tests reach keeps them about the turn
+    cadence, which is what they are for.
     """
     config = SessionConfig(
         num_players=players, board_cells=40, seed=seed, edit_mode=True,
-        piotrek_picks_pawn=False, chest_open_round=10_000, **kwargs
+        piotrek_picks_pawn=False, chest_open_round=10_000,
+        mod_round_first=10_000, **kwargs
     )
     return create_game(config)
 

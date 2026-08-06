@@ -80,16 +80,25 @@ class Table:
                 pass
 
     # ── convenience ──────────────────────────────────────────────────────────
-    def seated(self, *nicknames: str):
-        """A host and clients, all ready, with the game not yet started."""
+    def seated(self, *nicknames: str, mods: bool = False):
+        """A host and clients, all ready, with the game not yet started.
+
+        Mod Patusa rounds are pushed out of range unless a test asks for them.
+        A selection pauses the table until both factions have chosen, so a
+        helper that walks a dozen turns would otherwise stop dead in round 3 —
+        correctly, but for a reason that has nothing to do with what these
+        tests check.  Pass ``mods=True`` to get the real schedule.
+        """
         host = self.host(nicknames[0] if nicknames else "Kuba")
         clients = [self.join(host.room_code, name) for name in nicknames[1:]]
         for client in clients:
             client.set_ready(True)
+        if not mods:
+            host.set_settings(mod_round_first=10_000)
         self.pump()
         return host, clients
 
-    def playing(self, *nicknames: str, colour: str = ""):
+    def playing(self, *nicknames: str, colour: str = "", mods: bool = False):
         """A match that has actually begun — identity chosen and all.
 
         Since stage 17 starting a game leaves the table in ``STARTING`` until
@@ -98,15 +107,15 @@ class Table:
         is the point: the new phase is exercised by the whole existing suite
         rather than by one test that remembers to.
         """
-        host, clients = self.seated(*nicknames)
+        host, clients = self.seated(*nicknames, mods=mods)
         host.start_game(self.library)
         self.pump()
         self.choose_identity(host, clients, colour)
         return host, clients
 
-    def starting(self, *nicknames: str):
+    def starting(self, *nicknames: str, mods: bool = False):
         """A match built but NOT begun: Piotrek has not chosen yet."""
-        host, clients = self.seated(*nicknames)
+        host, clients = self.seated(*nicknames, mods=mods)
         host.start_game(self.library)
         self.pump()
         return host, clients

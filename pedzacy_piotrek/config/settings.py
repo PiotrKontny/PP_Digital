@@ -69,6 +69,17 @@ class Rules:
     chest_open_min: int = 1
     chest_open_default: int = 3
 
+    #: The round the first Mod Patusa selection happens on, and how many rounds
+    #: apart the following ones are.  The physical game pauses every second
+    #: round from the third, and both numbers are set in the lobby because
+    #: balancing them is the whole reason they are numbers and not constants.
+    mod_round_first_default: int = 3
+    mod_round_first_min: int = 1
+    mod_round_interval_default: int = 2
+    mod_round_interval_min: int = 1
+    #: How many Mod Patusa cards each faction is offered to choose from.
+    mod_choices: int = 3
+
     #: Piotrek acts on every Nth turn slot of a round (slot 0, 3, 6, ...).
     piotrek_turn_period: int = 3
 
@@ -212,6 +223,11 @@ class SessionConfig:
     num_players: int = RULES.max_players
     board_cells: int = RULES.board_cells_default
     chest_open_round: int = RULES.chest_open_default
+    #: First round that pauses for a Mod Patusa selection, and the gap between
+    #: selections after it.  Defaults reproduce the physical game: round 3,
+    #: then every second round.
+    mod_round_first: int = RULES.mod_round_first_default
+    mod_round_interval: int = RULES.mod_round_interval_default
     character_choices: list[str | None] = field(default_factory=list)
     #: Probability that a row of the board is widened into a doubled position
     #: (12a / 12b).  ``None`` keeps the board theme's fixed pattern.
@@ -260,6 +276,9 @@ class SessionConfig:
             num_players=players,
             board_cells=max(RULES.board_cells_min, self.board_cells),
             chest_open_round=max(RULES.chest_open_min, self.chest_open_round),
+            mod_round_first=max(RULES.mod_round_first_min, self.mod_round_first),
+            mod_round_interval=max(RULES.mod_round_interval_min,
+                                   self.mod_round_interval),
             character_choices=choices[:players],
             double_frequency=frequency,
             local_seat=max(0, min(players - 1, self.local_seat)),

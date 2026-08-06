@@ -625,30 +625,44 @@ def test_the_card_text_says_porusz(library):
 
 
 # ── Thunderfuck ──────────────────────────────────────────────────────────────
-def test_thunderfuck_fills_the_first_free_mod_slot(game):
+def test_thunderfuck_does_nothing_with_an_empty_rack(game):
+    """No active mods means nothing to replace: the card is simply spent.
+
+    It must not seed the rack.  Mods enter play by being CHOSEN on a mod round,
+    and a Thunderfuck played before the first selection would put one there
+    that nobody picked.
+    """
     card = take_movement_card(game, "Thunderfuck")
     assert game.mod_slots == [None, None]
+    mods = game.deck(settings.DECK_MODS)
+    before = mods.draw_count
 
     events = game.apply(cmd.PlayCard(player_index=0, card_uid=card.uid))
-    placed = next(e for e in events if isinstance(e, ev.ModPlaced))
-    assert placed.slot == 0
-    assert game.mod_slots[0] is not None
-    assert game.mod_slots[0].deck_id == settings.DECK_MODS
-    assert game.mod_slots[1] is None
+    assert not any(isinstance(e, ev.ModPlaced) for e in events)
+    assert game.mod_slots == [None, None]
+    assert mods.draw_count == before
+    # Spent like any other card, so it cannot be played twice.
+    assert card not in game.players[0].hand
+    assert card in game.deck(settings.DECK_MOVEMENT).discard_pile
 
 
-def test_thunderfuck_takes_the_second_slot_when_the_first_is_taken(game):
+def test_thunderfuck_shifts_a_single_mod_right(game):
+    """One mod in play: the new card takes LEFT and the old one slides RIGHT."""
     mods = game.deck(settings.DECK_MODS)
-    game.mod_slots[0] = mods.take_card()
+    first = mods.take_card()
+    game.mod_slots[0] = first
     card = take_movement_card(game, "Thunderfuck")
 
     events = game.apply(cmd.PlayCard(player_index=0, card_uid=card.uid))
-    assert next(e.slot for e in events if isinstance(e, ev.ModPlaced)) == 1
-    assert all(slot is not None for slot in game.mod_slots)
+    assert next(e.slot for e in events if isinstance(e, ev.ModPlaced)) == 0
+    assert game.mod_slots[1] is first
+    assert game.mod_slots[0] is not None and game.mod_slots[0] is not first
+    # Nothing fell off the right, so nothing was discarded.
+    assert not any(isinstance(e, ev.ModDiscarded) for e in events)
 
 
-def test_a_full_rack_falls_back_to_the_push_behaviour(game):
-    """With no free slot it behaves like a mod played by hand: push and discard."""
+def test_thunderfuck_pushes_the_right_mod_off_a_full_rack(game):
+    """New → LEFT, old LEFT → RIGHT, old RIGHT → discard."""
     mods = game.deck(settings.DECK_MODS)
     first, second = mods.take_card(), mods.take_card()
     game.mod_slots[0], game.mod_slots[1] = first, second
@@ -659,6 +673,24 @@ def test_a_full_rack_falls_back_to_the_push_behaviour(game):
     assert game.mod_slots[1] is first
     assert game.mod_slots[0] not in (first, second)
     assert second in mods.discard_pile
+
+
+def test_thunderfuck_replaces_mods_on_anybody_s_turn(game):
+    """'Regardless of whose turn it is' — a hunter's copy works the same way."""
+    mods = game.deck(settings.DECK_MODS)
+    first = mods.take_card()
+    game.mod_slots[0] = first
+    seat = hunter_seat(game)
+    card = take_movement_card(game, "Thunderfuck", player_index=seat)
+
+    events = game.apply(cmd.PlayCard(player_index=seat, card_uid=card.uid))
+    assert next(e.slot for e in events if isinstance(e, ev.ModPlaced)) == 0
+    assert game.mod_slots[1] is first
+
+
+def test_there_are_three_thunderfucks_in_the_movement_deck(library):
+    cards = library.deck(settings.DECK_MOVEMENT).build_cards()
+    assert sum(1 for c in cards if c.title == "Thunderfuck") == 3
 
 
 # ── edit mode ────────────────────────────────────────────────────────────────
@@ -737,8 +769,19 @@ def test_edit_mode_survives_the_trip_from_the_menu(library):
     assert state.may_control(2) and not state.may_control(0)
 
 
-def test_the_random_reveal_only_picks_cards_it_can_resolve_alone(game):
-    """The executor cannot open a prompt mid-plan, so it draws from the rest."""
+def test_the_random_reveal_only_picks_cards_it_can_resolve_alone(library):
+    """The executor cannot open a prompt mid-plan, so it draws from the rest.
+
+    Its own game rather than the shared fixture: twelve plays walk the table
+    into round 3, where a Mod Patusa selection correctly pauses everything and
+    the thirteenth play is refused.  That pause has its own tests; here it would
+    only cut the sample short.
+    """
+    game = create_game(
+        SessionConfig(num_players=4, board_cells=30, seed=4321,
+                      double_frequency=0.0, mod_round_first=10_000),
+        library,
+    )
     place_all(game)
     deck = game.deck(settings.DECK_MOVEMENT)
     card = take_movement_card(game, "Seks z pedałami")

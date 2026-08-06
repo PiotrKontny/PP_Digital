@@ -1,7 +1,7 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 14 — text editing everywhere, copy buttons, remembered
-              server (see CHANGELOG_LLM.md)
+Last updated: stage 21 — Mod Patusa selection and hunter voting, Thunderfuck
+              (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -86,7 +86,13 @@ WORKING:
 - PLAYABLE movement cards: 26 of 30 definitions.  Deterministic ones act at
   once; select-a-token ones (Janek, Kolos z paki, Astral 2019, Astral 2022)
   ask through the generic choice system, which shows the pawns themselves.
-- Thunderfuck draws a Mod Patusa straight into the first free rack slot.
+- MOD PATUSA SELECTION (stage 21): every second round from the third (both
+  numbers set in the lobby) the table PAUSES and both factions choose a mod.
+  Piotrek picks one of three; the hunters vote on three of their own.  See
+  "HOW THE MOD PATUSA SELECTION WORKS" below.
+- Thunderfuck replaces the active mods: the new card takes the LEFT slot, the
+  old LEFT slides RIGHT, and the old RIGHT is discarded.  With an EMPTY rack it
+  does nothing at all.  Three copies in the movement deck.
 - Gamechanger really becomes Alter Ego / Kingmaker: the card in the hand is the
   transformed one, and it goes back to the deck as a Gamechanger.
 - EDIT MODE: on (default) anybody at the keyboard plays every seat, as the
@@ -303,9 +309,12 @@ pedzacy_piotrek/
 
 tests/               test_engine, test_board, test_session, test_ui,
                      test_card_effects (stage 19: the four cards above),
-                     test_turn_progression (stage 20: the turn cursor —
-                     it walks real turns, which is the only kind of test
-                     that can see a scheduler stall).
+                     test_turn_progression (the turn cursor — it walks real
+                     turns, which is the only kind of test that can see a
+                     scheduler stall),
+                     test_mod_selection (stage 21: the schedule, the slots,
+                     hunter voting, the leftmost tie-break, the pause and
+                     the snapshot).
 tools/               screenshot.py, inspect_frame.py (headless verification).
 docs/ARCHITECTURE.md Polish design rationale for the owner.
 
@@ -778,6 +787,180 @@ The rules that keep it that way, all of which already existed:
   - Reconnect: TURN_INTERRUPT is a Status, so it is already in the snapshot and
     already restored. This is exactly why N18 says new mechanics become a
     StatusKind rather than a boolean on GameState.
+
+
+================================================================================
+HOW THE MOD PATUSA SELECTION WORKS
+================================================================================
+
+Added in stage 21.  This is the mechanic that puts mods into play; before it,
+mods only ever reached the rack by being played from a hand or drawn by
+Thunderfuck, neither of which is how the physical game does it.
+
+
+THE SCHEDULE
+------------
+A round is a MOD ROUND when
+
+    round >= mod_round_first  and  (round - mod_round_first) % interval == 0
+
+Defaults are first=3, interval=2, so rounds 3, 5, 7, 9 — "every 2 rounds
+starting on round 3".  Both numbers are SessionConfig fields set in the lobby
+(local menu and the network host screen), carried in LobbyState, and accepted
+by Room.set_settings.  `GameState.is_mod_round()` answers the question and
+`next_mod_round()` says when the next pause is due; the mod rack heading uses
+the second one to show "następny wybór: runda 5".
+
+Setting mod_round_first to 10_000 is how a test opts out.  Several suites do —
+see "TESTS AND THE PAUSE" below.
+
+
+WHAT HAPPENS ON A MOD ROUND
+---------------------------
+`_begin_round` calls `_open_mod_selection`, which deals THREE cards to each
+faction (RULES.mod_choices) and parks a `ModSelection` on
+`GameState.pending_mod_selection`.  Six cards leave the deck at once; the four
+losers are returned when their side settles, so nothing is lost from the deck.
+
+While that object exists the table is PAUSED: `_mod_selection_refusal` refuses
+every _TURN_BOUND command with "Najpierw wybierzcie Mody Patusa", from both
+`_authorise` (local) and `authorise_remote` (the host).  It is in the engine and
+not in the interface for the usual reason — a client that simply does not draw
+the overlay must still be unable to play.
+
+ChooseMod and VoteMod are deliberately NOT in _TURN_BOUND.  They are how the
+pause ends, and voting is not a move — the same reasoning that keeps
+KeepChestCards out of that tuple.
+
+
+PIOTREK'S HALF
+--------------
+Three cards, seen on Piotrek's machine only.  He clicks one; it becomes the
+LEFT active mod (slot 0) and the other two are discarded.  One command:
+
+    ChooseMod(player_index, card_uid)
+
+The engine checks the uid against the candidates IT dealt, so a client cannot
+name a card it was never offered, and refuses a second choice.
+
+
+THE HUNTERS' HALF
+-----------------
+Three different cards, and every hunter votes:
+
+    VoteMod(player_index, card_uid)
+
+  - one vote per hunter — the command REPLACES that seat's entry rather than
+    being refused, which is what makes changing your mind work;
+  - a vote may be changed until the last hunter has voted;
+  - all hunters see all votes, so the tally is public and lives in the snapshot;
+  - each ModVoteCast carries the WHOLE tally, so no two screens can disagree
+    about the count — the engine owns it and a screen that recomputed it would
+    be a second opinion.
+
+When every hunter has voted the winner is the card with the most votes.  ON A
+TIE THE LEFTMOST TIED CARD WINS.  That falls out of `max` over the cards in
+DEALT order, because `max` keeps the first maximum it meets and the dealt order
+is the on-screen order.  Do not "fix" that into a sort — the tie-break is the
+iteration order.
+
+The winner becomes the RIGHT active mod (slot 1); the other two are discarded.
+
+
+SLOT LOGIC — READ THIS BEFORE TOUCHING THE RACK
+-----------------------------------------------
+There are now TWO ways a card reaches the rack and they behave DIFFERENTLY:
+
+  SELECTION      writes its slot directly (`_settle_mod_side`).  Piotrek owns
+                 slot 0, the hunters own slot 1, for the rest of the game.
+                 It must NOT push, or Piotrek choosing would shunt the
+                 hunters' card along the rack.
+
+  PLACE / THUNDERFUCK  push through `_install_mod`: into slot 0, everything
+                 shifts right, whatever falls off the right is discarded.
+
+`_install_mod` used to take a `prefer_free_slot` flag for Thunderfuck, which
+filled the first EMPTY slot instead.  That put a new mod on the right while the
+left one stayed put — the opposite of the rule — and it was invisible until the
+rack was half full.  The flag is gone; do not reintroduce it.
+
+
+THUNDERFUCK
+-----------
+Movement card, three copies (was one).  Text: "Dobierz nowy Mod Patusa".
+
+  - NO active mods  → does NOTHING.  The card is played and discarded normally.
+    This is deliberate: Thunderfuck REPLACES what is in play, and before the
+    first selection there is nothing to replace.  It must not seed the rack
+    with a mod nobody chose.
+  - ANY active mod  → draw one mod; new card to LEFT, old LEFT to RIGHT, old
+    RIGHT discarded.  Works on anybody's turn.
+
+Implemented as the `draw_into_mods` effect → `DrawIntoMods` operation →
+`_op_draw_into_mods`, which gates on `any(self.mod_slots)` and then hands the
+card to `_install_mod`.
+
+
+EVENTS
+------
+    ModSelectionStarted    the round paused; carries both candidate lists, the
+                           Piotrek seat and the hunter seats
+    ModVoteCast            one vote, plus the whole tally and voted/voters
+    ModSelectionResolved   one faction settled: faction, slot, uid, title,
+                           the discarded uids, and whether a tie was broken
+    ModSelectionFinished   both settled; the table may move again
+
+
+THE SNAPSHOT
+------------
+An open selection IS in the fingerprint: candidates, votes and the two done
+flags.  Two machines that disagree about who has voted disagree about which mod
+is about to be in play.  It carries UIDS, not titles, so nothing in the
+fingerprint says what Piotrek was offered.
+
+
+THE INTERFACE
+-------------
+One overlay, `ModChoice` in ui/overlays.py, serves both factions — they are the
+same picture with a different rule underneath.  It is built on the card-picker
+geometry (`mod_choice_*` in layout.py) so three mods look like three chest
+cards rather than a fourth kind of card lineup.  Vote ticks sit in each card's
+upper-right corner, the running count under it.
+
+`GameScreen._sync_mod_overlay` decides which half this machine is looking at,
+FROM THE STATE rather than from the event that got there — so a client
+replaying several commands in one frame, or reconnecting mid-selection, lands on
+the right side.  A machine is shown whatever it can still act on: Piotrek's
+cards while he has not picked, then the hunters' while a seat it owns has not
+voted, and a read-only "waiting" view otherwise.
+
+HOT-SEAT.  Edit mode controls every seat, so the overlay walks one person
+through both halves: Piotrek picks, then the panel hands the same player the
+vote, and `_voting_seat()` routes each click to the next hunter who has not
+voted.  Getting this wrong is not cosmetic — the first version left the panel
+sitting on Piotrek's spent cards and the selection could never finish.
+
+Unlike the chest limit the pause is NOT modal.  `_handle_mod_choice_event`
+returns whether it consumed the event, and anything that is not a click on one
+of the three cards falls through to the board — a hunter waiting on four other
+votes can still pan and zoom.
+
+
+TESTS AND THE PAUSE
+-------------------
+A paused round correctly refuses EndTurn, which stops any test that walks a
+dozen turns.  Three suites opt out by pushing the schedule out of range, the
+same idiom already used for the chest:
+
+    tests/test_turn_progression.py   make()   mod_round_first=10_000
+    tests/netkit.py                  seated() mod_round_first=10_000 unless
+                                              a test passes mods=True
+    tests/test_abilities.py          the random-reveal test builds its own game
+
+The mechanic's own tests are tests/test_mod_selection.py (engine: schedule,
+slots, voting, ties, the pause, the snapshot) and the "choosing the Mods
+Patusa" block in tests/test_ui.py (overlay: clicks, counters, hot-seat
+hand-off, resize).
 
 
 ================================================================================
@@ -2054,6 +2237,37 @@ N84. Never size a turn-order test so small that the bug cannot appear. Three
    invisible; the online test uses six and asserts up front that he holds more
    than one.
 
+N85. Never route the Mod Patusa selection through _install_mod. Each faction
+   owns one slot for the whole game, so the selection WRITES its slot; pushing
+   would make Piotrek's choice shunt the hunters' card along the rack. The push
+   belongs to PlaceMod and Thunderfuck and to nothing else.
+
+N86. Never give Thunderfuck a "prefer the first free slot" behaviour again. It
+   filled the RIGHT slot while the LEFT one stayed put, which is the opposite
+   of the rule and was invisible until the rack was half full. It always pushes
+   from the left, and on an EMPTY rack it does nothing at all.
+
+N87. Never break the leftmost tie-break by sorting the hunters' candidates. The
+   rule is "the leftmost tied card wins", and it holds because `max` iterates
+   the cards in DEALT order and keeps the first maximum. Reordering that list
+   anywhere — including for display — changes the game rule.
+
+N88. Never let a screen count the votes. ModVoteCast carries the engine's whole
+   tally; a screen that recomputed it would be a second opinion about who won,
+   and the two would drift the moment a vote was changed.
+
+N89. Never assume the Mod Patusa overlay only has to serve one side. In edit
+   mode one person owns every seat, so it hands the same player Piotrek's pick
+   and then each hunter's vote in turn. The first version marked Piotrek's side
+   "settled" and stopped there, and the selection could never finish — which
+   also froze the table, because the pause only lifts when both sides have
+   chosen.
+
+N90. Never add a settings row without re-running tests/test_menu_layout.py at
+   the smallest window. The menu's fitting loop accepted a layout on row height
+   alone and had been quietly letting the footer hang off the bottom; a fifth
+   row made it visible. It now checks the real bottom edge — keep it that way.
+
 
 ================================================================================
 RECOMMENDED ORDER OF FUTURE DEVELOPMENT
@@ -2133,6 +2347,12 @@ HOW TO VERIFY A CHANGE
                                    and the secrecy, which is checked by looking
                                    at what the OTHER machines know while the
                                    match is still running
+      tests/test_mod_selection.py — the Mod Patusa round: when it fires, what
+                                   each faction is dealt, which slot each side
+                                   owns, one-vote-per-hunter and changing it,
+                                   the leftmost tie-break, that the pause
+                                   refuses moves locally AND remotely, and that
+                                   an open selection is in the fingerprint
       tests/test_usability.py    — every editable field, held-key repeat, the
                                    copy buttons and their placement at four
                                    resolutions, the remembered address, and

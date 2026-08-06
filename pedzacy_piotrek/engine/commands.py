@@ -149,6 +149,34 @@ class DiscardMod(Command):
 
 
 @dataclass(frozen=True)
+class ChooseMod(Command):
+    """Piotrek picks one of the three Mods Patusa he was dealt.
+
+    Only the seat holding Piotrek may issue this, and only while a selection is
+    open.  The engine checks the uid against the candidates it dealt rather than
+    trusting the message, so a client cannot name a card it was never offered.
+    """
+
+    kind: ClassVar[str] = "choose_mod"
+    player_index: int = 0
+    card_uid: int = 0
+
+
+@dataclass(frozen=True)
+class VoteMod(Command):
+    """One hunter's vote for one of the three Mods Patusa on offer.
+
+    Votes are PUBLIC — every hunter sees the tally build up — and a hunter may
+    change theirs until the last one has voted, which is why this replaces the
+    seat's previous vote instead of being refused as a duplicate.
+    """
+
+    kind: ClassVar[str] = "vote_mod"
+    player_index: int = 0
+    card_uid: int = 0
+
+
+@dataclass(frozen=True)
 class DrawCharacter(Command):
     kind: ClassVar[str] = "draw_character"
     player_index: int = 0
@@ -282,6 +310,8 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
         KeepChestCards,
         PlaceMod,
         DiscardMod,
+        ChooseMod,
+        VoteMod,
         DrawCharacter,
         DrawSkill,
         DiscardTopCharacterCard,

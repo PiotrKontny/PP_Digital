@@ -109,6 +109,10 @@ class LobbyState:
     host_peer_id: str = ""
     board_cells: int = RULES.board_cells_default
     chest_open_round: int = RULES.chest_open_default
+    #: When the table first pauses to choose Mods Patusa, and how many rounds
+    #: apart the pauses are after that.
+    mod_round_first: int = RULES.mod_round_first_default
+    mod_round_interval: int = RULES.mod_round_interval_default
     double_percent: int = RULES.double_frequency_default
     #: Development option: a two-player table is enough to start.  Set by the
     #: host and broadcast, so every client shows the same requirement.
@@ -194,6 +198,8 @@ class LobbyState:
             num_players=len(ordered),
             board_cells=self.board_cells,
             chest_open_round=self.chest_open_round,
+            mod_round_first=self.mod_round_first,
+            mod_round_interval=self.mod_round_interval,
             character_choices=[s.character or None for s in ordered],
             double_frequency=self.double_percent / 100.0,
             debug_version=self.debug_version,
@@ -218,6 +224,8 @@ class LobbyState:
             "host_peer_id": self.host_peer_id,
             "board_cells": self.board_cells,
             "chest_open_round": self.chest_open_round,
+            "mod_round_first": self.mod_round_first,
+            "mod_round_interval": self.mod_round_interval,
             "double_percent": self.double_percent,
             "debug_version": self.debug_version,
             "started": self.started,
@@ -232,6 +240,10 @@ class LobbyState:
             host_peer_id=str(raw.get("host_peer_id", "")),
             board_cells=int(raw.get("board_cells", RULES.board_cells_default)),
             chest_open_round=int(raw.get("chest_open_round", RULES.chest_open_default)),
+            mod_round_first=int(raw.get("mod_round_first",
+                                        RULES.mod_round_first_default)),
+            mod_round_interval=int(raw.get("mod_round_interval",
+                                           RULES.mod_round_interval_default)),
             double_percent=int(raw.get("double_percent",
                                        RULES.double_frequency_default)),
             debug_version=bool(raw.get("debug_version", False)),

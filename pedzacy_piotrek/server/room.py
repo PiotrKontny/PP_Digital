@@ -293,6 +293,12 @@ class Room:
         if "chest_open_round" in payload:
             lobby.chest_open_round = max(RULES.chest_open_min,
                                          int(payload["chest_open_round"]))
+        if "mod_round_first" in payload:
+            lobby.mod_round_first = max(RULES.mod_round_first_min,
+                                        int(payload["mod_round_first"]))
+        if "mod_round_interval" in payload:
+            lobby.mod_round_interval = max(RULES.mod_round_interval_min,
+                                           int(payload["mod_round_interval"]))
         if "double_percent" in payload:
             lobby.double_percent = max(0, min(100, int(payload["double_percent"])))
         if "debug_version" in payload:

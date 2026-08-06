@@ -324,12 +324,22 @@ class HostSetupScreen(_FormScreen):
     FIELD_H = 44
     LABEL_GAP = 24
     ROW_GAP = 18
-    MIN_ROW_GAP = 5
+    #: Floor for the elastic gaps.  Three rather than five since stage 21: the
+    #: Mod Patusa row is a fifth setting on a screen that already only just fit
+    #: a 1280×760 window, and two pixels a row buys it back without anything
+    #: touching.
+    MIN_ROW_GAP = 3
+    #: How far the two Mod Patusa steppers sit either side of the centre line.
+    MOD_SPLIT = 150
 
     def __init__(self, app: App, library: ContentLibrary) -> None:
         super().__init__(app, library)
         self.board_cells = RULES.board_cells_default
         self.chest_round = RULES.chest_open_default
+        #: When the table first pauses to choose Mody Patusa, and the gap
+        #: between pauses after that.
+        self.mod_first = RULES.mod_round_first_default
+        self.mod_interval = RULES.mod_round_interval_default
         self.double_percent = RULES.double_frequency_default
         self.debug_version = False
         self.run_local_server = False
@@ -376,12 +386,12 @@ class HostSetupScreen(_FormScreen):
 
         fixed = (
             len(self.inputs) * (self.LABEL_GAP + self.FIELD_H)
-            + 3 * (label_h + 4 + stepper_h)   # three stepper rows
+            + 4 * (label_h + 4 + stepper_h)   # four stepper rows
             + 2 * (20 + hint_h)               # two option rows with hints
             + button_h + 12 + back_h          # create + gap + back
             + 14 + error_h                    # room for a message
         )
-        gaps = len(self.inputs) + 3 + 3
+        gaps = len(self.inputs) + 4 + 3
         spare = layout.win_h - top - fixed - 16
         self.ROW_GAP = max(self.MIN_ROW_GAP, min(18, spare // max(1, gaps)))
 
@@ -400,6 +410,16 @@ class HostSetupScreen(_FormScreen):
             setattr(self, name, stepper)
             self.stepper_rows.append((y, stepper))
             y = stepper.rects["value"].bottom + self.ROW_GAP
+
+        # The two Mod Patusa numbers read as one setting — "od rundy 3, co 2
+        # rundy" — so they share a row either side of the centre line.  Two
+        # full-width rows here pushed the error line off a 1280x760 window.
+        self.mod_row_y = y
+        self.mod_first_stepper = Stepper(centre - self.MOD_SPLIT,
+                                         y + label_h + 4, value_w=64, r=r)
+        self.mod_interval_stepper = Stepper(centre + self.MOD_SPLIT,
+                                            y + label_h + 4, value_w=64, r=r)
+        y = self.mod_first_stepper.rects["value"].bottom + self.ROW_GAP
 
         self.local_row_y = y + 2
         self.local_checkbox.rect.topleft = (centre - 190, self.local_row_y)
@@ -431,6 +451,15 @@ class HostSetupScreen(_FormScreen):
         delta = self.chest_stepper.hit(mouse)
         if delta:
             self.chest_round = max(RULES.chest_open_min, self.chest_round + delta)
+            return
+        delta = self.mod_first_stepper.hit(mouse)
+        if delta:
+            self.mod_first = max(RULES.mod_round_first_min, self.mod_first + delta)
+            return
+        delta = self.mod_interval_stepper.hit(mouse)
+        if delta:
+            self.mod_interval = max(RULES.mod_round_interval_min,
+                                    self.mod_interval + delta)
             return
         delta = self.doubles_stepper.hit(mouse)
         if delta:
@@ -477,6 +506,8 @@ class HostSetupScreen(_FormScreen):
 
         service.set_settings(board_cells=self.board_cells,
                              chest_open_round=self.chest_round,
+                             mod_round_first=self.mod_first,
+                             mod_round_interval=self.mod_interval,
                              double_percent=self.double_percent,
                              debug_version=self.debug_version)
         self._enter_lobby(service, embedded=embedded)
@@ -506,6 +537,11 @@ class HostSetupScreen(_FormScreen):
             r.text(label, r.fonts.get(16), r.theme.text_light, surface,
                    midtop=(centre, label_y))
             stepper.draw(r, value, mouse, surface)
+
+        r.text("Wybór Modów Patusa — od rundy / co ile rund", r.fonts.get(16),
+               r.theme.text_light, surface, midtop=(centre, self.mod_row_y))
+        self.mod_first_stepper.draw(r, str(self.mod_first), mouse, surface)
+        self.mod_interval_stepper.draw(r, str(self.mod_interval), mouse, surface)
 
         self._option(surface, self.local_checkbox,
                      "Uruchom serwer na tym komputerze",

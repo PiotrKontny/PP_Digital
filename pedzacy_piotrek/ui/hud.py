@@ -329,6 +329,20 @@ class ModPanel(Panel):
         if placing:
             r.text("kliknij slot", r.fonts.label(), theme.mod_select_ring, surface,
                    midtop=(panel.centerx, layout.mod_label_y + layout.section_line_h))
+        else:
+            # The same line the "kliknij slot" hint uses, which is free the rest
+            # of the time.  The table already knows when the chest opens; the
+            # mods are the other thing worth counting down to, and a round that
+            # pauses everything should not arrive as a surprise.
+            if state.mod_selection_open:
+                note, colour = "wybór trwa…", theme.accent
+            else:
+                due = state.next_mod_round()
+                note = ("wybór w tej rundzie" if due == state.round_number
+                        else f"następny wybór: runda {due}")
+                colour = theme.text_dim
+            r.text(note, r.fonts.label(), colour, surface,
+                   midtop=(panel.centerx, layout.mod_label_y + layout.section_line_h))
 
         for slot in range(layout.mod_slot_count):
             rect = layout.mod_slot_rect(slot)
