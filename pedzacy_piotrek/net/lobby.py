@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from ..config import settings
-from ..config.settings import RULES, SessionConfig, clamp_mod_counts
+from ..config.settings import (RULES, SessionConfig, clamp_ability_uses,
+                               clamp_card_counts, clamp_mod_counts)
 
 #: What a player is called when they do not say.
 DEFAULT_NICKNAME = "Player"
@@ -117,6 +118,13 @@ class LobbyState:
     #: MEANS "as printed in cards.json" — an older client, or a host that never
     #: opened the panel, must not seat a table with no mods in it.
     mod_counts: Dict[str, int] = field(default_factory=dict)
+    #: The same for the Movement and Chest decks, and the charges every
+    #: character ability starts with.  All three follow mod_counts exactly:
+    #: empty means "as printed", and an older client sending none of them still
+    #: gets the real decks.
+    movement_counts: Dict[str, int] = field(default_factory=dict)
+    chest_counts: Dict[str, int] = field(default_factory=dict)
+    ability_uses: Dict[str, int] = field(default_factory=dict)
     double_percent: int = RULES.double_frequency_default
     #: Development option: a two-player table is enough to start.  Set by the
     #: host and broadcast, so every client shows the same requirement.
@@ -205,6 +213,9 @@ class LobbyState:
             mod_round_first=self.mod_round_first,
             mod_round_interval=self.mod_round_interval,
             mod_counts=dict(self.mod_counts),
+            movement_counts=dict(self.movement_counts),
+            chest_counts=dict(self.chest_counts),
+            ability_uses=dict(self.ability_uses),
             character_choices=[s.character or None for s in ordered],
             double_frequency=self.double_percent / 100.0,
             debug_version=self.debug_version,
@@ -234,6 +245,9 @@ class LobbyState:
             # Sorted, because this dictionary is part of the picture every
             # client compares against the host's.
             "mod_counts": clamp_mod_counts(self.mod_counts),
+            "movement_counts": clamp_card_counts(self.movement_counts),
+            "chest_counts": clamp_card_counts(self.chest_counts),
+            "ability_uses": clamp_ability_uses(self.ability_uses),
             "double_percent": self.double_percent,
             "debug_version": self.debug_version,
             "started": self.started,
@@ -253,6 +267,9 @@ class LobbyState:
             mod_round_interval=int(raw.get("mod_round_interval",
                                            RULES.mod_round_interval_default)),
             mod_counts=clamp_mod_counts(raw.get("mod_counts")),
+            movement_counts=clamp_card_counts(raw.get("movement_counts")),
+            chest_counts=clamp_card_counts(raw.get("chest_counts")),
+            ability_uses=clamp_ability_uses(raw.get("ability_uses")),
             double_percent=int(raw.get("double_percent",
                                        RULES.double_frequency_default)),
             debug_version=bool(raw.get("debug_version", False)),

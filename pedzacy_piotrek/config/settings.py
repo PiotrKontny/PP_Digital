@@ -68,7 +68,10 @@ class Rules:
     board_cells_default: int = 24
 
     chest_open_min: int = 1
-    chest_open_default: int = 3
+    #: The chest opens on round SIX (stage 26; it was 3).  Opening it that
+    #: early made the special cards the opening move rather than a turn of the
+    #: game, which is a balance decision and therefore a number, not a rule.
+    chest_open_default: int = 6
 
     #: Above this many players the chest is handed out every eligible round.
     #: At or below it the rota comes round often enough that a card a round is
@@ -94,6 +97,18 @@ class Rules:
     #: because the composition of the deck is content, not code.
     mod_count_min: int = 0
     mod_count_max: int = 9
+
+    #: The same, for the Movement and Chest decks, which stage 26 made
+    #: configurable too.  A wider ceiling because those decks are printed with
+    #: up to six copies of a title where the mods have two.
+    card_count_min: int = 0
+    card_count_max: int = 12
+
+    #: Bounds on a character ability's charges.  Zero is allowed and means the
+    #: ability is in the game but unusable, which is a legitimate way to try a
+    #: character without its power rather than a broken state.
+    ability_uses_min: int = 0
+    ability_uses_max: int = 9
 
     #: Piotrek acts on every Nth turn slot of a round (slot 0, 3, 6, ...).
     piotrek_turn_period: int = 3
@@ -249,6 +264,16 @@ class SessionConfig:
     #: client, or by a test that never opened the panel, still gets the real
     #: deck instead of an empty one.
     mod_counts: dict[str, int] = field(default_factory=dict)
+    #: The same, for the Movement and Chest decks (stage 26).  Separate fields
+    #: rather than one nested mapping because ``mod_counts`` is already on the
+    #: wire, in the lobby snapshot and in a dozen tests: a client on an older
+    #: build sends the old field and still gets the deck it asked for.
+    movement_counts: dict[str, int] = field(default_factory=dict)
+    chest_counts: dict[str, int] = field(default_factory=dict)
+    #: Character title → how many times its ability may be used.  EMPTY MEANS
+    #: "as printed", exactly as the count mappings do, so a table that never
+    #: opened the panel gets the values in characters.json.
+    ability_uses: dict[str, int] = field(default_factory=dict)
     character_choices: list[str | None] = field(default_factory=list)
     #: Probability that a row of the board is widened into a doubled position
     #: (12a / 12b).  ``None`` keeps the board theme's fixed pattern.
@@ -303,18 +328,26 @@ class SessionConfig:
             character_choices=choices[:players],
             double_frequency=frequency,
             mod_counts=clamp_mod_counts(self.mod_counts),
+            movement_counts=clamp_card_counts(self.movement_counts),
+            chest_counts=clamp_card_counts(self.chest_counts),
+            ability_uses=clamp_ability_uses(self.ability_uses),
             local_seat=max(0, min(players - 1, self.local_seat)),
         )
 
 
-def clamp_mod_counts(counts: "Mapping[str, int] | None") -> dict[str, int]:
-    """Force a mod-count mapping into its legal range, dropping junk.
+def clamp_title_map(counts: "Mapping[str, int] | None",
+                    low: int, high: int) -> dict[str, int]:
+    """Force a title → number mapping into a legal range, dropping junk.
 
     Shared by the config, the lobby and the server so a hand-written message
     cannot seat a deck with -3 copies of a card in it, and so all three agree
     about what a given payload means.  Sorted by title on the way out: this
     ends up in the lobby snapshot every client compares, and two dictionaries
     with the same pairs in a different order are the same settings.
+
+    One implementation for all four mappings stage 26 ended up with.  Four
+    copies of this differing only in their bounds is how one of them quietly
+    stops sorting and a whole table starts resyncing.
     """
     if not counts:
         return {}
@@ -324,6 +357,20 @@ def clamp_mod_counts(counts: "Mapping[str, int] | None") -> dict[str, int]:
             number = int(value)
         except (TypeError, ValueError):
             continue
-        clean[str(title)] = max(RULES.mod_count_min,
-                                min(RULES.mod_count_max, number))
+        clean[str(title)] = max(low, min(high, number))
     return {title: clean[title] for title in sorted(clean)}
+
+
+def clamp_mod_counts(counts: "Mapping[str, int] | None") -> dict[str, int]:
+    """Legal copies of each Mod Patusa."""
+    return clamp_title_map(counts, RULES.mod_count_min, RULES.mod_count_max)
+
+
+def clamp_card_counts(counts: "Mapping[str, int] | None") -> dict[str, int]:
+    """Legal copies of each Movement or Chest card."""
+    return clamp_title_map(counts, RULES.card_count_min, RULES.card_count_max)
+
+
+def clamp_ability_uses(uses: "Mapping[str, int] | None") -> dict[str, int]:
+    """Legal charges for a character ability."""
+    return clamp_title_map(uses, RULES.ability_uses_min, RULES.ability_uses_max)

@@ -67,27 +67,31 @@ def host_screen(library, size=(1600, 900)):
 # ── the panel opens, counts, and closes ──────────────────────────────────────
 def test_the_panel_starts_shut(library):
     screen, _ = menu(library)
-    assert not screen.mod_counts_panel.active
+    assert not screen.settings_panel.active
 
 
 def test_the_button_opens_it(library):
     screen, _ = menu(library)
     click(screen, screen.mod_deck_button.rect.center)
-    assert screen.mod_counts_panel.active
+    assert screen.settings_panel.active
 
 
 def test_it_offers_every_mod_in_the_deck(library):
     """Read from the data file, so a new mod needs no code here."""
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     assert panel.titles == [c.title for c in
                             library.deck(settings.DECK_MODS).cards]
-    assert len(panel.steppers) == len(panel.titles)
+    # One stepper per VISIBLE row since stage 26, not one per title: the
+    # movement tab is thirty titles long and the list scrolls.  Eight mods fit
+    # in one screenful, so every mod still has a row of its own.
+    assert len(panel.visible_titles) == len(panel.titles)
+    assert len(panel.steppers) >= len(panel.titles)
 
 
 def test_the_defaults_are_the_printed_deck(library):
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     assert panel.counts == {
         "Speedrun": 2, "Masa solna": 2, "AKO": 1, "Halloween": 1,
         "Sesja na PG": 2, "Paczka": 2, "Squid Game": 1, "Shady": 2,
@@ -98,7 +102,7 @@ def test_the_defaults_are_the_printed_deck(library):
 
 def test_the_steppers_change_one_card_each(library):
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     click(screen, screen.mod_deck_button.rect.center)
 
     index = panel.titles.index("Speedrun")
@@ -115,7 +119,7 @@ def test_the_steppers_change_one_card_each(library):
 
 def test_a_count_cannot_go_below_zero_or_past_the_ceiling(library):
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     click(screen, screen.mod_deck_button.rect.center)
     index = panel.titles.index("AKO")
 
@@ -132,14 +136,14 @@ def test_a_count_cannot_go_below_zero_or_past_the_ceiling(library):
 
 def test_zero_is_allowed_because_leaving_a_mod_out_is_a_real_choice(library):
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     panel.counts["Shady"] = 0
     assert panel.total == 11
 
 
 def test_the_reset_button_restores_the_printed_deck(library):
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     click(screen, screen.mod_deck_button.rect.center)
     panel.counts["Speedrun"] = 7
     click(screen, panel.reset_button.rect.center)
@@ -148,7 +152,7 @@ def test_the_reset_button_restores_the_printed_deck(library):
 
 def test_done_and_escape_both_close_it(library):
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
 
     click(screen, screen.mod_deck_button.rect.center)
     click(screen, panel.close_button.rect.center)
@@ -162,7 +166,7 @@ def test_done_and_escape_both_close_it(library):
 
 def test_clicking_away_closes_it(library):
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     click(screen, screen.mod_deck_button.rect.center)
     click(screen, (4, 4))
     assert not panel.active
@@ -171,7 +175,7 @@ def test_clicking_away_closes_it(library):
 def test_it_warns_about_a_deck_too_small_to_choose_from(library):
     """A selection deals three cards to each of two factions."""
     screen, _ = menu(library)
-    panel = screen.mod_counts_panel
+    panel = screen.settings_panel
     assert panel.warning == ""
     for title in panel.titles:
         panel.counts[title] = 0
@@ -194,7 +198,7 @@ def test_an_open_panel_swallows_clicks_meant_for_the_screen_beneath(library):
     assert screen.num_players == before
 
     # ...and works again once the panel is shut.
-    click(screen, screen.mod_counts_panel.close_button.rect.center)
+    click(screen, screen.settings_panel.close_button.rect.center)
     click(screen, screen.players_stepper.rects["minus1"].center)
     assert screen.num_players == before - 1
 
@@ -203,9 +207,9 @@ def test_an_open_panel_swallows_clicks_meant_for_the_screen_beneath(library):
 def test_the_counts_travel_with_the_session_config(library):
     screen, captured = menu(library)
     click(screen, screen.mod_deck_button.rect.center)
-    index = screen.mod_counts_panel.titles.index("Halloween")
-    click(screen, screen.mod_counts_panel.steppers[index].rects["plus1"].center)
-    click(screen, screen.mod_counts_panel.close_button.rect.center)
+    index = screen.settings_panel.titles.index("Halloween")
+    click(screen, screen.settings_panel.steppers[index].rects["plus1"].center)
+    click(screen, screen.settings_panel.close_button.rect.center)
     click(screen, screen.start_button.rect.center)
 
     assert captured, "the game never started"
@@ -215,7 +219,7 @@ def test_the_counts_travel_with_the_session_config(library):
 def test_the_config_builds_the_deck_it_describes(library):
     """The panel to the pile, in one step, the way the menu does it."""
     screen, captured = menu(library)
-    screen.mod_counts_panel.counts["Speedrun"] = 5
+    screen.settings_panel.counts["Speedrun"] = 5
     click(screen, screen.start_button.rect.center)
     config = captured[0]
 
@@ -231,9 +235,9 @@ def test_the_config_builds_the_deck_it_describes(library):
 # ── the host screen offers exactly the same thing ────────────────────────────
 def test_the_host_screen_has_the_same_panel(library):
     screen = host_screen(library)
-    assert screen.mod_counts_panel.titles == [
+    assert screen.settings_panel.titles == [
         c.title for c in library.deck(settings.DECK_MODS).cards]
-    assert screen.mod_counts_panel.is_default
+    assert screen.settings_panel.is_default
 
 
 def test_the_host_button_opens_the_panel(library):
@@ -243,12 +247,12 @@ def test_the_host_button_opens_the_panel(library):
                            pos=screen.mod_deck_button.rect.center, button=1),
         screen.mod_deck_button.rect.center,
     )
-    assert screen.mod_counts_panel.active
+    assert screen.settings_panel.active
 
 
 def test_the_open_host_panel_is_modal_too(library):
     screen = host_screen(library)
-    screen.mod_counts_panel.open()
+    screen.settings_panel.open()
     before = screen.board_cells
     position = screen.cells_stepper.rects["minus1"].center
     screen.handle_click(
@@ -283,23 +287,23 @@ def test_the_deck_button_never_lands_on_another_row(library, size):
 @pytest.mark.parametrize("size", [(1280, 760), (1920, 1080)])
 def test_the_panel_fits_the_window(library, size):
     screen, _ = menu(library, size)
-    screen.mod_counts_panel.open()
-    panel = screen.mod_counts_panel.panel
+    screen.settings_panel.open()
+    panel = screen.settings_panel.panel
     assert panel.width <= size[0] and panel.height <= size[1]
     assert panel.top >= 0 and panel.bottom <= size[1]
-    for stepper in screen.mod_counts_panel.steppers:
+    for stepper in screen.settings_panel.steppers:
         for rect in stepper.rects.values():
             assert panel.contains(rect), "a stepper hangs out of the panel"
 
 
 def test_the_panel_survives_a_resize(library):
     screen, _ = menu(library)
-    screen.mod_counts_panel.open()
-    screen.mod_counts_panel.counts["Speedrun"] = 4
+    screen.settings_panel.open()
+    screen.settings_panel.counts["Speedrun"] = 4
     screen.app.layout.resize(1280, 760)
     screen.on_resize()
-    assert screen.mod_counts_panel.counts["Speedrun"] == 4, "settings lost"
-    assert screen.mod_counts_panel.active
+    assert screen.settings_panel.counts["Speedrun"] == 4, "settings lost"
+    assert screen.settings_panel.active
 
 
 # ── Sesja na PG greys the ability button ─────────────────────────────────────

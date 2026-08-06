@@ -29,7 +29,8 @@ from .app import App, Screen
 from .board_view import BoardView
 from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
-from .match_overlays import MatchStartOverlay, VictoryOverlay
+from .match_overlays import (EliminationNotice, MatchStartOverlay,
+                             VictoryOverlay)
 from .overlays import (
     CardPicker, ChestChoice, ChestHoldingView, ChestReveal, ChoicePrompt,
     ModChoice, PauseMenu, RevealOverlay, RevealPhase,
@@ -137,6 +138,9 @@ class GameScreen(Screen):
         #: rather than enforcement.
         self.match_start = MatchStartOverlay()
         self.victory = VictoryOverlay()
+        #: "<colour> to nie Piotrek", as a card beside the board.  The status
+        #: bar said it in the corner nobody watches while a tower is lifted.
+        self.elimination_notice = EliminationNotice()
         self.chest_choice_seat: int = 0
         self.debug_panel = NetworkDebugPanel(enabled=settings.NETWORK_DEBUG)
 
@@ -646,6 +650,10 @@ class GameScreen(Screen):
         """
         pawn = self.state.library.pawn(event.pawn_id)
         name = pawn.name if pawn is not None else event.pawn_id
+        colour = pawn.color if pawn is not None else self.app.renderer.theme.invalid
+        self.elimination_notice.show(name, colour)
+        # Kept as well as the card, not instead of it: the status bar is the
+        # log of what just happened and a player who looked away still has it.
         self.status_bar.notify(f"Sprawdzono wieżę: {name} to nie Piotrek", 5.0)
 
     def _on_match_ended(self, event: ev.MatchEnded) -> None:
@@ -653,6 +661,7 @@ class GameScreen(Screen):
         self.chest_choice.hide()
         self.mod_choice.hide()
         self.reveal.dismiss()
+        self.elimination_notice.hide()
         self._sync_match_overlays()
 
     def _sync_match_overlays(self) -> None:
@@ -1297,6 +1306,7 @@ class GameScreen(Screen):
         self.mod_choice.update(dt, self.app.layout, mouse)
         self.card_picker.update(dt, self.app.layout, mouse)
         self.chest_reveal.update(dt)
+        self.elimination_notice.update(dt)
         if self._spotlight_left > 0.0:
             # Counts down in real time and only affects the picture: the walk
             # it is holding back has already happened as far as the rules are
@@ -1412,6 +1422,9 @@ class GameScreen(Screen):
         self._draw_turn_banner(ctx)
         self._draw_return_button(ctx)
         self._draw_end_turn_button(ctx)
+        # Above the board and below every dialog: it is an announcement, not a
+        # question, so nothing it covers is anything the player must click.
+        self.elimination_notice.draw(self.app.renderer, self.app.layout, surface)
         self.choice_prompt.draw(self.app.renderer, self.app.layout, surface, ctx.mouse)
         self.reveal.draw(self.app.renderer, self.cards, self.app.layout, surface)
         self.chest_choice.draw(self.app.renderer, self.cards, self.app.layout,

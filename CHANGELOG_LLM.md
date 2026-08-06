@@ -2916,3 +2916,183 @@ confirm.**
 - AKO is the last mod without an effect, and it is the only one whose text
   ("Wszystkie ruchy poruszają jednego sąsiadującego pionka") still needs a
   ruling from the owner before it can be written.
+
+---
+
+## Stage 26 — Settings that cover the whole table, and type you can read
+**Date:** 2026-08-06
+
+### Goal
+Four settings tabs instead of one, two new default numbers, better use of the
+pixels a 1920×1200 laptop has, and two pieces of feedback that were too easy to
+miss. No gameplay, no networking model, no card logic, no mod behaviour.
+
+### 1. One panel, four tabs
+`ui/mod_counts_panel.py` became `ui/settings_panel.py`, and `ModCountsPanel`
+became `GameSettingsPanel`: Karty ruchu, Mody Patusa, Karty Skrzyni,
+Umiejętności. The rename is honest rather than cosmetic — the file no longer
+describes one deck.
+
+A tab is a `SettingsTab` record: where its rows come from, what bounds them,
+what its numbers add up to and what is wrong with them. Nothing else differs
+between the four, so a fifth category is one entry in `_build_tabs` and no new
+drawing code. Every title and every default is read from the LOADED DATA, so a
+card added to cards.json appears in the panel with no code change.
+
+**The movement deck has thirty titles and no window is tall enough**, so the
+list scrolls — wheel, arrow keys, a thumb and an "1–17 z 30" counter — rather
+than the rows shrinking into illegibility. The steppers are built per VISIBLE
+row and zipped against `visible_titles`, which is the one thing to keep in mind
+when touching this: the row you click is not the nth title.
+
+**Umiejętności configures charges, not copies**, and lists both ability decks in
+one place — a Piotrek skill is an ability with a number of uses exactly as a
+character's is. Cards with no ability are left out: a charge counter on a card
+that can never spend one is a control that does nothing.
+
+`Domyślne` resets the VISIBLE tab only. A player who spent five minutes on the
+movement deck and then wanted the mods back as printed should not lose the lot
+to one button, and the button sits under the tab it undoes.
+
+### 2. The numbers underneath
+`SessionConfig` gained `movement_counts`, `chest_counts` and `ability_uses`
+beside the existing `mod_counts`. Separate fields rather than one nested
+mapping, because `mod_counts` is already on the wire, in the lobby snapshot and
+in a dozen tests — a client on an older build sends the old field and still gets
+the deck it asked for. All four follow the same rule: EMPTY MEANS AS PRINTED.
+
+`DeckDef.with_uses` mirrors `with_counts` (same two load-bearing properties: an
+absent title keeps its printed value, and the card ORDER stays the JSON's, or
+two machines shuffle differently from one seed). `setup.build_decks` applies all
+four BEFORE the shuffle.
+
+The four clamps are one `clamp_title_map` with three thin wrappers, and the
+server merges the three new mappings in one loop rather than three copies of the
+`mod_counts` block. Four hand-written merges differing only in their clamp is
+how one of them quietly stops merging.
+
+### 3. New defaults
+`chest_open_default` 3 → **6**. `mod_round_first_default` was already 3 and is
+unchanged. Nothing else moved.
+
+### 4. Scaling — what was actually wrong
+Measured before changing anything, and the numbers say it plainly:
+
+    resolution    ui_scale   hand card   panel card
+    1920x1080       1.00      162x232      113x162
+    1920x1200       1.11      180x258      125x179
+    2560x1440       1.33      182x260      157x224
+    3840x2160       1.80      182x260      186x265
+
+**A 4K screen showed exactly the same 182×260 hand card as a 1920×1200 laptop.**
+Two flat ceilings did it: `hand_h` capped at 300 and the hand card at 260, so
+every pixel past about 1224 tall went into margin. Both now scale with
+`ui_scale`.
+
+The second half is the reference height, moved from 1080 to **1000**. Keyed to
+1080, a 1920×1200 laptop — a physically small panel with a lot of pixels — ran
+at 1.11 while a 2560×1440 desktop monitor was comfortable at 1.33. Moving the
+reference lifts the middle of the range about 8% and leaves both ends where they
+were: 1280×760 is still on the floor and 4K still on the ceiling.
+
+    after:        ui_scale   hand card   panel card
+    1280x760        0.85      114x163       75x108
+    1920x1080       1.08      162x232      112x161
+    1920x1200       1.20      180x258      123x177
+    2560x1440       1.44      216x309      149x213
+    3840x2160       1.80      325x465      239x341
+
+Board share stays 0.60–0.71 of the window at every size, so the cards were not
+paid for out of the board.
+
+**Enlarged previews were already correct and were verified rather than changed.**
+`CardRenderer.quantised` has no ceiling, so a hovered card at 1920×1200 is
+painted at 386×552 and not zoomed from 180×258 — stage 9's work, now working
+from a bigger base. There is a test that measures it at two resolutions.
+
+### 5. Two bugs the bigger type exposed
+Both were latent and both are the same shape: a box that stopped growing while
+its contents did not.
+
+- **The deck label band** was capped at a flat 26px, so at 1440p a deck name
+  overflowed its own band and touched the card below. The ceiling scales now, in
+  both the place that budgets the column's width and the place that spends its
+  height — the two have to agree about how tall a label line is.
+- **"UMIEJĘTNOŚCI PIOTRKA2 / 0"** — the longest deck name in the game ran
+  straight into its own counter. The counters own the right of the band and
+  cannot shrink, because they are the data; the NAME is fitted to what is left.
+  Found by rendering the right column and looking at it, not by the suite: the
+  existing collision test walks the LEFT column only, so Piotrek's panel had
+  never been measured. The new test renders and reads back what was actually
+  drawn, and it fails at exactly the three resolutions where the bug appeared.
+
+### 6. "Nie Piotrek", where it can be seen
+A failed check was one line in the status bar, in the corner of the screen
+nobody watches while a tower is being lifted — the single most important thing
+the hunters learn all game was the easiest thing on screen to miss.
+
+It is now a card against the inside of the board's left edge: heavy red cross,
+the colour's own dot, `ŻÓŁTY` / `TO NIE PIOTREK`. It fades in, holds 3.4 s and
+fades out, and it swallows no input at any point — there is a test that clicks
+straight through it. Inside the board rather than in the left column because
+that column is full at every supported size, and a notice that only fits on a
+big monitor is a notice that is missed on the machine that reported the problem.
+The status-bar line stays as well: the card is the announcement, the bar is the
+log for somebody who looked away.
+
+Driven from the event rather than from the state, which is the opposite of N74
+and deliberately so: this is a MOMENT, not a condition, and a reconnecting
+client replaying twenty commands should not be shown four announcements it
+missed. Each show replaces the last, so it is not.
+
+### 7. The eliminated colour
+A flat 4-pixel line — a hairline on a 1440p panel. Now the disc is drained, the
+ring is red, and the cross is `Renderer.heavy_cross`: thickness a SHARE OF ITS
+SIZE rather than a pixel count, with a darker cross behind it for contrast.
+
+It lives in the renderer, not in either caller, so the notepad and the
+board-side notice cannot drift into two different marks. Drawn rather than
+typed, because the crossed glyphs are not in every font the game may fall back
+to and a missing glyph is a blank box exactly where the clearest mark on screen
+should be.
+
+### Tests
+**995 passing** (944 before, +51), ~150 s.
+
+- `tests/test_settings_panel.py` (new, 51): every category has a tab; the deck
+  tabs and the ability tab are seeded from the data; a card with no ability gets
+  no row; clicking a tab changes the list; a stepper changes only its own tab;
+  values cannot leave their range; the long tab scrolls and cannot be scrolled
+  off either end; reset touches one tab; a tab warns when its deck cannot work;
+  the panel, its tab strip, its steppers and its buttons all fit at three
+  resolutions; the numbers reach `SessionConfig`, the built decks and the actual
+  cards; an empty mapping still means the printed decks; the clamps reject junk
+  and sort; all three new mappings reach every client, produce identical decks
+  and merge rather than replace; the host screen offers the same panel; both new
+  defaults; a taller display gets a bigger card at three steps; 1920×1200 is no
+  longer the odd one out; the board keeps its share at five sizes; an enlarged
+  preview is painted at full size; the notice appears, sits beside the board,
+  fades, swallows no input and is actually painted; the elimination mark scales
+  and a bigger window draws a bigger one; and the heading-collision regression.
+- `tests/test_mod_counts_ui.py`: updated for the rename and for one stepper per
+  VISIBLE row rather than per title. No assertion was weakened — it is still the
+  proof that the Mody Patusa tab behaves exactly as the old panel did.
+
+### Verification
+- 995 tests; `--selftest` exits 0; `inspect_frame.py` 0 problems at 1280×760,
+  1920×1200, 2560×1440 and 3840×2160.
+- Every tab rendered at 1920×1200 and 1280×760 and inspected; the game rendered
+  at 1920×1200 with a card hovered; the notice and the notepad rendered and
+  inspected; the right column re-rendered after the heading fix.
+- The heading regression test was run against the un-fixed code first and fails
+  at three of five resolutions, so it is known to catch what it describes.
+
+### Notes
+- The reset button resetting one tab rather than all four is a judgement call.
+  If the owner wants "put everything back", it is one line — but a single button
+  that can undo four tabs of work without asking is the kind of thing that only
+  gets noticed the once.
+- `ui_scale`'s reference height is now the one number that moves the whole
+  interface. If any future screen looks cramped at one resolution and fine at
+  another, that constant is the first place to look and the last place to
+  special-case.

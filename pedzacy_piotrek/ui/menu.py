@@ -23,7 +23,7 @@ from ..config import settings
 from ..config.settings import RULES, SessionConfig
 from .app import App, Screen
 from .headings import content_top, draw_title
-from .mod_counts_panel import ModCountsPanel
+from .settings_panel import GameSettingsPanel
 from .widgets import BUTTON_TEXT_SIZE, Button, Checkbox, Dropdown, Stepper
 
 ROW_H = 38
@@ -94,8 +94,8 @@ class MenuScreen(Screen):
         self._build_rows()
 
         # The deck composition is a panel rather than eight more rows: see
-        # ui/mod_counts_panel.py for why the rows would not fit.
-        self.mod_counts_panel = ModCountsPanel(app, library)
+        # ui/settings_panel.py for why the rows would not fit.
+        self.settings_panel = GameSettingsPanel(app, library)
         self.mod_deck_button = Button(pygame.Rect(0, 0, 190, 30),
                                       "Skład talii", radius=8)
 
@@ -192,7 +192,7 @@ class MenuScreen(Screen):
         self.edit_checkbox.rect.topleft = (centre - 150, self.edit_row_y)
         self.debug_checkbox.rect.topleft = (centre + 150, self.edit_row_y)
         self._place_mod_deck_button()
-        self.mod_counts_panel.on_resize()
+        self.settings_panel.on_resize()
         self._build_rows()
         self.start_button.fit(r, min_width=180,
                               min_height=int(52 * r.fonts.scale))
@@ -298,7 +298,7 @@ class MenuScreen(Screen):
         # The deck panel is modal while it is open — it covers the steppers
         # underneath, so a click that fell through would change a setting the
         # player cannot currently see.
-        if self.mod_counts_panel.handle_event(event, mouse):
+        if self.settings_panel.handle_event(event, mouse):
             return
 
         if event.type == pygame.KEYDOWN:
@@ -357,7 +357,7 @@ class MenuScreen(Screen):
             return
 
         if self.mod_deck_button.hit(mouse):
-            self.mod_counts_panel.open()
+            self.settings_panel.open()
             return
 
         if self.edit_checkbox.hit(mouse):
@@ -403,7 +403,10 @@ class MenuScreen(Screen):
             chest_open_round=self.chest_round,
             mod_round_first=self.mod_first,
             mod_round_interval=self.mod_interval,
-            mod_counts=dict(self.mod_counts_panel.counts),
+            mod_counts=self.settings_panel.mod_counts,
+            movement_counts=self.settings_panel.movement_counts,
+            chest_counts=self.settings_panel.chest_counts,
+            ability_uses=self.settings_panel.ability_uses,
             character_choices=list(self.choices[: self.num_players]),
             double_frequency=self.double_percent / 100.0,
             edit_mode=self.edit_mode,
@@ -423,7 +426,7 @@ class MenuScreen(Screen):
                        self.debug_checkbox, self.start_button,
                        self.mod_deck_button):
             widget.update(mouse, dt)
-        self.mod_counts_panel.update(dt, mouse)
+        self.settings_panel.update(dt, mouse)
 
     def draw(self, surface: pygame.Surface) -> None:
         r = self.app.renderer
@@ -510,4 +513,4 @@ class MenuScreen(Screen):
 
         # ...except the deck panel, which is modal and therefore above even
         # that.  It draws its own shade over the screen it covers.
-        self.mod_counts_panel.draw(surface)
+        self.settings_panel.draw(surface)

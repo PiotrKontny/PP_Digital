@@ -50,17 +50,26 @@ def build_decks(library: ContentLibrary, rng: random.Random,
     to agree on the numbering.  Deck position gives that for free, and it is
     stable regardless of how many games the process has already built.
 
-    The Mody Patusa deck is the one deck whose composition the lobby sets, so
-    it is rebuilt from ``config.mod_counts`` before it is shuffled — before,
-    because a deck resized after shuffling would be a different pile on every
-    machine.  Everything else is exactly what the JSON says.
+    THREE decks now have their composition set by the lobby — Movement, Mody
+    Patusa and Chest — and the two ability decks have their charges set.  All
+    of it is applied BEFORE the shuffle, because a deck resized afterwards is a
+    different pile on every machine.  An empty mapping means "as printed", so a
+    table that never opened the settings panel gets exactly the JSON's decks.
     """
-    mod_counts = dict(config.mod_counts) if config is not None else {}
+    counts = {
+        settings.DECK_MOVEMENT: dict(config.movement_counts) if config else {},
+        settings.DECK_MODS: dict(config.mod_counts) if config else {},
+        settings.DECK_CHEST: dict(config.chest_counts) if config else {},
+    }
+    ability_uses = dict(config.ability_uses) if config is not None else {}
     decks: Dict[str, Deck] = {}
     for ordinal, deck_id in enumerate(library.deck_order):
         definition = library.deck(deck_id)
-        if deck_id == settings.DECK_MODS and mod_counts:
-            definition = definition.with_counts(mod_counts)
+        if counts.get(deck_id):
+            definition = definition.with_counts(counts[deck_id])
+        if ability_uses and deck_id in (settings.DECK_CHARACTERS,
+                                        settings.DECK_SKILLS):
+            definition = definition.with_uses(ability_uses)
         deck_rng = random.Random(rng.getrandbits(64))
         deck = Deck(definition, deck_rng)
         base = (ordinal + 1) * 10_000

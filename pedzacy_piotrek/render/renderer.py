@@ -872,6 +872,42 @@ class Renderer:
         return self.text(text, font, color, surface, center=rect.center,
                          shadow=shadow)
 
+    def heavy_cross(
+        self,
+        centre: Point,
+        size: int,
+        color: Color,
+        outline: Color,
+        surface: Optional[pygame.Surface] = None,
+        *,
+        scale: float = 1.0,
+    ) -> None:
+        """A deliberately fat X, with a darker one behind it for contrast.
+
+        "Eliminated" is one mark in this game and it is drawn here so that the
+        notepad and the board-side notice cannot drift into two different
+        marks.  Its thickness is a SHARE OF ITS SIZE rather than a pixel count:
+        the notepad used to cross a colour off with a flat 4-pixel line, which
+        is a hairline on a 1440p panel and was reported as easy to miss.
+
+        Drawn rather than typed, because the crossed glyphs are not in every
+        font the game may fall back to and a missing glyph is a blank box in
+        exactly the place the clearest mark on screen should be.
+        """
+        target = surface if surface is not None else self.surface
+        half = max(2, size // 2)
+        width = max(4, int(size * 0.22))
+        x, y = int(centre[0]), int(centre[1])
+        arms = (((x - half, y - half), (x + half, y + half)),
+                ((x - half, y + half), (x + half, y - half)))
+        for offset, shade, stroke in (
+            (max(2, int(2 * scale)), outline, width + max(2, int(3 * scale))),
+            (0, color, width),
+        ):
+            for (x0, y0), (x1, y1) in arms:
+                pygame.draw.line(target, shade, (x0, y0 + offset),
+                                 (x1, y1 + offset), stroke)
+
     def circle_button(
         self,
         centre: Point,

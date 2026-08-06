@@ -441,6 +441,29 @@ class DeckDef:
         )
         return DeckDef(id=self.id, name=self.name, cards=cards)
 
+    def with_uses(self, uses: Mapping[str, int]) -> "DeckDef":
+        """A copy of this deck with some titles' ability charges replaced.
+
+        The counterpart of :meth:`with_counts` for the character and skill
+        decks, where the lobby sets how many times an ability may be used
+        rather than how many copies exist.  Same two properties, for the same
+        reasons: a title the mapping does not name keeps the number the data
+        gives it, so an empty mapping means "as printed"; and the card ORDER is
+        untouched, because the shuffle is a permutation of this list.
+
+        Only cards that actually declare an ability are changed.  Setting
+        ``uses`` on a card with no ability would put a counter on the face of a
+        card that can never spend it.
+        """
+        if not uses:
+            return self
+        cards = tuple(
+            replace(card, uses=max(0, int(uses[card.title])))
+            if card.title in uses and card.ability else card
+            for card in self.cards
+        )
+        return DeckDef(id=self.id, name=self.name, cards=cards)
+
 
 @dataclass(frozen=True)
 class Pawn:

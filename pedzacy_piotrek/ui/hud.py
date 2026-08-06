@@ -112,6 +112,17 @@ def _deck_section(
     name_font = r.fonts.get(int(13 * ctx.layout.ui_scale), bold=True)
     count_font = r.fonts.get(int(13 * ctx.layout.ui_scale), bold=True)
     heading = lighten(theme.text_heading, 0.3 * hover) if hover else theme.text_heading
+    # The counters own the right of the band, so the NAME is fitted to what is
+    # left of it.  "UMIEJĘTNOŚCI PIOTRKA" is the longest deck name in the game
+    # and it ran straight into its own "2 / 0" once stage 26 made the type
+    # bigger — a heading that overlaps its own number is worse than a smaller
+    # heading, and the counters cannot shrink because they are the data.
+    counts_w = (count_font.size(f"{deck.draw_count}")[0]
+                + count_font.size(f"/ {deck.discard_count}")[0]
+                + int(18 * ctx.layout.ui_scale))
+    name_font = r.fitted_font(deck.name.upper(),
+                              max(30, band.width - counts_w),
+                              int(13 * ctx.layout.ui_scale), bold=True, spacing=1)
     r.spaced_text(deck.name.upper(), name_font, heading, surface,
                   midleft=(band.left, band.centery), spacing=1)
     r.text(f"{deck.draw_count}", count_font,
@@ -600,20 +611,30 @@ class CharacterPanel(Panel):
         for pawn, rect in zip(pawns, layout.pawn_grid_rects(top_y, len(pawns))):
             hovered = rect.collidepoint(ctx.mouse)
             radius = layout.pk_circle_d // 2
+            eliminated = pawn.id in state.eliminated_pawns
+            # A ruled-out colour is DRAINED as well as crossed: the difference
+            # has to read at a glance from across the room, and a dark disc
+            # under a red cross says "spent" before the cross is even resolved.
+            face = darken(pawn.color, 0.35) if eliminated else pawn.color
             r.aa_circle((rect.centerx, rect.centery + 2), radius,
                         darken(theme.background_deep, 0.6), surface=surface)
-            r.aa_circle(rect.center, radius, pawn.color,
-                        theme.brass_light if hovered else darken(pawn.color, 0.55),
-                        2, surface)
-            r.soft_ellipse((rect.centerx - radius * 0.3, rect.centery - radius * 0.35),
-                           radius * 0.45, radius * 0.3, lighten(pawn.color, 0.75),
-                           alpha=140, surface=surface)
-            if pawn.id in state.eliminated_pawns:
-                inset = max(4, rect.width // 6)
-                x0, y0 = rect.left + inset, rect.top + inset
-                x1, y1 = rect.right - inset, rect.bottom - inset
-                pygame.draw.line(surface, theme.ink, (x0, y0), (x1, y1), 4)
-                pygame.draw.line(surface, theme.ink, (x0, y1), (x1, y0), 4)
+            r.aa_circle(rect.center, radius, face,
+                        theme.invalid if eliminated else
+                        (theme.brass_light if hovered else darken(pawn.color, 0.55)),
+                        3 if eliminated else 2, surface)
+            if not eliminated:
+                r.soft_ellipse(
+                    (rect.centerx - radius * 0.3, rect.centery - radius * 0.35),
+                    radius * 0.45, radius * 0.3, lighten(pawn.color, 0.75),
+                    alpha=140, surface=surface)
+            else:
+                # Was a 4-pixel line at every resolution, which is a hairline
+                # on a 1440p panel and was reported as hard to see.  Now the
+                # cross is a share of the circle and therefore scales with the
+                # window, and it is the same mark the board-side notice draws.
+                r.heavy_cross(rect.center, int(radius * 1.85), theme.invalid,
+                              darken(theme.ink, 0.4), surface,
+                              scale=layout.ui_scale)
 
     def handle_click(self, ctx: HudContext, button: int, ui) -> List[cmd.Command]:
         if button != 1:

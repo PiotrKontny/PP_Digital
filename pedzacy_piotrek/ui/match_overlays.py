@@ -372,3 +372,109 @@ class VictoryOverlay:
         r.text(f"Ukryty pionek: {self.pawn_name or verdict.pawn_id}",
                r.fonts.get(int(17 * scale)), theme.brass_light, surface,
                midtop=(panel.centerx, centre[1] + radius + int(46 * scale)))
+
+
+# ── a check that came back negative ──────────────────────────────────────────
+class EliminationNotice:
+    """"<Kolor> TO NIE PIOTREK", as a card beside the board.
+
+    The result of a check used to be one line in the status bar, in the corner
+    of the screen nobody is looking at while a tower is being lifted — so the
+    single most important thing the hunters learn all game was the easiest
+    thing on screen to miss.
+
+    PRESENTATION ONLY, and deliberately not modal: it fades in, holds, and
+    fades out on its own, and it swallows no input at any point.  The notepad
+    is still the permanent record; this is the announcement.  Driven from the
+    ``PawnEliminated`` event rather than from the state, because unlike the
+    match overlays (N74) it is a MOMENT rather than a condition — a
+    reconnecting client replaying twenty commands should not be shown four
+    announcements it missed, and it is not, because each one replaces the last.
+    """
+
+    FADE_IN = 0.28
+    HOLD = 3.4
+    FADE_OUT = 0.9
+
+    def __init__(self) -> None:
+        self.pawn_name = ""
+        self.color: Tuple[int, int, int] = (200, 60, 60)
+        self.elapsed = 0.0
+        self.active = False
+
+    @property
+    def lifetime(self) -> float:
+        return self.FADE_IN + self.HOLD + self.FADE_OUT
+
+    def show(self, pawn_name: str, color: Tuple[int, int, int]) -> None:
+        self.pawn_name = pawn_name
+        self.color = color
+        self.elapsed = 0.0
+        self.active = True
+
+    def hide(self) -> None:
+        self.active = False
+
+    @property
+    def alpha(self) -> float:
+        """0..1 opacity: eased in, held, then faded out."""
+        if not self.active:
+            return 0.0
+        if self.elapsed < self.FADE_IN:
+            return ease_out_cubic(self.elapsed / self.FADE_IN)
+        if self.elapsed < self.FADE_IN + self.HOLD:
+            return 1.0
+        left = self.lifetime - self.elapsed
+        return max(0.0, left / self.FADE_OUT)
+
+    def update(self, dt: float) -> None:
+        if not self.active:
+            return
+        self.elapsed += dt
+        if self.elapsed >= self.lifetime:
+            self.active = False
+
+    def draw(self, r: Renderer, layout, surface: pygame.Surface) -> None:
+        if not self.active:
+            return
+        alpha = self.alpha
+        if alpha <= 0.01:
+            return
+        theme = r.theme
+        rect = layout.elimination_card_rect()
+        scale = layout.ui_scale
+
+        # Drawn on its own surface so ONE alpha fades the whole card — fading
+        # each piece separately is how the border ends up outliving the text.
+        card = pygame.Surface(rect.size, pygame.SRCALPHA)
+        local = pygame.Rect(0, 0, rect.width, rect.height)
+        r.premium_panel(local, card, radius=int(12 * scale),
+                        border=theme.invalid, glow=theme.invalid,
+                        glow_strength=0.5, shadow=int(18 * scale))
+
+        cross_top = int(rect.height * 0.16)
+        cross_size = int(rect.width * 0.34)
+        centre = (local.centerx, cross_top + cross_size // 2)
+        r.heavy_cross(centre, cross_size, theme.invalid,
+                     darken(theme.invalid, 0.45), card, scale=scale)
+
+        dot_y = cross_top + cross_size + int(26 * scale)
+        radius = max(8, int(15 * scale))
+        r.aa_circle((local.centerx, dot_y), radius, self.color,
+                    darken(self.color, 0.55), 2, card)
+
+        name_rect = pygame.Rect(int(10 * scale), dot_y + radius + int(8 * scale),
+                                local.width - int(20 * scale), int(34 * scale))
+        r.fit_text(self.pawn_name.upper(), name_rect, theme.text_light, card,
+                   base_size=int(24 * scale), bold=True)
+        line_rect = pygame.Rect(int(10 * scale), name_rect.bottom + int(4 * scale),
+                                local.width - int(20 * scale), int(30 * scale))
+        r.fit_text("TO NIE PIOTREK", line_rect, theme.invalid, card,
+                   base_size=int(19 * scale), bold=True)
+        note_rect = pygame.Rect(int(10 * scale), line_rect.bottom + int(2 * scale),
+                                local.width - int(20 * scale), int(22 * scale))
+        r.fit_text("kolor wykreślony", note_rect, theme.text_dim, card,
+                   base_size=int(13 * scale), bold=False)
+
+        card.set_alpha(int(255 * alpha))
+        surface.blit(card, rect.topleft)

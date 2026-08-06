@@ -41,7 +41,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..cards.loader import ContentLibrary
-from ..config.settings import RULES, SessionConfig, clamp_mod_counts
+from ..config.settings import (RULES, SessionConfig, clamp_ability_uses,
+                               clamp_card_counts, clamp_mod_counts)
 from ..engine import commands as cmd
 from ..engine import events as ev
 from ..engine import victory
@@ -309,6 +310,16 @@ class Room:
             merged = dict(lobby.mod_counts)
             merged.update(incoming)
             lobby.mod_counts = clamp_mod_counts(merged)
+        # The other three mappings merge on exactly the same terms, through one
+        # loop rather than three copies of the block above — four hand-written
+        # merges differing only in their clamp is how one of them stops merging.
+        for key, clamp in (("movement_counts", clamp_card_counts),
+                           ("chest_counts", clamp_card_counts),
+                           ("ability_uses", clamp_ability_uses)):
+            if key in payload:
+                merged = dict(getattr(lobby, key))
+                merged.update(clamp(payload.get(key)))
+                setattr(lobby, key, clamp(merged))
         if "double_percent" in payload:
             lobby.double_percent = max(0, min(100, int(payload["double_percent"])))
         if "debug_version" in payload:

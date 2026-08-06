@@ -61,16 +61,28 @@ class Layout:
         self.win_h = max(settings.MIN_WINDOW[1], int(height))
         w, h = self.win_w, self.win_h
 
-        #: Everything quoted in pixels is quoted for a 1080-tall window; this is
-        #: the factor that keeps it proportionate on anything else.  Fonts use
-        #: it too, so bigger screens get bigger *rendered* type rather than a
-        #: stretched bitmap.
-        self.ui_scale = max(0.85, min(1.8, h / 1080.0))
+        #: Everything quoted in pixels is quoted against this factor, fonts
+        #: included, so a bigger screen gets bigger *rendered* type rather than
+        #: a stretched bitmap.
+        #:
+        #: The reference height is 1000, not 1080 (stage 26).  Keying it to
+        #: 1080 meant a 1920x1200 laptop — a physically SMALL panel with a lot
+        #: of pixels — ran at 1.11 and was reported as hard to read, while
+        #: 2560x1440 on a desktop monitor was comfortable at 1.33.  Moving the
+        #: reference lifts the middle of the range by about 8% and leaves both
+        #: ends where they were: 1280x760 is still on the floor, and 4K still
+        #: hits the ceiling.
+        self.ui_scale = max(0.85, min(1.8, h / 1000.0))
 
         self.pad = _clamp(w * 0.008, 8, 18)
         pad = self.pad
 
-        self.hand_h = _clamp(h * 0.245, 180, 300)
+        #: The hand is where the cards are READ, so its height is what decides
+        #: how big a card is anywhere: the side columns cap themselves against
+        #: it too.  The ceiling scales rather than being a flat 300, which had
+        #: made a 4K screen show exactly the same 182x260 card as a 1920x1200
+        #: laptop — every pixel past 1224 tall went into margin.
+        self.hand_h = _clamp(h * 0.245, 180, 300 * self.ui_scale)
         self.content_h = h - self.hand_h - 2 * pad
         self.turn_bar_h = _clamp(h * 0.075, 58, 96)
         self.player_strip_h = _clamp(h * 0.095, 76, 120)
@@ -94,7 +106,11 @@ class Layout:
         """Card size and padding for a column of ``sections`` stacked rows."""
         inner = _clamp(10 * self.ui_scale, 6, 14)
         gap = _clamp(12 * self.ui_scale, 6, 14)
-        line_h = _clamp(self.content_h * 0.021 * self.ui_scale, 16, 26)
+        # Same band, same scaling ceiling as ``_compute_left`` — the column
+        # WIDTH is budgeted here and the height is spent there, so the two have
+        # to agree about how tall a label line is.
+        line_h = _clamp(self.content_h * 0.021 * self.ui_scale,
+                        16, 26 * self.ui_scale)
         section_gap = _clamp(self.content_h * 0.012, 6, 16)
 
         available = (self.content_h - 2 * inner
@@ -132,7 +148,14 @@ class Layout:
         #: One line for the deck name, with its counters on the same row to the
         #: right.  Two stacked lines per deck spent 88 pixels of column on
         #: labels — pixels the cards themselves needed far more.
-        self.section_line_h = _clamp(self.content_h * 0.021 * self.ui_scale, 16, 26)
+        #:
+        #: The CEILING SCALES.  It was a flat 26, which stopped growing while
+        #: the type inside it did not, so at 1440p the deck name overflowed its
+        #: own band and touched the card below — a 2-pixel collision that a
+        #: test caught the moment stage 26 made the cards bigger.  A band that
+        #: cannot hold its own line is not a band.
+        self.section_line_h = _clamp(self.content_h * 0.021 * self.ui_scale,
+                                     16, 26 * self.ui_scale)
         self.section_label_h = self.section_line_h + 3
 
         inner_w = panel.width - 2 * self.left_inner
@@ -567,6 +590,29 @@ class Layout:
         panel = self.card_picker_panel(count)
         return pygame.Rect(panel.centerx - 110, panel.bottom - 56, 220, 40)
 
+    def elimination_card_rect(self) -> pygame.Rect:
+        """Where the "not Piotrek" card appears — the board's left margin.
+
+        A CARD, sized like one and placed where the eye already goes: hard
+        against the inside of the board's left edge, vertically centred.  The
+        old feedback was a line in the status bar in the bottom-left corner,
+        which is the one part of the screen nobody watches while a tower is
+        being lifted.
+
+        Inside the board rather than in the left column because the column is
+        full at every supported size — the mods rack and three decks use all of
+        it — and a notice that only fits on a big monitor is a notice that is
+        missed on the machine that reported the problem.  It fades, so it never
+        holds the board for more than a few seconds.
+        """
+        board = self.board_viewport
+        height = int(_clamp(board.height * 0.42, 200, 420))
+        width = int(height / CARD_ASPECT)
+        width = min(width, int(board.width * 0.32))
+        height = int(width * CARD_ASPECT)
+        left = board.left + int(_clamp(18 * self.ui_scale, 10, 30))
+        return pygame.Rect(left, board.centery - height // 2, width, height)
+
     # Paczka's window is a LIST rather than a row of cards: six players holding
     # two Chest cards each is twelve faces, which no card lineup fits at
     # 1280×760.  It borrows the picker's furniture — centred panel, brass
@@ -686,7 +732,11 @@ class Layout:
 
     # ── bottom: the hand fan ─────────────────────────────────────────────────
     def _compute_hand(self) -> None:
-        card_h = _clamp(self.hand_h * 0.88, 150, 260)
+        # The 260 ceiling was the second half of the flat hand-height cap: even
+        # once the shelf grew, the card on it stopped at 182x260 and the rest
+        # became padding.  It scales now, so a card in hand is bigger on a
+        # bigger display — which is the whole of "card readability".
+        card_h = _clamp(self.hand_h * 0.88, 150, 260 * self.ui_scale)
         self.hand_card_size = (int(card_h / CARD_ASPECT), int(card_h))
         #: Radius of the imaginary circle the fan is laid out on.  A large
         #: radius gives a shallow, readable arc instead of a wheel of cards.

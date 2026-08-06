@@ -1,7 +1,7 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 25 — Paczka, Squid Game and Shady have their effects; AKO
-              is the last placeholder mod
+Last updated: stage 26 — four settings tabs, chest opens on round 6, bigger
+              cards and type, and two pieces of feedback made visible
               (see CHANGELOG_LLM.md)
 ================================================================================
 
@@ -107,6 +107,12 @@ WORKING:
   round.  AKO is the only placeholder left.  Every rule is DECLARED in
   cards.json as a ``passive`` and read through ``GameState.mod_rule`` — no
   titles in the engine.  See "HOW THE MOD PATUSA EFFECTS WORK".
+- TABLE COMPOSITION IS A SETTING (stage 26): the pre-game panel has FOUR tabs —
+  Karty ruchu, Mody Patusa, Karty Skrzyni and Umiejętności — with ``[-] n [+]``
+  for every card in the first three decks and for every character ability's
+  charges in the fourth.  Defaults are whatever the data files print; an empty
+  mapping means "as printed", so an older client still gets real decks.  All
+  four replicate like every other setting.  See "THE SETTINGS PANEL".
 - MOD DECK COMPOSITION (stage 24): thirteen cards, not one of each — Speedrun 2,
   Masa solna 2, AKO 1, Halloween 1, Sesja na PG 2, Paczka 2, Squid Game 1,
   Shady 2.  Those are DEFAULTS from cards.json; the lobby sets any count per
@@ -145,7 +151,11 @@ WORKING:
 - Two-slot "Mody Patusa" rack, character panel with abilities and Piotrek's
   skills, hunters' colour-elimination notepad, manual round counter, player
   renaming, free pawn dragging with snapping and stacking.
-- Responsive UI from 1280×760 to 4K.
+- Responsive UI from 1280×760 to 4K.  Type and cards are sized against a
+  reference height of 1000 (stage 26; it was 1080), and the hand-card and
+  shelf ceilings SCALE rather than being flat pixel counts — before that a 4K
+  screen showed exactly the same 182×260 card as a 1920×1200 laptop.  See
+  "HOW SCALING WORKS".
 - MULTIPLAYER over the internet, CLIENT/SERVER: a dedicated server process
   (``python -m pedzacy_piotrek.server``) owns the game; every player, the one
   who opened the room included, is a WebSocket client that connects OUTWARDS.
@@ -1142,8 +1152,9 @@ deck, and the panel warns before it gets that far.
 
 THE PANEL
 ---------
-``ui/mod_counts_panel.py``, shared by the hot-seat menu and the network host
-screen.  ONE deck needs ONE place to describe it.
+``ui/settings_panel.py`` (was ``mod_counts_panel.py`` until stage 26), shared by
+the hot-seat menu and the network host screen.  ONE deck needs ONE place to
+describe it.  It has four tabs now — see "THE SETTINGS PANEL" below.
 
 It is an overlay, not eight more settings rows, and that is not cosmetic: both
 screens lay themselves out by measuring rows and shrinking the gaps until they
@@ -1274,6 +1285,85 @@ that reads as off by one; it is consistent if the count is pawns stacked ONTO A
 BASE PAWN (five onto one is all six, four onto one is all five), which also
 matches the brief's own "since one pawn is absent".  Do not "fix" the code to
 literal fives and fours.
+
+
+================================================================================
+THE SETTINGS PANEL  (stage 26)
+================================================================================
+
+``ui/settings_panel.py``, class ``GameSettingsPanel``, used by BOTH settings
+screens.  Four tabs: Karty ruchu, Mody Patusa, Karty Skrzyni, Umiejętności.
+
+A tab is a ``SettingsTab`` RECORD, not a subclass: where its rows come from,
+what bounds them, what its numbers add up to, and what is wrong with them.
+Nothing else differs between the four, so a FIFTH CATEGORY IS ONE ENTRY in
+``_build_tabs`` and no new drawing code.  Every title and default is read from
+the loaded data — never a list in this file.
+
+THREE THINGS THAT ARE EASY TO GET WRONG HERE:
+
+  * THE STEPPERS ARE PER VISIBLE ROW, not per title.  The movement deck is
+    thirty titles and no window is tall enough, so the list scrolls and the
+    steppers are zipped against ``visible_titles``.  Indexing them by a title's
+    position in the deck edits the wrong card.
+  * THE ABILITY TAB IS CHARGES, not copies, and it lists BOTH ability decks —
+    a Piotrek skill is an ability with uses exactly as a character's is.  Cards
+    with no ability are excluded, because a charge counter on a card that can
+    never spend one is a control that does nothing.
+  * ``Domyślne`` RESETS THE VISIBLE TAB ONLY, and the button sits under the tab
+    it undoes.  One button that silently discards four tabs of work is the kind
+    of thing noticed once.
+
+Buttons are placed by their BOTTOM edge against the panel's, not by a top edge
+a fixed distance up from it: ``Button.fit`` sizes itself to its caption at the
+current type scale, and at 1280×760 a 49 px button hung past a panel that had
+budgeted 47 for it.  This is N46 in a new costume.
+
+THE NUMBERS UNDERNEATH.  ``SessionConfig`` carries FOUR mappings —
+``movement_counts``, ``mod_counts``, ``chest_counts``, ``ability_uses`` — as
+separate fields rather than one nested one, because ``mod_counts`` is already
+on the wire and in a dozen tests.  All four mean "as printed" when empty.
+``DeckDef.with_counts`` and ``with_uses`` apply them BEFORE the shuffle, and
+both keep the JSON's card ORDER for the reason stage 24 records: a shuffle is a
+permutation of a list.  ``clamp_title_map`` is the one clamp with three thin
+wrappers, and ``room.set_settings`` merges the three newer mappings in ONE loop
+— four hand-written merges differing only in their clamp is how one of them
+quietly stops merging.
+
+
+================================================================================
+HOW SCALING WORKS  (stage 26)
+================================================================================
+
+``Layout.ui_scale`` is the one number that moves the whole interface: every
+pixel size in ``ui/`` is quoted against it, and ``FontBook.set_scale`` applies
+it to every requested type size as well, so a bigger screen gets bigger
+RENDERED glyphs rather than a stretched bitmap (N33).
+
+    ui_scale = clamp(window_height / 1000, 0.85, 1.8)
+
+THE REFERENCE IS 1000, NOT 1080, and that is a deliberate change.  At 1080 a
+1920×1200 laptop — a physically small panel with a lot of pixels — ran at 1.11
+and was reported as hard to read, while a 2560×1440 desktop monitor was
+comfortable at 1.33.  Moving the reference lifts the middle of the range about
+8% and leaves both ends where they were.
+
+**NEVER GIVE A CARD OR A SHELF A FLAT PIXEL CEILING.**  ``hand_h`` was capped at
+300 and the hand card at 260, so a 4K screen showed exactly the same 182×260
+card as a 1920×1200 laptop and every pixel past ~1224 tall became margin.  Both
+ceilings are now multiplied by ``ui_scale``.  The side columns cap themselves
+against ``hand_h``, so this one number decides how big a card is anywhere.
+
+The same mistake in a different box caused BOTH bugs stage 26 had to fix: a
+label band capped at a flat 26 px while the type inside it kept growing, and a
+deck heading with no idea how much room its counters had left it.  If a box
+holds text, either the box scales or the text is fitted to the box — see
+``Renderer.fitted_font`` / ``fit_text``.
+
+ENLARGED PREVIEWS ARE ALREADY CORRECT and were verified rather than changed:
+``CardRenderer.quantised`` has no ceiling, so a hovered card is REPAINTED at its
+enlarged size (386×552 at 1920×1200) rather than zoomed from the small one.
+That is stage 9's work; do not add a cap to it.
 
 
 ================================================================================
@@ -2886,6 +2976,41 @@ N103. Never apply a movement mod to an ability or a chest card. Masa solna and
    `move_pawn` and would be caught by both. `ctx.from_movement_card` is the
    test, and it is why EffectContext carries `origin` and `deck_id` at all.
 
+N112. Never give a card, a shelf or a label band a FLAT pixel ceiling. Every
+   one of them is quoted against ui_scale for a reason: a hand card capped at
+   260 showed a 4K screen the same card as a 1920x1200 laptop, and a label band
+   capped at 26 was overflowed by its own type at 1440p. If a number stops
+   growing while what it contains does not, it is a bug waiting for a bigger
+   monitor.
+
+N113. Never draw a heading beside a number without measuring the number first.
+   The counters are the DATA and cannot shrink; the heading can, and must.
+   "UMIEJĘTNOŚCI PIOTRKA" ran straight into its own "2 / 0" the moment the type
+   grew. Use fitted_font against the room the counters leave.
+
+N114. Never test one column and assume the other. The deck-label collision test
+   walked the LEFT column for four stages while the longest deck name in the
+   game sat unmeasured in the RIGHT one. The regression test for it RENDERS and
+   reads back what was actually drawn, which is the only kind that could have
+   caught it.
+
+N115. Never index the settings panel's steppers by a title's position in its
+   deck. There is one stepper per VISIBLE row because the movement tab scrolls,
+   and they are zipped against `visible_titles`. Off-by-a-scroll edits the
+   wrong card silently.
+
+N116. Never add a fifth settings mapping without adding it to ALL FOUR places
+   it has to travel: SessionConfig (and normalised()), LobbyState (field,
+   to_dict, from_dict, to_config), room.set_settings' merge loop, and
+   setup.build_decks. Three of those are where the earlier ones were nearly
+   dropped, and normalised() has silently eaten a setting twice already (N15).
+
+N117. Never drive a transient ANNOUNCEMENT from the state the way N74 requires
+   for a condition. The "nie Piotrek" card is a moment: driven from the state it
+   would reappear for every colour a reconnecting client replays. Driven from
+   the event, each show replaces the last and a replay ends on the right one.
+   N74 still holds for anything that is a CONDITION — the match overlays.
+
 N105. Never assume the checking mechanic is missing because this file used to
    say so. It has existed since stage 17 as engine/victory.review(): all pawns
    on one field, inspect the BOTTOM one, hunters win or the colour is crossed
@@ -2959,6 +3084,11 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    and "THE THREE MODS THAT ACT AT A MOMENT" first, plus `can_ask` (N100) if it
    asks anything and N104 if it touches movement.
 
+0d. Stage 26 note: the settings panel's "Domyślne" resets the VISIBLE tab only.
+   If the owner wants one button that puts everything back, it is a one-line
+   change — recorded rather than decided because a button that discards four
+   tabs of work without asking is noticed once.
+
 0c. AND: confirm the two rulings stage 25 had to make — Shady removing one pawn
    rather than the whole tower (L17) and a tower at the head of the road
    counting as a shared lead (L18). Both are one-line changes today.
@@ -3017,7 +3147,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 944 tests, ~140 s
+    python -m pytest -q                     # 995 tests, ~150 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -3049,6 +3179,15 @@ HOW TO VERIFY A CHANGE
                                    dealing round at every table size, that two
                                    overflows in one round are both asked, and
                                    that no card leaks out of the chest deck
+      tests/test_settings_panel.py — the four settings tabs, the numbers
+                                   reaching the built decks and the actual
+                                   cards, their replication, the new defaults,
+                                   that a taller display gets a bigger card,
+                                   that an enlarged preview is painted at full
+                                   size, the "nie Piotrek" card, the
+                                   elimination mark, and the heading-collision
+                                   regression (which RENDERS and reads back
+                                   what was drawn — see N114)
       tests/test_mod_effects.py  — Paczka, Squid Game and Shady: the rules
                                    coming from the JSON, Paczka's list and its
                                    empty case, Squid Game arming a round late
