@@ -319,6 +319,11 @@ class MenuScreen(Screen):
             double_frequency=self.double_percent / 100.0,
             edit_mode=self.edit_mode,
             debug_version=self.debug_version,
+            # One production flow for the identity, hot-seat included: whoever
+            # drew Piotrek picks a colour before the first move.  Dealing it
+            # from the seed survives only behind --players/--selftest, where
+            # there is no one to click.
+            piotrek_picks_pawn=True,
         )
         self.on_start(config.normalised())
 

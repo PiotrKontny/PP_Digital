@@ -44,8 +44,10 @@ from ..cards.loader import ContentLibrary
 from ..config.settings import RULES, SessionConfig
 from ..engine import commands as cmd
 from ..engine import events as ev
+from ..engine import victory
 from ..engine.game_state import GameState
 from ..engine.setup import create_game, new_seed
+from ..engine.victory import MatchPhase
 from ..net.config import NetworkConfig
 from ..net.lobby import LobbyState, clean_nickname
 from ..net.protocol import Message, MessageType, fingerprint_of
@@ -97,6 +99,11 @@ class Room:
         #: state unnecessary.
         self.command_log: List[Dict[str, Any]] = []
         self.fingerprint: str = ""
+        #: Which peer was asked for Piotrek's colour, and whether it arrived.
+        #: The colour ITSELF is never stored here — it goes straight into the
+        #: authoritative state, whose public snapshot does not carry it.
+        self.identity_peer: Optional[str] = None
+        self.identity_settled: bool = False
         self.closed: bool = False
         self.created_at: float = self._clock()
         self.empty_since: Optional[float] = self.created_at
@@ -322,10 +329,63 @@ class Room:
         self.lobby.started = True
         self.command_log = []
         self.fingerprint = fingerprint_of(self.state.snapshot())
+        self.identity_settled = False
+        self.identity_peer = None
 
         payload = Message.game_start(asdict(config), self.lobby.seat_map(),
                                      room=self.code)
-        return self.broadcast(payload)
+        out = self.broadcast(payload)
+        out.extend(self.ask_for_identity())
+        return out
+
+    # ── the hidden identity ──────────────────────────────────────────────────
+    def ask_for_identity(self) -> List[Outbound]:
+        """Ask whoever drew Piotrek which colour he is hiding behind.
+
+        To that one peer.  Everybody else is looking at "Gra się rozpoczyna…"
+        and is told nothing at all — not even that somebody is being asked
+        something, because the round trip is short and the wait is shared.
+        """
+        if self.state is None or self.identity_settled:
+            return []
+        if self.state.phase is not MatchPhase.STARTING:
+            return []
+        seat = self.state.piotrek_seat
+        if seat is None:
+            # No Piotrek at this table (a content or setup problem, not a
+            # player's fault).  Rather than hang on a question nobody can
+            # answer, start the match — it is still playable.
+            return self._authoritative(cmd.BeginMatch())
+        lobby_seat = next((s for s in self.lobby.seats if s.seat == seat), None)
+        if lobby_seat is None:
+            return []
+        self.identity_peer = lobby_seat.peer_id
+        pawns = [{"id": pawn.id, "name": pawn.name, "color": list(pawn.color)}
+                 for pawn in self.state.library.pawns]
+        return [(self.identity_peer,
+                 Message.identity_required(pawns, room=self.code))]
+
+    def set_identity(self, peer_id: str, pawn_id: str) -> List[Outbound]:
+        """Piotrek has chosen.  Store it, tell him, and start everybody at once.
+
+        Checked against the server's own seat map, like every other message:
+        a client claiming to be Piotrek is just a client claiming something.
+        """
+        if self.state is None:
+            return [(peer_id, Message.error("Gra jeszcze się nie zaczęła"))]
+        if self.identity_settled:
+            return [(peer_id, Message.error("Kolor został już wybrany"))]
+        if peer_id != self.identity_peer:
+            return [(peer_id, Message.error("To nie ty wybierasz kolor"))]
+        if not self.state.set_piotrek_pawn(str(pawn_id)):
+            return [(peer_id, Message.error("Nieznany kolor pionka"))]
+        self.identity_settled = True
+        # The fingerprint does not move: the colour is not in the snapshot,
+        # which is exactly what keeps five replicas agreeing with a server
+        # that knows something they do not.
+        out: List[Outbound] = [(peer_id, Message.identity_accepted(str(pawn_id)))]
+        out.extend(self._authoritative(cmd.BeginMatch()))
+        return out
 
     # ── the command pipeline ─────────────────────────────────────────────────
     def submit(self, peer_id: str, payload: Mapping[str, Any]) -> List[Outbound]:
@@ -369,10 +429,79 @@ class Room:
         encoded = command.to_dict()
         self.command_log.append(encoded)
         self.fingerprint = fingerprint_of(self.state.snapshot())
-        return self.broadcast(
+        out = self.broadcast(
             Message.command_accepted(encoded, self.sequence, seat,
                                      self.fingerprint)
         )
+        # ...and then: did that just end the game?  The question is asked here,
+        # once, after every accepted command, rather than inside the rules for
+        # moving a pawn — which is what keeps win conditions out of the effect
+        # engine and out of the interface.
+        out.extend(self.review_victory())
+        return out
+
+    # ── the authority's own commands ─────────────────────────────────────────
+    def review_victory(self) -> List[Outbound]:
+        """Let :mod:`engine.victory` look at the table and act on its answer."""
+        if self.state is None:
+            return []
+        out: List[Outbound] = []
+        for followed in victory.review(self.state):
+            out.extend(self._authoritative(followed))
+        return out
+
+    def _authoritative(self, command: cmd.Command) -> List[Outbound]:
+        """Apply a command of the server's own, and log it like any other.
+
+        Deliberately the same road every player command takes: it goes into the
+        log, it moves the fingerprint, and it reaches everybody as
+        ``COMMAND_ACCEPTED``.  So a player who reconnects five minutes later
+        replays it, sees the same colour crossed off and the same winner, and
+        no second mechanism exists for "things the server decided".
+
+        The seat is ``-1``: nobody's.
+        """
+        if self.state is None:
+            return []
+        events = self.state.apply(command, local=False)
+        if not events or any(isinstance(e, ev.ActionRejected) for e in events):
+            return []
+        encoded = command.to_dict()
+        self.command_log.append(encoded)
+        self.fingerprint = fingerprint_of(self.state.snapshot())
+        return self.broadcast(
+            Message.command_accepted(encoded, self.sequence, -1,
+                                     self.fingerprint)
+        )
+
+    # ── after the match ──────────────────────────────────────────────────────
+    def return_to_lobby(self, peer_id: str) -> List[Outbound]:
+        """Put a finished room back the way it was, ready for another match.
+
+        Only once somebody has won: a room reset mid-game would be a way for
+        one player to end everybody else's.  Seats survive — the same people
+        are still sitting there — but everything the match consisted of is
+        dropped, including the hidden colour, which is how the next game gets
+        a fresh one.
+        """
+        if self.state is None:
+            return self.lobby_message(peer_id)
+        if not self.state.finished:
+            return [(peer_id, Message.error("Gra jeszcze się nie skończyła"))]
+        self.state = None
+        self.session_config = None
+        self.command_log = []
+        self.fingerprint = ""
+        self.identity_peer = None
+        self.identity_settled = False
+        self.lobby.started = False
+        for seat in list(self.lobby.seats):
+            # Anybody who left during the match kept their seat so the log
+            # stayed valid.  The log is gone now, so the seat can go too.
+            if seat.peer_id not in self.members:
+                self.lobby.remove_seat(seat.peer_id)
+        self.lobby.promote_new_host()
+        return self.broadcast_lobby()
 
     # ── synchronisation ──────────────────────────────────────────────────────
     def sync_message(self) -> Optional[Message]:
@@ -408,6 +537,18 @@ class Room:
                 Message.player_reconnected(peer_id, seat.seat, seat.nickname),
                 skip=peer_id,
             ))
+        if peer_id == self.identity_peer and not self.identity_settled:
+            # Piotrek dropped while choosing.  Nobody else can answer for him
+            # and the table is waiting, so ask again the moment he is back.
+            out.extend(self.ask_for_identity())
+        elif peer_id == self.identity_peer and self.state is not None:
+            # ...and if he already chose, tell him again what he chose.  A
+            # returning client rebuilds its replica from the seed and the log,
+            # and the colour is in neither — by design.  Without this the badge
+            # in his own panel would come back empty for the rest of the match.
+            colour = self.state.piotrek_pawn
+            if colour:
+                out.append((peer_id, Message.identity_accepted(colour)))
         return out
 
     # ── outbound helpers ─────────────────────────────────────────────────────

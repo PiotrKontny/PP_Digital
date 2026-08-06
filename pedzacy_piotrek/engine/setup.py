@@ -132,21 +132,64 @@ def starting_hand_size(player: Player) -> int:
     return max(0, count)
 
 
+#: Safety valve for the opening deal: how many cards it may throw away looking
+#: for one that is allowed to start in a hand.  A deck made entirely of cards
+#: nobody may open with is a content error, and it must not become a hang.
+MAX_OPENING_REDRAWS = 60
+
+
 def deal_starting_hands(players: List[Player], decks: Dict[str, Deck]) -> None:
+    """Deal the opening hands, skipping cards that may not start in one.
+
+    Troll is the first of those: it exists to hijack a turn the player has
+    already had, so beginning the game holding one would mean losing the first
+    move to a card nobody chose to draw.  The rule is
+    ``"in_opening_hand": false`` in the JSON rather than a title checked here,
+    so the next card that needs it costs no code.  A ``locked`` card is held
+    back whatever the JSON says: nothing in the opening deal can arm it, so one
+    dealt here could never be played, discarded or resolved again.
+
+    Withheld cards go back into the DRAW pile and the pile is shuffled once at
+    the end — not onto the discard pile.  A game that began with cards already
+    discarded would be a game that had left marks before anybody moved, and
+    ``test_the_next_match_starts_from_nothing`` is right to object to it.
+    Putting them back at the end rather than one at a time also stops the same
+    Troll being turned over again immediately.
+    """
     movement = decks[settings.DECK_MOVEMENT]
+    withheld: List[Card] = []
     for player in players:
         for _ in range(starting_hand_size(player)):
-            card = movement.take_card()
+            card = _take_openable(movement, withheld)
             if card is None or not player.add_card(card):
                 break
+    if withheld:
+        movement.draw_pile.extend(withheld)
+        movement.shuffle_draw_pile()
 
 
-def assign_secret_pawn(players: List[Player], library: ContentLibrary, rng: random.Random) -> None:
-    """Piotrek secretly gets one of the pawn colours.
+def _take_openable(deck: Deck, withheld: List[Card]) -> Optional[Card]:
+    """The next card off the pile that is allowed to open the game."""
+    for _ in range(MAX_OPENING_REDRAWS):
+        card = deck.take_card()
+        if card is None:
+            return None
+        if card.opens_a_hand:
+            return card
+        withheld.append(card)
+    return None
 
-    The design document leaves open whether Piotrek picks his pawn or draws it
-    at random; this does the random draw, and the field is on the Player so a
-    'choose your pawn' step can set it instead without touching anything else.
+
+def assign_secret_pawn(players: List[Player], library: ContentLibrary,
+                       rng: random.Random) -> None:
+    """Piotrek secretly gets one of the pawn colours, at random.
+
+    ONLY for a hot-seat game.  Online this must not happen at all, and the
+    reason is the seed: every client builds its own copy of the match from the
+    same number, so a colour dealt here is a colour every client can work out
+    for itself — a secret that is in the open on five machines.  Stage 17 moved
+    the online case to a private choice by the player, which is why
+    :func:`create_game` skips this when ``config.piotrek_picks_pawn`` is set.
     """
     piotrek = next((p for p in players if p.is_piotrek), None)
     if piotrek is None or not library.pawns:
@@ -181,7 +224,8 @@ def create_game(
     assign_characters(players, decks, config.character_choices, rng)
     assign_piotrek_skill(players, decks, rng)
     deal_starting_hands(players, decks)
-    assign_secret_pawn(players, library, rng)
+    if not config.piotrek_picks_pawn:
+        assign_secret_pawn(players, library, rng)
 
     board = BoardModel.generate(
         cell_count=config.board_cells,

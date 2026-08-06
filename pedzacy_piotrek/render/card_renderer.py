@@ -97,9 +97,14 @@ class CardRenderer:
         dim: bool = False,
     ) -> pygame.Surface:
         """The painted front of a card, cached."""
+        # The badge is part of the key because it is part of the picture.  It
+        # used to be left out on the assumption that a title implies a badge,
+        # which stopped being true the moment a badge could carry a pawn COUNT:
+        # two cards with the same words and different dots shared one surface.
+        # It goes on the END: the size lives at index 4 and tests read it there.
         key = (
             "face", card.definition.deck_id, card.title, card.text,
-            size, highlighted, border_color, dim,
+            size, highlighted, border_color, dim, card.badge,
         )
         cached = self._faces.get(key)
         if cached is not None:
@@ -434,20 +439,27 @@ class CardRenderer:
         )
 
         gap = 4
+        # Pawn markers overlap slightly, so two of them read as "a pair of
+        # pawns" rather than as two unrelated dots — and so a badge showing two
+        # still fits under a card in the fan at 1280×760.
+        pawns = max(1, badge.count)
+        step = radius * 2 if pawns == 1 else int(radius * 1.55)
+        pawns_w = radius * 2 + (pawns - 1) * step
         total_w = (
-            radius * 2 + gap + sign_surface.get_width()
+            pawns_w + gap + sign_surface.get_width()
             + (arrow_surface.get_width() + gap if arrow_surface else 0)
         )
         start_x = w // 2 - total_w // 2
-        cx = start_x + radius
 
-        if badge.is_rainbow:
-            self.r.pie_circle((cx, cy), radius, self._rainbow, surface)
-        else:
-            color = self.library.pawn_color(badge.pawn) or (200, 200, 200)
-            self.r.aa_circle((cx, cy), radius, color, (70, 60, 40), 1, surface)
+        for index in range(pawns):
+            cx = start_x + radius + index * step
+            if badge.is_rainbow:
+                self.r.pie_circle((cx, cy), radius, self._rainbow, surface)
+            else:
+                color = self.library.pawn_color(badge.pawn) or (200, 200, 200)
+                self.r.aa_circle((cx, cy), radius, color, (70, 60, 40), 1, surface)
 
-        nx = start_x + radius * 2 + gap
+        nx = start_x + pawns_w + gap
         if arrow_surface is not None:
             surface.blit(arrow_surface, (nx, cy - arrow_surface.get_height() // 2))
             nx += arrow_surface.get_width() + gap

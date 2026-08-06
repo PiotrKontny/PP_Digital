@@ -94,3 +94,19 @@ def round_length(
     period: int = RULES.piotrek_turn_period,
 ) -> int:
     return len(compute_round_turn_order(round_num, piotrek_name, hunter_names, period))
+
+
+@dataclass(frozen=True)
+class NextTurn:
+    """Where the turn cursor lands next: the seat, its round, and its SLOT.
+
+    The slot travels with the seat deliberately.  A seat can hold several slots
+    in one round — Piotrek holds every third — so ``order.index(seat)`` cannot
+    recover it: that finds the first slot the seat occupies and rewinds the
+    round to its beginning.  Returning the slot is what makes it impossible for
+    a caller to reconstruct it wrongly.
+    """
+
+    seat: int
+    round_number: int
+    slot: int

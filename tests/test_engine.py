@@ -285,13 +285,23 @@ def test_cards_are_split_into_the_ones_that_ask_and_the_ones_that_do_not(library
     asking = [c for c in deck.cards if c.effect and c.effect.needs_choice]
     # 20 movement cards, plus Seks z pedałami and Thunderfuck, act at once.
     assert len(direct) == 22
-    # Janek, Kolos z paki, Astral 2019 and Astral 2022 ask which pawn.
+    # Janek, Kolos z paki, Astral 2019 and Astral 2022 ask which pawn; Plagiat!
+    # asks for two pawns in order and Spy asks whose hand and which card.  The
+    # last two say so with "asks": true rather than by naming a "choice"
+    # parameter, because what they ask for is not a parameter of the effect.
     assert {c.title for c in asking} == {
         "Janek", "Kolos z paki", "Astral 2019", "Astral 2022",
+        "Plagiat!", "Spy",
     }
-    # The four that remain need mechanics that do not exist yet.
+    # What remains has no ``effect`` because it acts on the way INTO the hand
+    # instead: both declare ``on_draw``, and both are locked so that the player
+    # cannot dodge what they started.
     inert = {c.title for c in deck.cards if c.effect is None}
-    assert inert == {"Troll", "Stańczyk", "Spy", "Plagiat!"}
+    assert inert == {"Troll", "Stańczyk"}
+    for definition in deck.cards:
+        if definition.title in inert:
+            assert definition.on_draw is not None, definition.title
+            assert definition.locked, definition.title
     # Every card that names a pawn must name a real one.
     for definition in direct + asking:
         spec = definition.effect

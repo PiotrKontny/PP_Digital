@@ -15,7 +15,7 @@ and sits first because it is the topmost thing on screen):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import pygame
@@ -29,8 +29,10 @@ from .app import App, Screen
 from .board_view import BoardView
 from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
+from .match_overlays import MatchStartOverlay, VictoryOverlay
 from .overlays import (
-    ChestChoice, ChoicePrompt, PauseMenu, RevealOverlay, RevealPhase,
+    CardPicker, ChestChoice, ChoicePrompt, PauseMenu, RevealOverlay,
+    RevealPhase,
 )
 from .hud import (
     CharacterPanel,
@@ -63,6 +65,14 @@ class PendingChoice:
     pawns: List[str]
     answers: Dict[str, str]
     description: str = ""
+    #: Cards on offer, when the question is about cards (Spy).
+    card_options: List[int] = field(default_factory=list)
+    #: How many answers the engine wants and whether their order matters.  More
+    #: than one turns the prompt into a multi-select and the answer into the
+    #: picked ids joined by commas — which is why no command needed a new field.
+    count: int = 1
+    ordered: bool = False
+    owner: Optional[int] = None
     card_uid: Optional[int] = None
     ability_source: Optional[str] = None
 
@@ -114,7 +124,15 @@ class GameScreen(Screen):
         self.choice_prompt = ChoicePrompt()
         self.reveal = RevealOverlay()
         self.chest_choice = ChestChoice()
+        #: Somebody else's cards, laid out to take one from (Spy).
+        self.card_picker = CardPicker()
         self.pause_menu = PauseMenu()
+        #: Before the first move and after the last one.  Both are drawn over
+        #: the live table and both make the game unplayable while they are up —
+        #: though the engine refuses everything anyway, so this is manners
+        #: rather than enforcement.
+        self.match_start = MatchStartOverlay()
+        self.victory = VictoryOverlay()
         self.chest_choice_seat: int = 0
         self.debug_panel = NetworkDebugPanel(enabled=settings.NETWORK_DEBUG)
 
@@ -132,6 +150,10 @@ class GameScreen(Screen):
         #: phase of a random reveal ("Seks z pedałami" before what it turns up).
         self._playing_title: Optional[str] = None
         self._playing_text: Optional[str] = None
+        #: Seconds left of a card being held up by the game rather than by the
+        #: player.  While it runs the board holds new walks back, so the pawn
+        #: moves after the card has been seen and not underneath it.
+        self._spotlight_left = 0.0
 
         self.hand.notify = self.status_bar.notify
 
@@ -145,7 +167,18 @@ class GameScreen(Screen):
         self.bus.subscribe(ev.CardTransformed, self._on_card_transformed)
         self.bus.subscribe(ev.CardRevealed, self._on_card_revealed)
         self.bus.subscribe(ev.ChestLimitReached, self._on_chest_limit)
+        self.bus.subscribe(ev.CardSpotlighted, self._on_card_spotlighted)
+        self.bus.subscribe(ev.TurnSkipped, self._on_turn_skipped)
+        self.bus.subscribe(ev.CardStolen, self._on_card_stolen)
+        self.bus.subscribe(ev.CardDrawEffect, self._on_card_draw_effect)
         self.bus.subscribe(ev.StatusGranted, self._on_status_granted)
+        self.bus.subscribe(ev.MatchBegan, self._on_match_began)
+        self.bus.subscribe(ev.PawnEliminated, self._on_pawn_eliminated)
+        self.bus.subscribe(ev.MatchEnded, self._on_match_ended)
+        if not self.state.phase.playable:
+            # Joining a match that has not begun (the ordinary case online) or
+            # one that is already over (a reconnection after the last move).
+            self._sync_match_overlays()
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -221,21 +254,60 @@ class GameScreen(Screen):
             pawns=list(event.pawns),
             answers=dict(event.answered),
             description=event.description,
+            card_options=list(event.card_options),
+            count=event.count,
+            ordered=event.ordered,
+            owner=event.owner,
             card_uid=event.card_uid,
             ability_source=event.ability_source,
         )
         self.hand.cancel_drag()
         self.board_view.choice_tiles = list(event.tiles)
         self.board_view.choice_pawns = list(event.pawns)
+        self.board_view.choice_selected = []
         if event.tiles:
             self.board_view.focus_on_tiles(event.tiles)
+
+        if event.kind == "card":
+            # A hand belonging to somebody else.  This event reached this
+            # machine and no other (N40), so laying the cards out here does not
+            # show them to anybody who should not see them.
+            self._show_card_picker(event)
+            return
+
         colours = {
             pawn.id: pawn.color for pawn in self.state.library.pawns
         } if event.kind == "pawn" else None
         self.choice_prompt.show(
             event.prompt, event.kind, [tuple(o) for o in event.options],
-            event.description, colours,
+            event.description, colours, count=event.count, ordered=event.ordered,
         )
+
+    def _show_card_picker(self, event: ev.ChoiceRequired) -> None:
+        """Lay out the cards the engine is offering, in the order it gave them."""
+        cards = []
+        for uid in event.card_options:
+            card = self.state.find_card(uid)
+            if card is not None:
+                cards.append(card)
+        if not cards:
+            # The hand emptied between the question and the answer, which can
+            # only happen to a client whose replica is behind.  Say so rather
+            # than opening an empty panel nothing can be clicked in.
+            self.pending_choice = None
+            self.status_bar.notify("Nie ma już czego przeglądać")
+            return
+        self.card_picker.show(cards, event.prompt, event.description)
+
+    def _resolve_multi_choice(self) -> None:
+        """Answer a multi-select with the picks, in the order they were made."""
+        choice = self.pending_choice
+        if choice is None or not self.choice_prompt.ready:
+            return
+        answer = ",".join(self.choice_prompt.selected)
+        self.pending_choice = None
+        self._clear_choice_ui()
+        self.submit(choice.resubmit(self.pending_choice_seat, answer))
 
     def _resolve_choice(self, option_id: str) -> None:
         choice, self.pending_choice = self.pending_choice, None
@@ -251,7 +323,9 @@ class GameScreen(Screen):
     def _clear_choice_ui(self) -> None:
         self.board_view.choice_tiles = []
         self.board_view.choice_pawns = []
+        self.board_view.choice_selected = []
         self.choice_prompt.hide()
+        self.card_picker.hide()
         self.status_bar.clear()
 
     # ── abilities, reveals and the chest limit ───────────────────────────────
@@ -300,6 +374,64 @@ class GameScreen(Screen):
         self.view_seat = event.player_index
         self.chest_choice.show(cards, event.limit, event.new_card_uid)
 
+    def _on_card_spotlighted(self, event: ev.CardSpotlighted) -> None:
+        """A card the player did not choose, held up before it takes effect.
+
+        The state has already changed — Troll has already played the card and
+        the pawn is already where it will be (N36).  What this buys is the
+        picture arriving in a sensible order: the card is shown with a ring
+        round it, the board holds its walks back for the same few seconds, and
+        only then does anything appear to move.
+        """
+        card = self.state.find_card(event.card_uid)
+        if card is None:
+            card = self.state.deck(event.deck_id).find_discarded(event.card_uid)
+        theme = self.app.renderer.theme
+        colour = theme.deck_colors.get(event.deck_id) or theme.brass
+        subtitle = event.caption or ("zagrywasz tę kartę" if event.forced else "")
+        self.reveal.show(
+            [RevealPhase(event.title, event.text, event.seconds, colour,
+                         subtitle=subtitle, halo=True)],
+            card,
+        )
+        self._spotlight_left = max(self._spotlight_left, event.seconds)
+        self.board_view.walk_delay = self._spotlight_left
+        player = self.state.player(event.player_index)
+        if player is not None:
+            self.status_bar.notify(f"{player.name}: {event.title}",
+                                   duration=max(3.0, event.seconds))
+
+    def _on_turn_skipped(self, event: ev.TurnSkipped) -> None:
+        player = self.state.player(event.player_index)
+        if player is None:
+            return
+        because = f" — {event.source}" if event.source else ""
+        self.status_bar.notify(f"{player.name}: tura pominięta{because}",
+                               duration=4.0)
+
+    def _on_card_stolen(self, event: ev.CardStolen) -> None:
+        """Say that a card changed hands, without saying which one.
+
+        The event carries no title on purpose, and this must not go looking for
+        one: everybody sees this message, and only the two players involved are
+        entitled to know what moved.
+        """
+        victim = self.state.player(event.from_player)
+        thief = self.state.player(event.to_player)
+        if victim is None or thief is None:
+            return
+        self.status_bar.notify(
+            f"{thief.name} zabiera kartę ruchu graczowi {victim.name}",
+            duration=4.5,
+        )
+
+    def _on_card_draw_effect(self, event: ev.CardDrawEffect) -> None:
+        """A card that did something the moment it was drawn."""
+        if not self.state.may_control(event.player_index):
+            return
+        self.status_bar.notify(f"{event.title}: {event.description}",
+                               duration=5.0)
+
     def _on_mod_placed(self, event: ev.ModPlaced) -> None:
         self.status_bar.notify("Mod Patusa aktywny")
 
@@ -324,6 +456,116 @@ class GameScreen(Screen):
             self._cancel_choice()
 
     # ── input ────────────────────────────────────────────────────────────────
+    # ── the match beginning and ending ───────────────────────────────────────
+    def _on_match_began(self, event: ev.MatchBegan) -> None:
+        self.match_start.hide()
+        self.status_bar.notify("Gra się rozpoczęła!")
+
+    def _on_pawn_eliminated(self, event: ev.PawnEliminated) -> None:
+        """A check failed.  Every notepad crosses the colour off by itself.
+
+        Nothing is drawn from here: the panel reads
+        ``state.eliminated_pawns`` directly, so a player who joined late or
+        reconnected sees the same crossings without having heard the event.
+        """
+        pawn = self.state.library.pawn(event.pawn_id)
+        name = pawn.name if pawn is not None else event.pawn_id
+        self.status_bar.notify(f"Sprawdzono wieżę: {name} to nie Piotrek", 5.0)
+
+    def _on_match_ended(self, event: ev.MatchEnded) -> None:
+        self._clear_choice_ui()
+        self.chest_choice.hide()
+        self.reveal.dismiss()
+        self._sync_match_overlays()
+
+    def _sync_match_overlays(self) -> None:
+        """Put the overlays where the state says they should be.
+
+        Driven by the state rather than by the events that got it there, so a
+        reconnecting player who replays twenty commands in one frame ends up
+        looking at the right thing.
+        """
+        state = self.state
+        if state.victory is not None:
+            self.match_start.hide()
+            if not self.victory.active:
+                pawn = state.library.pawn(state.victory.pawn_id)
+                self.victory.show(
+                    state.victory,
+                    pawn.color if pawn is not None else (200, 200, 200),
+                    pawn.name if pawn is not None else state.victory.pawn_id,
+                    can_return=self.service is not None,
+                )
+            return
+        if not state.phase.playable:
+            self.match_start.show(*self._identity_question())
+        else:
+            self.match_start.hide()
+
+    def _identity_question(self):
+        """(colours to offer, colour already chosen) for the start overlay.
+
+        Online the SERVER decides whether this machine is asked at all, and it
+        asks exactly one; the answer is simply mirrored here.  In a hot-seat
+        game there is nobody to ask and nobody to hide from — everyone is at the
+        one keyboard — so the same overlay is shown to whoever is sitting there
+        and the choice is applied locally.  One flow, two sources of the
+        question.
+        """
+        state = self.state
+        if self.service is not None:
+            return (list(getattr(self.service, "identity_request", []) or []),
+                    getattr(self.service, "identity_pawn", "") or "")
+        pawns = [{"id": p.id, "name": p.name, "color": list(p.color)}
+                 for p in state.library.pawns]
+        return pawns, state.piotrek_pawn or ""
+
+    def _handle_victory_event(self, event: pygame.event.Event,
+                              mouse: Tuple[int, int]) -> None:
+        """Two buttons, and nothing else works.  The match is over."""
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return
+        choice = self.victory.button_at(mouse)
+        if choice == VictoryOverlay.QUIT:
+            self._leave_match(quit_app=True)
+        elif choice == VictoryOverlay.MENU:
+            # Leave the room properly on the way out: the seat is freed for
+            # whoever is left rather than held open by a grace period nobody is
+            # waiting through.
+            self._leave_match()
+        elif choice == VictoryOverlay.RETURN:
+            self._return_to_lobby()
+
+    def _return_to_lobby(self) -> None:
+        """Ask the server to put the room back, and wait to be told it did.
+
+        Nothing happens on screen here for the same reason starting a match
+        shows nothing: the answer is a broadcast, and every player leaves the
+        table on the same message rather than each on their own click.
+        """
+        if self.service is None:
+            self._leave_match()
+            return
+        self.service.return_to_lobby()
+
+    def _handle_identity_event(self, event: pygame.event.Event,
+                               mouse: Tuple[int, int]) -> None:
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return
+        pawn_id = self.match_start.pawn_at(mouse)
+        if not pawn_id:
+            return
+        if self.service is not None:
+            self.service.choose_identity(pawn_id)
+            # Shown as chosen at once.  The server confirms within a frame or
+            # two and the overlay is rebuilt from its answer either way.
+            self.match_start.show(self.match_start.pawns, pawn_id)
+            return
+        # Hot-seat: this machine is its own authority, so the colour is stored
+        # here and the match begins through the ordinary command path.
+        if self.state.set_piotrek_pawn(pawn_id):
+            self.submit(cmd.BeginMatch())
+
     def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
         # 1. Renaming captures all input until confirmed or cancelled.
         if self.rename.active:
@@ -339,6 +581,18 @@ class GameScreen(Screen):
             self._handle_pause_event(event, mouse)
             return
 
+        # 1a. The ending is absolutely modal: there is no game left to play, and
+        #     Esc must not offer to "leave" a match that has already finished.
+        if self.victory.active:
+            self._handle_victory_event(event, mouse)
+            return
+
+        # 1b. Before the first move: Piotrek picks a colour, everybody else
+        #     waits.  Nothing on the table responds to anything.
+        if self.match_start.active:
+            self._handle_identity_event(event, mouse)
+            return
+
         if event.type == pygame.KEYDOWN:
             self._handle_key(event)
             return
@@ -347,6 +601,12 @@ class GameScreen(Screen):
         #    player says which cards they keep.
         if self.chest_choice.active:
             self._handle_chest_event(event, mouse)
+            return
+
+        # 2a. Somebody else's hand is fully modal too: it is showing hidden
+        #     information, so nothing else may happen behind it.
+        if self.card_picker.active:
+            self._handle_card_picker_event(event, mouse)
             return
 
         # 3. A pending decision blocks everything except answering it and
@@ -435,6 +695,9 @@ class GameScreen(Screen):
         if choice is None:
             return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if choice.count > 1:
+                self._handle_multi_click(choice, mouse)
+                return
             option = self.choice_prompt.option_at(mouse)
             if option is not None:
                 self._resolve_choice(option)
@@ -459,6 +722,43 @@ class GameScreen(Screen):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
             self.board_view.handle_event(event, mouse)
 
+    def _handle_multi_click(self, choice: PendingChoice,
+                            mouse: Tuple[int, int]) -> None:
+        """A click while several things are being picked: add, remove, confirm.
+
+        Picking is not answering here — the engine wants a list, so the click
+        toggles and the Confirm button sends.  Clicking a pawn that is already
+        picked takes it back out and the numbers close up behind it.
+        """
+        if self.choice_prompt.confirm_hit(mouse):
+            self._resolve_multi_choice()
+            return
+        option = self.choice_prompt.option_at(mouse)
+        if option is None and choice.kind == "pawn":
+            # The pawn out on the board is the other way to answer, and for a
+            # question about pawns it is the natural one.
+            pawn_id = self.board_view.token_at(mouse)
+            if pawn_id is not None and pawn_id in {o[0] for o in choice.options}:
+                option = pawn_id
+        if option is None:
+            return
+        self.choice_prompt.toggle(option)
+        self.board_view.choice_selected = list(self.choice_prompt.selected)
+
+    def _handle_card_picker_event(self, event: pygame.event.Event,
+                                  mouse: Tuple[int, int]) -> None:
+        """Clicking one of somebody else's cards takes it; right-click backs out."""
+        if event.type != pygame.MOUSEBUTTONDOWN:
+            return
+        if event.button == 3:
+            self._cancel_choice()
+            return
+        if event.button != 1:
+            return
+        uid = self.card_picker.card_at(self.app.layout, mouse)
+        if uid is not None:
+            self._resolve_choice(str(uid))
+
     def _handle_chest_event(self, event: pygame.event.Event,
                             mouse: Tuple[int, int]) -> None:
         if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
@@ -480,6 +780,7 @@ class GameScreen(Screen):
         seat = self.state.active_player_index
         return (self.state.may_control(seat)
                 and self.chest_choice.active is False
+                and self.card_picker.active is False
                 and self.pending_choice is None)
 
     def _end_turn_click(self, mouse: Tuple[int, int]) -> bool:
@@ -566,6 +867,13 @@ class GameScreen(Screen):
         entries.append(("quit", "Wyjdź z gry"))
         return entries
 
+    def _back_to_lobby_screen(self) -> None:
+        """The room is a lobby again.  Go and sit in it."""
+        from .network_screens import LobbyScreen
+
+        self.app.replace(LobbyScreen(self.app, self.library or self.state.library,
+                                     self.service))
+
     def _leave_match(self, quit_app: bool = False, message: str = "") -> None:
         """Close the connection and go back where the player came from."""
         if self.service is not None:
@@ -584,7 +892,8 @@ class GameScreen(Screen):
         if event.key == pygame.K_F3:
             self.debug_panel.toggle()
             return
-        if event.key == pygame.K_ESCAPE and self.pending_choice is not None:
+        if event.key == pygame.K_ESCAPE and (self.pending_choice is not None
+                                             or self.card_picker.active):
             self._cancel_choice()
             return
         if event.key == pygame.K_ESCAPE and self.reveal.active:
@@ -664,8 +973,15 @@ class GameScreen(Screen):
             if dropped:
                 self._leave_match(message=dropped)
                 return
+            if self.service.session is None:
+                # The room went back to being a lobby, which only happens after
+                # a finished match.  Everybody makes this trip on the server's
+                # message, not on their own click.
+                self._back_to_lobby_screen()
+                return
         else:
             self.session.poll()
+        self._sync_match_overlays()
         # Holding Backspace in the rename box only deletes continuously while
         # this is called; the field has no clock of its own.
         self.rename.update(dt)
@@ -676,8 +992,17 @@ class GameScreen(Screen):
         self.recently_played.update(dt, mouse)
         self.status_bar.update(dt)
         self.choice_prompt.update(dt, mouse)
+        self.match_start.update(dt, mouse)
+        self.victory.update(dt, mouse)
         self.reveal.update(dt)
         self.chest_choice.update(dt, self.app.layout, mouse)
+        self.card_picker.update(dt, self.app.layout, mouse)
+        if self._spotlight_left > 0.0:
+            # Counts down in real time and only affects the picture: the walk
+            # it is holding back has already happened as far as the rules are
+            # concerned, so a slow machine sees it late, never differently.
+            self._spotlight_left = max(0.0, self._spotlight_left - dt)
+            self.board_view.walk_delay = self._spotlight_left
         self._sync_drag_preview()
 
     def _draw_return_button(self, ctx: HudContext) -> None:
@@ -791,7 +1116,14 @@ class GameScreen(Screen):
         self.reveal.draw(self.app.renderer, self.cards, self.app.layout, surface)
         self.chest_choice.draw(self.app.renderer, self.cards, self.app.layout,
                                surface, ctx.mouse)
+        self.card_picker.draw(self.app.renderer, self.cards, self.app.layout,
+                              surface, ctx.mouse)
         self._draw_connection_banner(ctx)
+        # Above everything except the pause menu: these two ARE the screen
+        # while they are up.
+        self.match_start.draw(self.app.renderer, self.app.layout, surface,
+                              ctx.mouse)
+        self.victory.draw(self.app.renderer, self.app.layout, surface, ctx.mouse)
         self.pause_menu.draw(self.app.renderer, self.app.layout, surface)
         self.debug_panel.draw(
             self.app.renderer, self.app.layout, surface,

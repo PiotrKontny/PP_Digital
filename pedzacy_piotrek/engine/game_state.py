@@ -36,9 +36,21 @@ from . import commands as cmd
 from . import effects
 from . import events as ev
 from .statuses import STATUS_LABELS, Status, StatusKind, StatusTracker, Subject
-from .turn_order import TurnSlot, chest_recipient_for_round, compute_round_turn_order
+from .turn_order import (NextTurn, TurnSlot, chest_recipient_for_round,
+                         compute_round_turn_order)
+from .victory import MatchPhase, Verdict
 
 Point = Tuple[float, float]
+
+#: How many turns in a row may be taken over by a card before the engine stops
+#: chaining them.  Six players each holding a Troll is five interrupts and a
+#: playable turn; anything past this is a content bug, and a table that hangs
+#: is worse than a card that quietly does nothing.
+MAX_TURN_INTERRUPTS = 12
+
+#: Depth limit for cards that draw cards that draw cards.  Troll replaces
+#: itself, and the replacement can be another Troll.
+MAX_DRAW_CHAIN = 8
 
 
 @dataclass
@@ -91,10 +103,28 @@ class GameState:
         self.statuses = StatusTracker()
         #: Chest cards waiting for their owner to choose which to keep.
         self.pending_chest_choice: Optional[Tuple[int, List[int]]] = None
+        #: How deep the current draw-causes-a-draw chain is.  Not game state —
+        #: it never leaves a command — so it stays out of the snapshot.
+        self._draw_depth: int = 0
 
         self.tokens: Dict[str, TokenState] = {}
         for i, pawn in enumerate(library.pawns):
             self.tokens[pawn.id] = TokenState(pawn=pawn, position=board.camp_position(i))
+
+        #: Where the match is: waiting for Piotrek to choose a colour, running,
+        #: or finished.  An online match starts in STARTING and is let out of
+        #: it by ``BeginMatch``; a hot-seat game has nobody to wait for and
+        #: starts playing at once.
+        self.phase: MatchPhase = (MatchPhase.STARTING
+                                  if config.piotrek_picks_pawn
+                                  else MatchPhase.PLAYING)
+        #: Colours a failed check has ruled out, in the order they were ruled
+        #: out.  PUBLIC — this is the notepad, and it is the same on every
+        #: machine because it arrives as a command like everything else.
+        self.eliminated_pawns: List[str] = []
+        #: Set once, by ``DeclareVictory``.  Its presence *is* "the game is
+        #: over", which is why nothing else needs a second flag.
+        self.victory: Optional[Verdict] = None
 
         # Turn-order roster: fixed for the whole game, shuffled once at start.
         self.piotrek_name: Optional[str] = None
@@ -181,24 +211,69 @@ class GameState:
         )
         return None if name is None else int(name)
 
-    def next_seat(self) -> Tuple[int, int]:
-        """Who plays after the current seat, and in which round.
+    def current_slot(self) -> int:
+        """Where in this round's order the active seat is standing.
 
-        Returns ``(seat, round)``.  When the round's slots run out the round
-        advances, which is also what opens the chest and hands one out.
+        ``turn_slot`` is a CURSOR and is the authority: a seat can occupy more
+        than one slot in a round (Piotrek occupies every third one), so the
+        seat number alone cannot say where in the round we are.  This only
+        repairs the cursor when it has genuinely come adrift — a seat set
+        directly in edit mode, or a state built before the cursor was carried.
         """
         order = self.seat_order()
         if not order:
-            return self.active_player_index, self.round_number
-        try:
-            position = order.index(self.active_player_index, self.turn_slot)
-        except ValueError:
-            position = self.turn_slot if self.turn_slot < len(order) else -1
+            return 0
+        if 0 <= self.turn_slot < len(order) \
+                and order[self.turn_slot] == self.active_player_index:
+            return self.turn_slot
+        return self._slot_for_seat(order, self.active_player_index, self.turn_slot)
+
+    @staticmethod
+    def _slot_for_seat(order: List[int], seat: int, from_slot: int = 0) -> int:
+        """The seat's slot at or after ``from_slot``, else its first, else 0.
+
+        Searching forward matters: rewinding to the first occurrence of a seat
+        that appears several times is exactly the bug that made the round
+        restart for ever at Piotrek.
+        """
+        for position in range(max(0, from_slot), len(order)):
+            if order[position] == seat:
+                return position
+        for position, occupant in enumerate(order):
+            if occupant == seat:
+                return position
+        return 0
+
+    def next_turn(self) -> NextTurn:
+        """Who plays after the current seat, in which round, and in which slot.
+
+        The slot comes back with the seat because the caller cannot recompute
+        it: ``order.index(seat)`` finds the FIRST slot that seat occupies, and
+        for a seat that appears several times in a round that silently rewinds
+        the round to its beginning.  That was the turn-order bug — the game
+        looped over the first three slots for ever and the seats further down
+        the round never played at all.
+        """
+        order = self.seat_order()
+        if not order:
+            return NextTurn(self.active_player_index, self.round_number, 0)
+        position = self.current_slot()
         if position + 1 < len(order):
-            return order[position + 1], self.round_number
+            return NextTurn(order[position + 1], self.round_number, position + 1)
         next_round = self.round_number + 1
         following = self.seat_order(next_round)
-        return (following[0] if following else self.active_player_index), next_round
+        if not following:
+            return NextTurn(self.active_player_index, self.round_number, position)
+        return NextTurn(following[0], next_round, 0)
+
+    def next_seat(self) -> Tuple[int, int]:
+        """``(seat, round)`` for callers that only want to look ahead.
+
+        Advancing the turn must use :meth:`next_turn`, which also reports the
+        slot to move the cursor to.
+        """
+        upcoming = self.next_turn()
+        return upcoming.seat, upcoming.round_number
 
     def find_card(self, uid: int) -> Optional[Card]:
         for player in self.players:
@@ -212,6 +287,45 @@ class GameState:
 
     def pawn_of_player(self, player: Player) -> Optional[str]:
         return player.secret_pawn
+
+    # ── the hidden identity ──────────────────────────────────────────────────
+    @property
+    def piotrek_seat(self) -> Optional[int]:
+        for player in self.players:
+            if player.is_piotrek:
+                return player.index
+        return None
+
+    @property
+    def piotrek_pawn(self) -> Optional[str]:
+        """The hidden colour, on the copies of the state entitled to know it.
+
+        The authority's copy has it because it was told privately; Piotrek's
+        own machine has it because it is his own secret.  Every other client
+        holds ``None`` here for the whole match and finds out at the reveal.
+        """
+        seat = self.piotrek_seat
+        player = self.player(seat) if seat is not None else None
+        return player.secret_pawn if player is not None else None
+
+    def set_piotrek_pawn(self, pawn_id: str) -> bool:
+        """Record the chosen colour.  Refuses an unknown or a second choice.
+
+        Never reached through a command, and that is the point: a command is
+        logged and broadcast, and this must not be either.
+        """
+        seat = self.piotrek_seat
+        player = self.player(seat) if seat is not None else None
+        if player is None or player.secret_pawn:
+            return False
+        if self.library.pawn(pawn_id) is None:
+            return False
+        player.secret_pawn = pawn_id
+        return True
+
+    @property
+    def finished(self) -> bool:
+        return self.phase is MatchPhase.ENDED
 
     # ── command dispatch ─────────────────────────────────────────────────────
     #: Commands that act on behalf of one player.  Outside edit mode the local
@@ -332,6 +446,24 @@ class GameState:
                 delay=presentation.delay,
             ))
 
+        # What a card does on the way IN.  Same registry and same operations as
+        # a card that is played; ``_after_draw`` knowing about Gamechanger by
+        # name was already one branch too many, and Troll and Stańczyk would
+        # have made it three.
+        if card.on_draw is not None and self._draw_depth < MAX_DRAW_CHAIN:
+            self._draw_depth += 1
+            try:
+                result = effects.resolve_on_draw(self, card, player.index)
+                if isinstance(result, effects.Plan) and result.ok:
+                    events.extend(self._execute(result, player.index))
+                    events.append(ev.CardDrawEffect(
+                        player.index, card.uid, card.title, result.description))
+                elif isinstance(result, (effects.Refusal, effects.NotAvailable)):
+                    events.append(ev.ActionRejected(
+                        getattr(result, "reason", ""), "on_draw"))
+            finally:
+                self._draw_depth -= 1
+
         if card.deck_id == settings.DECK_CHEST:
             held = self.chest_cards(player)
             limit = self.chest_limit(player)
@@ -347,6 +479,28 @@ class GameState:
                 ))
         return events
 
+    def _draw_one(self, player: Player, deck: Deck) -> List[ev.GameEvent]:
+        """Take one card off a pile into a hand, with everything that follows.
+
+        Factored out because an EFFECT can now draw cards (Troll replaces
+        itself, Spy replaces what it took) and a draw owes the same debts
+        wherever it comes from: reshuffle when the pile runs out, report the
+        draw, and let the card act on the way in — including drawing again.
+        """
+        if player.hand_is_full:
+            return [ev.ActionRejected(f"Ręka pełna ({RULES.max_hand} kart)", "draw")]
+        events: List[ev.GameEvent] = []
+        needed_reshuffle = not deck.draw_pile and bool(deck.discard_pile)
+        card = deck.take_card()
+        if card is None:
+            return [ev.ActionRejected(f"Talia „{deck.name}” jest pusta", "draw")]
+        if needed_reshuffle:
+            events.append(ev.DeckReshuffled(deck.id))
+        player.add_card(card)
+        events.append(ev.CardDrawn(player.index, deck.id, card.uid))
+        events.extend(self._after_draw(player, card))
+        return events
+
     def _discard_card(self, command: cmd.DiscardCard) -> List[ev.GameEvent]:
         player = self.player(command.player_index)
         if player is None:
@@ -354,6 +508,10 @@ class GameState:
         card = player.card_by_uid(command.card_uid)
         if card is None:
             return [ev.ActionRejected("Karty nie ma na ręce", command.kind)]
+        if card.locked:
+            return [ev.ActionRejected(
+                f"„{card.title}” zostaje na ręce — nie możesz jej odrzucić",
+                command.kind)]
         player.remove_card(card)
         self.decks[card.deck_id].return_card(card)
         events: List[ev.GameEvent] = [
@@ -380,6 +538,13 @@ class GameState:
         card = player.card_by_uid(command.card_uid)
         if card is None:
             return [ev.ActionRejected("Karty nie ma na ręce", command.kind)]
+        if card.locked:
+            # Troll is not a card you play; it is a card that plays you.  The
+            # refusal is in the engine rather than in the fan because a client
+            # that simply does not draw the lock must still be told no.
+            return [ev.ActionRejected(
+                f"„{card.title}” zagra się sama, kiedy przyjdzie twoja tura",
+                command.kind)]
 
         result = effects.resolve(self, card, player.index, command.choices)
         pending = self._pending_choice(
@@ -444,19 +609,122 @@ class GameState:
             held += 1
         return events
 
-    def _end_turn(self) -> List[ev.GameEvent]:
-        """Hand the turn to whoever the cadence says is next."""
-        seat, round_number = self.next_seat()
+    def _end_turn(self, depth: int = 0) -> List[ev.GameEvent]:
+        """Hand the turn to whoever the cadence says is next, then start it."""
+        upcoming = self.next_turn()
         events: List[ev.GameEvent] = []
-        if round_number != self.round_number:
-            events.extend(self._begin_round(round_number))
-        order = self.seat_order()
-        self.turn_slot = order.index(seat) if seat in order else 0
-        if seat != self.active_player_index:
-            self.active_player_index = seat
-            self.turn_counter += 1
-            events.append(ev.ActivePlayerChanged(seat))
-            events.extend(self._expire_statuses())
+        if upcoming.round_number != self.round_number:
+            events.extend(self._begin_round(upcoming.round_number))
+        # The cursor is MOVED, never looked up.  ``order.index(seat)`` would
+        # find the first slot that seat occupies, so a seat appearing more than
+        # once in a round — Piotrek, every third slot — rewound the round to
+        # its start and the later seats never played.
+        self.turn_slot = upcoming.slot
+        # A turn began, so the turn counter moves and statuses age, EVEN IF the
+        # same seat is up again.  With a single hunter the cadence really does
+        # give them two slots in a row (Piotrek takes every third), and the old
+        # test skipped the counter there: statuses outstayed their welcome and
+        # the round panel never refreshed.
+        self.active_player_index = upcoming.seat
+        self.turn_counter += 1
+        events.append(ev.ActivePlayerChanged(upcoming.seat))
+        events.extend(self._expire_statuses())
+        events.extend(self._begin_turn(depth))
+        return events
+
+    # ── the start of a turn, which the player may not get to play ────────────
+    def _begin_turn(self, depth: int = 0) -> List[ev.GameEvent]:
+        """Let anything holding this seat's turn take it.
+
+        Two things can, in this order:
+
+        * ``SKIP_TURN`` — the seat simply loses the move (Lubin, Dziubdziuch,
+          and now Stańczyk's ancestors).  This status has existed since stage 4
+          and until now NOTHING READ IT, so every card that granted it was
+          quietly doing nothing.
+        * ``TURN_INTERRUPT`` — a card takes the turn over and says, in its own
+          data, what to do with it.
+
+        Both consume the turn: the hand is refilled by the ordinary rule and
+        play passes on, exactly as if a card had been played.  That is why the
+        end-of-turn draw happens here and not inside the operations — an
+        interrupt is a turn, and a turn ends the same way whoever spent it.
+
+        The recursion is real (a skipped turn can hand on to another skipped
+        turn) and bounded, because a table where every seat is interrupted for
+        ever is a content bug and must not become a hang.
+        """
+        if depth >= MAX_TURN_INTERRUPTS:
+            return []
+        player = self.active_player
+        events = self._resolve_skip_turn(player)
+        if events is None:
+            events = self._resolve_turn_interrupt(player)
+        if events is None:
+            return []
+        events.extend(self._refill_movement_hand(player))
+        events.extend(self._end_turn(depth + 1))
+        return events
+
+    def _resolve_skip_turn(self, player: Player) -> Optional[List[ev.GameEvent]]:
+        """Spend a SKIP_TURN status, if this seat has one."""
+        status = self.statuses.find(
+            StatusKind.SKIP_TURN, Subject.PLAYER, str(player.index)
+        )
+        if status is None:
+            return None
+        self.statuses.discard(status)
+        return [
+            ev.StatusEnded(status.kind.value, status.subject.value,
+                           status.subject_id,
+                           STATUS_LABELS.get(status.kind, status.kind.value)),
+            ev.TurnSkipped(player.index, status.source),
+        ]
+
+    def _resolve_turn_interrupt(
+        self, player: Player
+    ) -> Optional[List[ev.GameEvent]]:
+        """Run the oldest turn interrupt queued against this seat.
+
+        The status carries the effect specification, so this method knows
+        nothing about Troll or Stańczyk — it looks up a handler like every
+        other resolution in the game does.  Whatever the interrupt was for, the
+        card that started it is discarded afterwards: it has now happened, and
+        leaving a locked card in the hand would lock the hand.
+        """
+        queued = self.statuses.interrupts_for(player.index)
+        if not queued:
+            return None
+        status = queued[0]
+        self.statuses.discard(status)
+
+        events: List[ev.GameEvent] = [
+            ev.StatusEnded(status.kind.value, status.subject.value,
+                           status.subject_id,
+                           STATUS_LABELS.get(status.kind, status.kind.value))
+        ]
+        card_uid = status.data.get("card_uid")
+        raw = status.data.get("effect") or {}
+        result = effects.resolve_spec(
+            self, EffectSpec.from_dict(raw), player.index,
+            source=status.source,
+            card_uid=int(card_uid) if card_uid is not None else None,
+        )
+        if isinstance(result, effects.Plan) and result.ok:
+            events.extend(self._execute(result, player.index))
+        else:
+            # An interrupt that cannot resolve still costs the turn, and says so
+            # rather than leaving the table wondering why nothing happened.
+            events.append(ev.ActionRejected(
+                getattr(result, "reason", "Efekt nie zadziałał"), "turn_interrupt"))
+
+        source = player.card_by_uid(int(card_uid)) if card_uid is not None else None
+        if source is not None:
+            player.remove_card(source)
+            self.decks[source.deck_id].return_card(source)
+            events.append(
+                ev.CardDiscarded(player.index, source.deck_id, source.uid)
+            )
         return events
 
     def _begin_round(self, round_number: int) -> List[ev.GameEvent]:
@@ -573,6 +841,11 @@ class GameState:
                 options=[(option.id, option.label) for option in result.options],
                 tiles=list(result.tiles),
                 pawns=list(result.pawns),
+                card_options=[o.card_uid for o in result.options
+                              if o.card_uid is not None],
+                count=result.count,
+                ordered=result.ordered,
+                owner=result.owner,
                 card_uid=card_uid,
                 ability_source=ability_source,
                 answered=dict(getattr(command, "choices", {}) or {}),
@@ -633,7 +906,7 @@ class GameState:
         ]
 
     def _op_grant_status(self, op: effects.GrantStatus, actor: int) -> List[ev.GameEvent]:
-        status = self.statuses.add(op.status)
+        status = self.statuses.add(op.status, replace=not op.stack)
         return [
             ev.StatusGranted(
                 kind=status.kind.value,
@@ -681,6 +954,9 @@ class GameState:
         events.extend(self._install_mod(card, actor, prefer_free_slot=True))
         return events
 
+    def _op_turn_lost(self, op: effects.TurnLost, actor: int) -> List[ev.GameEvent]:
+        return [ev.TurnSkipped(op.player_index, op.source)]
+
     def _op_announce(self, op: effects.Announce, actor: int) -> List[ev.GameEvent]:
         return [ev.ActionRejected(op.text, "announce")]
 
@@ -723,6 +999,133 @@ class GameState:
         # discard pile like any other played card rather than back into the
         # draw pile where it could be revealed again.
         deck.return_card(card)
+        return events
+
+    def _op_move_by_steps(
+        self, op: effects.MoveBySteps, actor: int
+    ) -> List[ev.GameEvent]:
+        """Move a pawn a distance, routed against the board as it is NOW.
+
+        The difference from :class:`~...effects.MovePawn` is the moment the
+        route is worked out.  When a card moves two pawns in order, the second
+        one departs from a board the first one has already rearranged — it may
+        have been carried along inside a tower.  Recomputing here means the
+        second move is an ordinary move of a pawn that really is where the
+        engine thinks it is, so stacking, towers and the walk animation need no
+        special case at all.
+        """
+        start = effects.pawn_index(self, op.pawn_id)
+        route = effects.route_between(self, start, op.steps)
+        if not route:
+            return []
+        return self._op_move_pawn(
+            effects.MovePawn(
+                pawn_id=op.pawn_id,
+                from_index=start,
+                route=route,
+                tiles=effects.tile_route(self, op.pawn_id, route, op.chosen_tile),
+                carried=effects.travellers(self, op.pawn_id),
+            ),
+            actor,
+        )
+
+    def _op_draw_cards(self, op: effects.DrawCards, actor: int) -> List[ev.GameEvent]:
+        """Draw into a hand as part of an effect (Troll's replacement, Spy's)."""
+        player = self.player(op.player_index)
+        deck = self.decks.get(op.deck_id)
+        if player is None or deck is None:
+            return [ev.ActionRejected("Nieznana talia lub gracz", "draw_cards")]
+        events: List[ev.GameEvent] = []
+        for _ in range(max(1, int(op.count))):
+            if player.hand_is_full:
+                break
+            events.extend(self._draw_one(player, deck))
+        return events
+
+    def _op_transfer_card(
+        self, op: effects.TransferCard, actor: int
+    ) -> List[ev.GameEvent]:
+        """Move a card from one hand to another (Spy).
+
+        The event names the seats and the uid, never the title: it goes to the
+        whole table, and only the thief was shown the hand.
+        """
+        source = self.player(op.from_player)
+        target = self.player(op.to_player)
+        if source is None or target is None:
+            return [ev.ActionRejected("Nieznany gracz", "transfer_card")]
+        card = source.card_by_uid(op.card_uid)
+        if card is None:
+            return [ev.ActionRejected("Tej karty już tam nie ma", "transfer_card")]
+        if target.hand_is_full:
+            return [ev.ActionRejected("Ręka jest pełna", "transfer_card")]
+        source.remove_card(card)
+        target.add_card(card)
+        return [ev.CardStolen(source.index, target.index, card.uid, card.deck_id)]
+
+    def _op_highlight_card(
+        self, op: effects.HighlightHeldCard, actor: int
+    ) -> List[ev.GameEvent]:
+        """Point at a card in a hand.  Presentation, with no state behind it."""
+        player = self.player(op.player_index)
+        card = player.card_by_uid(op.card_uid) if player is not None else None
+        if card is None:
+            return []
+        return [ev.CardSpotlighted(
+            player_index=op.player_index, deck_id=card.deck_id, card_uid=card.uid,
+            title=card.title, text=card.text, seconds=op.seconds,
+            caption=op.caption,
+        )]
+
+    def _op_forced_play(
+        self, op: effects.ForcedPlay, actor: int
+    ) -> List[ev.GameEvent]:
+        """Pick a card out of a hand and play it for its owner (Troll).
+
+        The pick uses the game's seeded RNG from a list sorted by uid, so every
+        machine reaches for the same card from the same command — the hand's
+        own order is not something two replicas are obliged to agree on, and
+        relying on it would desync the moment one of them differed.
+
+        A card whose effect is not implemented, or one that would need a
+        decision nobody can be asked for in the middle of an execution, is
+        played and discarded and does nothing.  That is the rule: a forced play
+        must never be able to stop the game.
+        """
+        player = self.player(op.player_index)
+        if player is None:
+            return [ev.ActionRejected("Nieznany gracz", "forced_play")]
+
+        def pool(deck_ids: Sequence[str]) -> List[Card]:
+            wanted = set(deck_ids)
+            return sorted(
+                (c for c in player.hand
+                 if c.deck_id in wanted and c.uid != op.source_uid),
+                key=lambda c: c.uid,
+            )
+
+        candidates = pool(op.priority_decks) or pool(op.fallback_decks)
+        if not candidates:
+            return [ev.ActionRejected(
+                f"{player.name} nie ma karty, którą można zagrać", "forced_play")]
+
+        card = self.rng.choice(candidates)
+        events: List[ev.GameEvent] = [ev.CardSpotlighted(
+            player_index=player.index, deck_id=card.deck_id, card_uid=card.uid,
+            title=card.title, text=card.text, seconds=op.seconds,
+            caption=op.caption, forced=True,
+        )]
+
+        result = effects.resolve(self, card, player.index)
+        player.remove_card(card)
+        self.decks[card.deck_id].return_card(card)
+        if isinstance(result, effects.Plan) and result.ok:
+            events.extend(self._execute(result, player.index))
+            description = result.description
+        else:
+            description = "bez efektu"
+        events.append(ev.CardPlayed(player.index, card.deck_id, card.uid,
+                                    card.title, description))
         return events
 
     def _place_mod(self, command: cmd.PlaceMod) -> List[ev.GameEvent]:
@@ -926,8 +1329,26 @@ class GameState:
         """
         return self.edit_mode or player_index == self.local_seat
 
+    def _phase_refusal(self) -> Optional[str]:
+        """Why nothing may be played right now, or ``None`` when it may.
+
+        The gate is in the engine rather than in the interface because it has
+        to hold against a client that simply does not draw the overlay: until
+        Piotrek has chosen a colour there is no game to play, and once somebody
+        has won there is nothing left to change.
+        """
+        if self.phase is MatchPhase.STARTING:
+            return "Gra jeszcze się nie zaczęła"
+        if self.phase is MatchPhase.ENDED:
+            return "Gra została zakończona"
+        return None
+
     def _authorise(self, command: cmd.Command) -> Optional[ev.GameEvent]:
         """Is this machine allowed to issue this command right now?"""
+        if not isinstance(command, cmd.AUTHORITY_ONLY):
+            problem = self._phase_refusal()
+            if problem is not None:
+                return ev.ActionRejected(problem, command.kind)
         if isinstance(command, self._OWNED_BY_PLAYER):
             refusal = self._reject_foreign(
                 getattr(command, "player_index", 0), command.kind
@@ -953,6 +1374,14 @@ class GameState:
         from the host's own map, never from the message, so a client cannot
         claim to be somebody else.
         """
+        if isinstance(command, cmd.AUTHORITY_ONLY):
+            # Starting the match, ruling a colour out and declaring a winner
+            # are the server's own words.  A client that sends one is claiming
+            # to have won.
+            return "Tę decyzję podejmuje serwer"
+        problem = self._phase_refusal()
+        if problem is not None:
+            return problem
         index = getattr(command, "player_index", None)
         if index is not None and int(index) != seat:
             return "To nie jest twoje miejsce przy stole"
@@ -1004,9 +1433,23 @@ class GameState:
         if command.player_index == self.active_player_index:
             return []
         self.active_player_index = command.player_index
+        # Move the cursor to the slot that seat actually occupies, searching
+        # FORWARD from where the round already stands.  Without this the cursor
+        # still pointed at the previous seat's slot, and the next end-of-turn
+        # resumed the round from the wrong place — a seat jumped to in edit
+        # mode either replayed slots already spent or skipped the rest.
+        order = self.seat_order()
+        self.turn_slot = self._slot_for_seat(
+            order, self.active_player_index, self.turn_slot
+        ) if order else 0
         self.turn_counter += 1
         events: List[ev.GameEvent] = [ev.ActivePlayerChanged(self.active_player_index)]
         events.extend(self._expire_statuses())
+        # A turn handed over directly is still a turn beginning.  Without this
+        # a seat holding a Troll could be given the turn in edit mode and keep
+        # it: the interrupt would wait for an end-of-turn that had already been
+        # skipped past, and the card would look broken to whoever was testing.
+        events.extend(self._begin_turn())
         return events
 
     def _expire_statuses(self) -> List[ev.GameEvent]:
@@ -1076,6 +1519,43 @@ class GameState:
         marked = player.toggle_mark(command.pawn_id)
         return [ev.MarkToggled(player.index, command.pawn_id, marked)]
 
+    # ── the match itself (authority-issued; see commands.AUTHORITY_ONLY) ─────
+    def _begin_match(self, command: cmd.BeginMatch) -> List[ev.GameEvent]:
+        if self.phase is not MatchPhase.STARTING:
+            return [ev.ActionRejected("Gra już się rozpoczęła", command.kind)]
+        self.phase = MatchPhase.PLAYING
+        return [ev.MatchBegan()]
+
+    def _eliminate_pawn(self, command: cmd.EliminatePawn) -> List[ev.GameEvent]:
+        if self.library.pawn(command.pawn_id) is None:
+            return [ev.ActionRejected("Nieznany kolor", command.kind)]
+        if command.pawn_id in self.eliminated_pawns:
+            # Not an error worth showing anybody: a colour is checked once, and
+            # arriving here twice means a duplicate delivery, not a rules bug.
+            return []
+        self.eliminated_pawns.append(command.pawn_id)
+        return [ev.PawnEliminated(command.pawn_id)]
+
+    def _declare_victory(self, command: cmd.DeclareVictory) -> List[ev.GameEvent]:
+        verdict = Verdict.from_dict({
+            "outcome": command.outcome, "pawn_id": command.pawn_id,
+            "piotrek_seat": command.piotrek_seat,
+            "piotrek_name": command.piotrek_name,
+        })
+        if verdict is None:
+            return [ev.ActionRejected("Nieznany wynik gry", command.kind)]
+        if self.victory is not None:
+            return []
+        self.victory = verdict
+        self.phase = MatchPhase.ENDED
+        # The reveal is now public, so the state may hold it: every client
+        # learns the colour here and nowhere else.
+        seat = self.player(verdict.piotrek_seat)
+        if seat is not None and verdict.pawn_id:
+            seat.secret_pawn = verdict.pawn_id
+        return [ev.MatchEnded(verdict.outcome.value, verdict.pawn_id,
+                              verdict.piotrek_seat, verdict.piotrek_name)]
+
     # ── snapshot (used by the network layer and by save/load) ────────────────
     def snapshot(self) -> dict:
         return {
@@ -1092,9 +1572,23 @@ class GameState:
                 for did, d in self.decks.items()
             },
             "players": [p.to_public_dict() for p in self.players],
+            # Public, and deliberately so: phase, notepad and verdict are the
+            # same on every machine, so they belong in the fingerprint.  The
+            # hidden colour is NOT here — it is not in ``to_public_dict``
+            # either — which is what lets the authority hold a secret without
+            # every client resyncing against it for ever.
+            "phase": self.phase.value,
+            "eliminated": list(self.eliminated_pawns),
+            "victory": self.victory.to_dict() if self.victory else None,
             "piotrek_name": self.piotrek_name,
             "hunter_names": list(self.hunter_names),
             "turn": self.turn_counter,
+            # The cursor is in the fingerprint because it is real turn state and
+            # cannot be recomputed from the seat: several slots in a round hold
+            # the same seat.  Two machines standing on different slots agree on
+            # whose turn it is and disagree about the whole rest of the round,
+            # which is precisely the kind of drift that used to go unnoticed.
+            "turn_slot": self.turn_slot,
             "statuses": self.statuses.to_list(),
             "ability_uses": {
                 p.index: [
@@ -1107,6 +1601,12 @@ class GameState:
 
     _OPERATIONS = {
         effects.MovePawn: _op_move_pawn,
+        effects.MoveBySteps: _op_move_by_steps,
+        effects.DrawCards: _op_draw_cards,
+        effects.TransferCard: _op_transfer_card,
+        effects.HighlightHeldCard: _op_highlight_card,
+        effects.ForcedPlay: _op_forced_play,
+        effects.TurnLost: _op_turn_lost,
         effects.GrantStatus: _op_grant_status,
         effects.ClearStatus: _op_clear_status,
         effects.SpendStatus: _op_spend_status,
@@ -1133,4 +1633,7 @@ class GameState:
         cmd.SetActivePlayer: _set_active_player,
         cmd.RenamePlayer: _rename_player,
         cmd.ToggleMark: _toggle_mark,
+        cmd.BeginMatch: _begin_match,
+        cmd.EliminatePawn: _eliminate_pawn,
+        cmd.DeclareVictory: _declare_victory,
     }

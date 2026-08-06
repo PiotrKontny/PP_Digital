@@ -231,6 +231,11 @@ class ServerHub:
             return room.submit(identity.peer_id, message.payload)
         if kind is MessageType.REQUEST_SYNC:
             return room.resync(identity.peer_id)
+        if kind is MessageType.IDENTITY_CHOSEN:
+            return room.set_identity(identity.peer_id,
+                                     str(message.payload.get("pawn_id", "")))
+        if kind is MessageType.RETURN_TO_LOBBY:
+            return room.return_to_lobby(identity.peer_id)
         return [(connection.cid, Message.error(
             f"Serwer nie obsługuje wiadomości „{kind.value}”"))]
 

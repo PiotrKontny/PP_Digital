@@ -145,6 +145,27 @@ class NetworkService:
         self.client.start_game()
         return self.client.session
 
+    # ── the hidden identity ──────────────────────────────────────────────────
+    @property
+    def identity_request(self) -> List[dict]:
+        """The colours this player is being asked to choose between.
+
+        Empty on every machine except Piotrek's, and empty again the moment he
+        has chosen.  The screens ask this rather than the client so nothing
+        above this layer has to know a message type.
+        """
+        return self.client.identity_request
+
+    @property
+    def identity_pawn(self) -> str:
+        return self.client.identity_pawn
+
+    def choose_identity(self, pawn_id: str) -> None:
+        self.client.choose_identity(pawn_id)
+
+    def return_to_lobby(self) -> None:
+        self.client.return_to_lobby()
+
     def poll(self, library: Optional[ContentLibrary] = None) -> None:
         self.client.poll(library)
         self.notices.extend(self.client.drain_notices())

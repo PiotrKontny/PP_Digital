@@ -79,6 +79,14 @@ class GameClient:
         self.state: Optional[GameState] = None
         self.seat: Optional[int] = None
 
+        #: The pawn colours Piotrek is being asked to choose between, or an
+        #: empty list.  Set only on the one machine the question was sent to;
+        #: every other client never sees this message at all.
+        self.identity_request: List[Dict[str, Any]] = []
+        #: The colour this player chose, once the server has confirmed it.
+        #: Piotrek's own secret, on Piotrek's own machine.
+        self.identity_pawn: str = ""
+
         #: Set when the player is out of the game for good, with the reason.
         #: A temporary drop does NOT set it — that is what reconnection is for.
         self.disconnected: Optional[str] = None
@@ -221,6 +229,20 @@ class GameClient:
     def start_game(self) -> None:
         self._send(Message(MessageType.START_GAME))
 
+    def choose_identity(self, pawn_id: str) -> None:
+        """Piotrek names his colour.  One message, to the server, once.
+
+        Not a command: commands are logged and replayed to the whole table,
+        which is the one thing this must never be.
+        """
+        if not pawn_id:
+            return
+        self._send(Message.identity_chosen(pawn_id))
+
+    def return_to_lobby(self) -> None:
+        """After a finished match: put the room back and play again."""
+        self._send(Message(MessageType.RETURN_TO_LOBBY))
+
     def request_sync(self) -> None:
         """Ask for the whole match again.  Rate-limited, because a client that
         is confused would otherwise ask once per frame and drown the server."""
@@ -313,14 +335,39 @@ class GameClient:
         self._flush_pending()
 
     def _on_lobby_state(self, message: Message) -> None:
+        was_playing = self.session is not None
         self.lobby_state = LobbyState.from_dict(message.payload)
         seat = self.lobby_state.seat_of(self.peer_id or "")
         if seat is not None:
             self.seat = seat.seat
         if self.lobby_state.code:
             self._intent = None     # we are in; nothing left to retry
+        if was_playing and not self.lobby_state.started:
+            # The room went back to being a lobby, which only happens after a
+            # finished match.  Dropping the session here is what takes every
+            # screen back to the poczekalnia, including the ones that did not
+            # press the button.
+            self._end_match_locally()
+
+    def _end_match_locally(self) -> None:
+        """Forget the match, keep the connection.  Ready for the next one."""
+        self.session = None
+        self.state = None
+        self._sequence = 0
+        self.identity_request = []
+        self.identity_pawn = ""
 
     def _on_game_start(self, message: Message) -> None:
+        """A brand new match.  Nothing of the last one may come with it.
+
+        ``identity_pawn`` in particular: it is re-applied to every replica this
+        client builds, so a colour left over from the previous game would be
+        written into the new one and Piotrek would be shown the wrong badge —
+        or, worse, a hunter would be shown one at all.
+        """
+        self.identity_request = []
+        self.identity_pawn = ""
+        self._sequence = 0
         self._build_match(message.payload.get("config"),
                           message.payload.get("seats"))
 
@@ -376,6 +423,11 @@ class GameClient:
                     player.name = seat.nickname
         self.seat = my_seat
         self.state = state
+        if self.identity_pawn:
+            # A rebuild after a resync starts from the seed again, so the
+            # colour this player chose has to be put back into the fresh
+            # replica.  It is his own secret; nothing crosses the wire.
+            state.set_piotrek_pawn(self.identity_pawn)
 
         if self.session is None:
             self.session = NetworkSession(state, self.submit_command,
@@ -438,6 +490,24 @@ class GameClient:
             return
         session.note_answer()
         session.bus.emit_all(session.state.apply(command, local=False))
+
+    def _on_identity_required(self, message: Message) -> None:
+        """Only Piotrek's machine ever gets here."""
+        pawns = message.payload.get("pawns") or []
+        self.identity_request = [dict(p) for p in pawns if isinstance(p, Mapping)]
+
+    def _on_identity_accepted(self, message: Message) -> None:
+        """The server has the colour.  Keep a copy: it is this player's own.
+
+        Written into the local replica as well, so Piotrek's own screen can
+        show him which pawn is his.  On every other client that field stays
+        ``None`` until the reveal — nothing here is broadcast.
+        """
+        self.identity_pawn = str(message.payload.get("pawn_id", ""))
+        self.identity_request = []
+        state = self.state
+        if state is not None and self.identity_pawn:
+            state.set_piotrek_pawn(self.identity_pawn)
 
     def _on_player_disconnected(self, message: Message) -> None:
         name = str(message.payload.get("name", "Gracz"))
@@ -505,6 +575,8 @@ GameClient._HANDLERS = {
     MessageType.COMMAND_ACCEPTED: GameClient._on_command_accepted,
     MessageType.COMMAND_REJECTED: GameClient._on_command_rejected,
     MessageType.CHOICE_REQUIRED: GameClient._on_choice_required,
+    MessageType.IDENTITY_REQUIRED: GameClient._on_identity_required,
+    MessageType.IDENTITY_ACCEPTED: GameClient._on_identity_accepted,
     MessageType.PLAYER_DISCONNECTED: GameClient._on_player_disconnected,
     MessageType.PLAYER_RECONNECTED: GameClient._on_player_reconnected,
     MessageType.ERROR: GameClient._on_error,

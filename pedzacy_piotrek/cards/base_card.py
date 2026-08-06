@@ -29,11 +29,16 @@ class Badge:
 
     ``pawn`` is either the id of a pawn colour or the literal ``"rainbow"``
     meaning "any pawn" (drawn as a colour wheel).
+
+    ``count`` is how many pawn markers the badge shows.  A card that moves two
+    pawns says so on its face; before this the badge could only ever draw one
+    dot and "Plagiat!" looked exactly like a card that moves a single pawn.
     """
 
     pawn: str
     sign: str
     arrow: bool = False
+    count: int = 1
 
     @property
     def is_rainbow(self) -> bool:
@@ -45,6 +50,7 @@ class Badge:
             pawn=raw.get("pawn", "rainbow"),
             sign=str(raw.get("sign", "")),
             arrow=bool(raw.get("arrow", False)),
+            count=max(1, int(raw.get("count", 1))),
         )
 
 
@@ -114,9 +120,18 @@ class EffectSpec:
 
         Any parameter set to the literal ``"choice"`` counts — ``target`` on a
         move, ``source`` on Janek, and whatever a future effect names its own
-        decisions — so this does not need updatingevery time an effect is added.
+        decisions — so this does not need updating every time an effect is added.
         Open-ended movement (one field or two, either way) counts as well.
+
+        Some effects ask without any parameter saying so: Spy always opens a
+        hand, and a multi-pawn move always asks which pawns.  Those declare
+        ``"asks": true``.  It matters beyond the interface — the random reveal
+        picks only from cards that resolve on their own, because the executor
+        cannot open a prompt halfway through applying a plan, and a card that
+        lied about it would simply fizzle.
         """
+        if bool(self.get("asks")):
+            return True
         if any(value == "choice" for value in self.params.values()):
             return True
         return bool(self.get("step_options")) or self.direction == "either"
@@ -167,12 +182,25 @@ class CardDef:
     effect: Optional[EffectSpec] = None
     #: An activated ability (character cards and Piotrek's skills).
     ability: Optional[EffectSpec] = None
+    #: What happens the moment this card ARRIVES in a hand, as opposed to when
+    #: it is played.  Same registry, same handlers, same Operations — a card
+    #: that acts on the way in is data, not a branch in ``_after_draw``.
+    on_draw: Optional[EffectSpec] = None
     #: How many times the ability may be used over a whole game.  The card texts
     #: say "1x" / "5x" for humans; this is the number the rules use.
     uses: Optional[int] = None
     #: Always-on modifiers granted by holding the card (ChatGPT's smaller hand).
     passive: Mapping[str, Any] = field(default_factory=dict)
     presentation: Optional[Presentation] = None
+    #: A card the player may not play or discard by hand.  Troll is held until
+    #: the effect it started resolves itself; letting the player throw it away
+    #: would be a way to dodge it.  The engine enforces this, not the interface.
+    locked: bool = False
+    #: False keeps the card out of the opening deal (Troll: nobody may begin the
+    #: game holding one).  ``deal_starting_hands`` withholds and redraws.
+    #: Read through :attr:`opens_a_hand`, never directly — a locked card is
+    #: excluded whatever this says.
+    in_opening_hand: bool = True
     role: Optional[str] = None
     #: Path to artwork relative to ``assets/images``.  Adding a picture to a
     #: card is a one-line change in the JSON; the renderer falls back to the
@@ -183,6 +211,19 @@ class CardDef:
     @property
     def is_piotrek(self) -> bool:
         return self.role == "piotrek"
+
+    @property
+    def opens_a_hand(self) -> bool:
+        """Whether this card may be part of an opening hand.
+
+        A locked card never may, and that is derived rather than trusted to the
+        JSON on purpose.  Locked cards are unlocked by the thing that dealt
+        them — Troll and Stańczyk arm themselves through ``on_draw``, which the
+        opening deal does not run — so one dealt at setup can be neither played
+        nor discarded nor resolved, and quietly costs its owner a hand slot for
+        the whole game.  Stańczyk shipped exactly that way for one commit.
+        """
+        return self.in_opening_hand and not self.locked
 
     @classmethod
     def from_dict(cls, deck_id: str, raw: Dict[str, Any]) -> "CardDef":
@@ -198,11 +239,15 @@ class CardDef:
             badge=Badge.from_dict(badge_raw) if badge_raw else None,
             effect=EffectSpec.from_dict(effect_raw) if effect_raw else None,
             ability=EffectSpec.from_dict(ability_raw) if ability_raw else None,
+            on_draw=(EffectSpec.from_dict(raw["on_draw"])
+                     if raw.get("on_draw") else None),
             uses=int(raw["uses"]) if raw.get("uses") is not None else None,
             passive=dict(raw.get("passive") or {}),
             presentation=(
                 Presentation.from_dict(presentation_raw) if presentation_raw else None
             ),
+            locked=bool(raw.get("locked", False)),
+            in_opening_hand=bool(raw.get("in_opening_hand", True)),
             role=raw.get("role"),
             image=raw.get("image"),
             count=int(raw.get("count", 1)),
@@ -280,6 +325,19 @@ class Card:
         return self.definition.ability
 
     @property
+    def on_draw(self) -> Optional["EffectSpec"]:
+        return self.definition.on_draw
+
+    @property
+    def locked(self) -> bool:
+        """True when the player may neither play nor discard this by hand."""
+        return self.definition.locked
+
+    @property
+    def opens_a_hand(self) -> bool:
+        return self.definition.opens_a_hand
+
+    @property
     def presentation(self) -> Optional["Presentation"]:
         return self.definition.presentation
 
@@ -313,7 +371,12 @@ class Card:
         Cards that need a decision count: the engine asks for it.  This used to
         also mean "needs no decision", which quietly made every select-a-token
         card discard itself when clicked.
+
+        A locked card is never playable by hand however good its effect looks:
+        Troll's whole mechanic is that the player does not get to choose.
         """
+        if self.definition.locked:
+            return False
         return self.definition.effect is not None
 
     @property

@@ -139,6 +139,16 @@ class ChoiceRequired(GameEvent):
     tiles: List[int] = field(default_factory=list)
     #: Pawns to highlight, when the decision is about pawns.
     pawns: List[str] = field(default_factory=list)
+    #: Cards to lay out, when the decision is about cards (Spy).
+    card_options: List[int] = field(default_factory=list)
+    #: How many things must be picked, and whether the order matters.  One and
+    #: False is the ordinary single answer; anything else turns the prompt into
+    #: a multi-select whose answer travels as the ids joined by commas.
+    count: int = 1
+    ordered: bool = False
+    #: Whose cards are being shown, for a card question.  This event goes to the
+    #: asking player alone (N40), which is what keeps the hand hidden.
+    owner: Optional[int] = None
     #: The action that is waiting, so the interface can resubmit it.
     card_uid: Optional[int] = None
     ability_source: Optional[str] = None
@@ -220,6 +230,66 @@ class CardTransformed(GameEvent):
 
 
 @dataclass
+class CardSpotlighted(GameEvent):
+    """Hold a card up for a few seconds before what it does happens.
+
+    Emitted when the game takes a turn over: Troll's forced play and Stańczyk's
+    skipped turn both point at a card the player did not choose, and the player
+    is entitled to see which one before the board moves under them.
+
+    The state does NOT wait for it (N36) — by the time this is read the card has
+    already resolved.  ``seconds`` is how long the view should dwell, and it is
+    also how long the view holds back the walk that follows, so what the player
+    watches is: card, pause, movement.
+    """
+
+    player_index: int
+    deck_id: str
+    card_uid: int
+    title: str
+    text: str = ""
+    seconds: float = 2.0
+    caption: str = ""
+    #: True when the game chose the card, false when it merely names the card
+    #: that caused what is about to happen.
+    forced: bool = False
+
+
+@dataclass
+class TurnSkipped(GameEvent):
+    """A seat lost its move — Stańczyk, Lubin, Dziubdziuch."""
+
+    player_index: int
+    source: str = ""
+
+
+@dataclass
+class CardStolen(GameEvent):
+    """A card changed hands (Spy).
+
+    Names the seats and the uid and NOT the title: this is broadcast to
+    everybody, and only the two players involved are allowed to know what moved.
+    A client that holds the card can look the title up in its own hand; one that
+    does not, cannot.
+    """
+
+    from_player: int
+    to_player: int
+    card_uid: int
+    deck_id: str
+
+
+@dataclass
+class CardDrawEffect(GameEvent):
+    """A card did something the moment it was drawn (Troll, Stańczyk)."""
+
+    player_index: int
+    card_uid: int
+    title: str
+    description: str = ""
+
+
+@dataclass
 class ChestCardAwarded(GameEvent):
     """A chest card was handed out automatically at the start of a round."""
 
@@ -277,6 +347,33 @@ class MarkToggled(GameEvent):
     player_index: int
     pawn_id: str
     marked: bool
+
+
+# ── the match itself ─────────────────────────────────────────────────────────
+@dataclass
+class MatchBegan(GameEvent):
+    """Piotrek has chosen; the table is live.  Everyone gets this at once."""
+
+
+@dataclass
+class PawnEliminated(GameEvent):
+    """A checked colour turned out not to be Piotrek's.
+
+    Every notepad crosses it off, on every machine, because everybody watched
+    the same tower being lifted.
+    """
+
+    pawn_id: str
+
+
+@dataclass
+class MatchEnded(GameEvent):
+    """Somebody won.  Carries the reveal, because the secret is now public."""
+
+    outcome: str
+    pawn_id: str
+    piotrek_seat: int
+    piotrek_name: str = ""
 
 
 @dataclass

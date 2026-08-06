@@ -14,6 +14,9 @@ let a remote player's decision appear on everybody's table later.
   Seks z pedałami turns up.
 * :class:`ChestChoice` — the chest hand limit, laying the candidates out side
   by side so the player can pick what to keep.
+* :class:`CardPicker` — a row of somebody else's cards to choose one from
+  (Spy).  Deliberately generic: it is handed a list of cards and a title and
+  knows nothing about which card opened it.
 """
 
 from __future__ import annotations
@@ -66,14 +69,25 @@ class ChoicePrompt:
         self.kind = "option"
         self.options: List[ChoiceOptionView] = []
         self.appear = 0.0
+        #: How many answers the engine wants, and whether their order matters.
+        self.count = 1
+        self.ordered = False
+        #: The picks so far, in the order they were made.  Empty for the
+        #: ordinary one-answer question, where picking IS answering.
+        self.selected: List[str] = []
+        self.confirm_rect = pygame.Rect(0, 0, 0, 0)
 
     def show(self, prompt: str, kind: str, options: Sequence[Tuple[str, str]],
-             description: str = "", colors: Optional[Dict[str, Color]] = None) -> None:
+             description: str = "", colors: Optional[Dict[str, Color]] = None,
+             count: int = 1, ordered: bool = False) -> None:
         self.active = True
         self.prompt = prompt
         self.kind = kind
         self.description = description
         self.appear = 0.0
+        self.count = max(1, count)
+        self.ordered = ordered
+        self.selected = []
         self.options = [
             ChoiceOptionView(id=oid, label=label, color=(colors or {}).get(oid))
             for oid, label in options
@@ -82,10 +96,48 @@ class ChoicePrompt:
     def hide(self) -> None:
         self.active = False
         self.options = []
+        self.selected = []
 
     @property
     def is_pawn_choice(self) -> bool:
         return self.kind == "pawn"
+
+    # ── multi-select ─────────────────────────────────────────────────────────
+    @property
+    def is_multi(self) -> bool:
+        return self.count > 1
+
+    @property
+    def ready(self) -> bool:
+        """Exactly the number asked for — not at least, not at most."""
+        return len(self.selected) == self.count
+
+    def toggle(self, option_id: str) -> None:
+        """Add a pick, or take it back.
+
+        Clicking something already chosen removes it and everything after it
+        keeps its relative order, so the numbers close up: picking green then
+        pink then unpicking green leaves pink as number one.  That is what the
+        numbers promise, and a list that renumbered by rewriting history would
+        break the promise.
+        """
+        if option_id in self.selected:
+            self.selected.remove(option_id)
+            return
+        if len(self.selected) >= self.count:
+            # Full: the oldest pick makes way, which is friendlier than a click
+            # that does nothing and a player wondering why.
+            self.selected.pop(0)
+        self.selected.append(option_id)
+
+    def order_of(self, option_id: str) -> Optional[int]:
+        """1-based position in the selection, or None when it is not picked."""
+        if option_id not in self.selected:
+            return None
+        return self.selected.index(option_id) + 1
+
+    def confirm_hit(self, position: Tuple[int, int]) -> bool:
+        return self.ready and self.confirm_rect.collidepoint(position)
 
     # ── geometry ─────────────────────────────────────────────────────────────
     def _lay_out(self, layout: Layout) -> pygame.Rect:
@@ -111,6 +163,8 @@ class ChoicePrompt:
         for option in self.options:
             option.rect = pygame.Rect(x, y, width, height)
             x += width + gap
+        self.confirm_rect = (layout.choice_confirm_rect() if self.is_multi
+                             else pygame.Rect(0, 0, 0, 0))
         return panel
 
     def option_at(self, position: Tuple[int, int]) -> Optional[str]:
@@ -148,13 +202,58 @@ class ChoicePrompt:
 
         for option in self.options:
             rect = option.rect.move(0, slide - int(option.hover * 4))
+            picked = self.order_of(option.id)
+            if picked is not None:
+                # A chosen option sits proud of the row, so the selection reads
+                # at a glance and not only from the little number on it.
+                rect = rect.move(0, -6)
             if self.is_pawn_choice:
                 self._draw_pawn_option(r, option, rect, surface)
             else:
                 self._draw_button_option(r, option, rect, surface)
+            if picked is not None:
+                self._draw_pick_number(r, rect, picked, surface)
 
-        r.text("Esc anuluje", r.fonts.label(), theme.text_dim, surface,
+        if self.is_multi:
+            self._draw_confirm(r, surface, slide, mouse)
+            hint = f"wybrano {len(self.selected)}/{self.count}  ·  Esc anuluje"
+        else:
+            hint = "Esc anuluje"
+        r.text(hint, r.fonts.label(), theme.text_dim, surface,
                midbottom=(panel.centerx, panel.bottom - 2))
+
+    def _draw_pick_number(self, r: Renderer, rect: pygame.Rect, order: int,
+                          surface: pygame.Surface) -> None:
+        """The ① ② badge saying when this one moves.
+
+        Drawn as a number rather than as circled digits from the font, because
+        those only go up to twenty and are missing from plenty of the fonts a
+        player might have installed.
+        """
+        theme = r.theme
+        radius = max(9, rect.width // 7)
+        centre = (rect.right - radius // 2, rect.top + radius // 2)
+        r.aa_circle(centre, radius, theme.prompt_bright, darken(theme.prompt, 0.6),
+                    2, surface)
+        r.text(str(order), r.fonts.get(max(12, radius + 2), bold=True),
+               theme.ink, surface, center=centre)
+
+    def _draw_confirm(self, r: Renderer, surface: pygame.Surface, slide: int,
+                      mouse: Tuple[int, int]) -> None:
+        """Only live once EXACTLY the requested number has been picked."""
+        theme = r.theme
+        rect = self.confirm_rect.move(0, slide)
+        enabled = self.ready
+        hovered = enabled and rect.collidepoint(mouse)
+        style = r.emphasis(fill=theme.btn_primary_bg,
+                           border=theme.btn_primary_border,
+                           text=theme.btn_primary_text,
+                           hover=1.0 if hovered else 0.0, enabled=enabled,
+                           accent=theme.brass_light)
+        drawn = r.interactive_panel(rect, style, surface, radius=9)
+        label = "ZATWIERDŹ" if enabled else f"WYBIERZ {self.count}"
+        r.fit_spaced_text(label, drawn, style.text, surface,
+                          base_size=15, spacing=2, padding=12)
 
 
     def _draw_pawn_option(self, r: Renderer, option: ChoiceOptionView,
@@ -210,11 +309,20 @@ class ChoicePrompt:
 # ── a card announcing itself ─────────────────────────────────────────────────
 @dataclass
 class RevealPhase:
+    """One card, held up for a few seconds.
+
+    ``halo`` is what makes a spotlight different from an announcement: a card
+    the game chose FOR the player gets a pulsing ring, because they are about
+    to lose a turn to it and "look at this" has to carry further than "here is
+    what you drew".
+    """
+
     title: str
     text: str
     seconds: float
     color: Optional[Color] = None
     subtitle: str = ""
+    halo: bool = False
 
 
 class RevealOverlay:
@@ -317,6 +425,17 @@ class RevealOverlay:
             if phase.subtitle:
                 r.text(phase.subtitle, r.fonts.deck(), theme.prompt_bright, surface,
                        midtop=(rect.centerx, rect.bottom + 12), shadow=True)
+
+        if phase.halo:
+            # The card's OWN rectangle lights up (N44): no disc behind it, and
+            # nothing that reaches past its corners.  The pulse is a sine of
+            # elapsed time, so it breathes at the same rate whatever the frame
+            # rate is doing.
+            pulse = 0.5 + 0.5 * math.sin(self.elapsed * 5.0)
+            r.shape_glow(rect, theme.prompt_bright, surface, radius=16,
+                         strength=0.55 + 0.45 * pulse)
+            pygame.draw.rect(surface, theme.prompt_bright, rect.inflate(10, 10),
+                             3, border_radius=18)
 
 
 # ── the chest hand limit ─────────────────────────────────────────────────────
@@ -531,3 +650,93 @@ class PauseMenu:
             drawn = r.interactive_panel(rect, style, surface, radius=10)
             r.fit_spaced_text(label.upper(), drawn, style.text, surface,
                               base_size=17, spacing=2, padding=16)
+
+
+# ── somebody else's cards, to take one from ──────────────────────────────────
+class CardPicker:
+    """A row of cards the player must pick exactly one of (Spy).
+
+    Deliberately told nothing about why it is open.  It is handed a title, a
+    caption and a list of cards, and it answers with a uid — so the next card
+    that needs "choose one of these" reuses it by passing a different list,
+    which is the same bargain :class:`ChoicePrompt` makes for pawns and fields.
+
+    It is only ever opened on the machine of the player who asked.  The engine
+    sends ``ChoiceRequired`` to the asker alone (N40), so the cards it lays out
+    never reach anybody who is not entitled to see them.
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self.cards: List[Card] = []
+        self.title = ""
+        self.caption = ""
+        self.appear = 0.0
+        self.hover: Dict[int, float] = {}
+
+    def show(self, cards: Sequence[Card], title: str, caption: str = "") -> None:
+        self.active = True
+        self.cards = list(cards)
+        self.title = title
+        self.caption = caption
+        self.appear = 0.0
+        self.hover = {}
+
+    def hide(self) -> None:
+        self.active = False
+        self.cards = []
+        self.hover = {}
+
+    def card_at(self, layout: Layout, position: Tuple[int, int]) -> Optional[int]:
+        count = len(self.cards)
+        for index, card in enumerate(self.cards):
+            if layout.card_picker_card_rect(index, count).collidepoint(position):
+                return card.uid
+        return None
+
+    def update(self, dt: float, layout: Layout, mouse: Tuple[int, int]) -> None:
+        if not self.active:
+            return
+        self.appear = approach(self.appear, 1.0, 12.0, dt)
+        count = len(self.cards)
+        for index, card in enumerate(self.cards):
+            rect = layout.card_picker_card_rect(index, count)
+            wanted = 1.0 if rect.collidepoint(mouse) else 0.0
+            self.hover[card.uid] = approach(self.hover.get(card.uid, 0.0),
+                                            wanted, 16.0, dt)
+
+    def draw(self, r: Renderer, cards: CardRenderer, layout: Layout,
+             surface: pygame.Surface, mouse: Tuple[int, int]) -> None:
+        if not self.active:
+            return
+        theme = r.theme
+        count = len(self.cards)
+        if count == 0:
+            return
+        panel = layout.card_picker_panel(count)
+        _dim(surface, surface.get_rect(), int(160 * min(1.0, self.appear)))
+        r.premium_panel(panel, surface, radius=16, border=theme.brass_light,
+                        glow=theme.brass, glow_strength=0.4, shadow=22)
+
+        r.spaced_text(self.title.upper(), r.fonts.get(22, bold=True),
+                      theme.brass_bright, surface,
+                      center=(panel.centerx, panel.top + 24), spacing=3,
+                      shadow=True)
+        if self.caption:
+            r.text(self.caption, r.fonts.deck(), theme.text_dim, surface,
+                   midtop=(panel.centerx, panel.top + 38))
+
+        for index, card in enumerate(self.cards):
+            rect = layout.card_picker_card_rect(index, count)
+            hover = self.hover.get(card.uid, 0.0)
+            draw_rect = rect.move(0, -int(12 * hover))
+            border = theme.deck_colors.get(card.deck_id)
+            if hover > 0.02:
+                r.shape_glow(draw_rect, theme.prompt, surface, radius=10,
+                             strength=0.55 * hover)
+            cards.draw_in(card, draw_rect, surface, highlighted=hover > 0.5,
+                          border_color=border)
+
+        r.text("kliknij kartę, którą zabierasz  ·  Esc anuluje",
+               r.fonts.label(), theme.text_dim, surface,
+               midbottom=(panel.centerx, panel.bottom - 14))

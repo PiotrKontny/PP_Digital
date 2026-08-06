@@ -155,13 +155,18 @@ WORKING:
   railway.json, requirements-server.txt (websockets only, no pygame),
   .railwayignore, and an HTTP health page at / so a first-time deployer can
   tell "server down" from "address wrong".
-- 562 automated tests.
+- WIN CONDITIONS, SERVER-SIDE (stage 17). Piotrek picks his colour privately at
+  the start; the server is the only machine told, and it is the only one that
+  judges. Piotrek wins by walking that colour to the meta; the hunters win by
+  stacking every pawn on one field and having his at the bottom. A wrong tower
+  crosses that colour off every notepad at once. Two different endings, with a
+  reveal, a way back to the poczekalnia and a way out.
+- 647 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - Cards whose effect requires a player decision (14 of 69 movement cards, all
   chest cards, all mods). They are inert: they can be drawn, discarded and put
   in the mod rack, and their text tells players what to do manually.
-- Win conditions and the "check the bottom of the tower" action.
 - Turn enforcement: any player can act at any time (deliberate, for testing).
 - Sound and music.
 
@@ -231,6 +236,9 @@ pedzacy_piotrek/
                      gameplay state and the queries the rules ask of them.
     game_state.py    The whole rulebook. _HANDLERS maps Command -> method.
     setup.py         create_game(), deck building, character dealing, hands.
+    victory.py       HOW A MATCH ENDS, and the only place that decides it.
+                     MatchPhase / Outcome / Verdict + review(state), which
+                     answers with COMMANDS.  See VICTORY.
     turn_order.py    compute_round_turn_order, chest_recipient_for_round.
     animation.py     Easing functions, Tween, Animator, approach helpers.
   render/
@@ -259,8 +267,15 @@ pedzacy_piotrek/
                      nothing.  See CLIPBOARD.
     board_view.py    Board viewport: camera, pawn animation, walks, stacks.
     hand_fan.py      The hand fan and the card-play gesture.
-    overlays.py      ChoicePrompt (the engine asking a question), RevealOverlay
-                     (Gamechanger, random reveals), ChestChoice (hand limit).
+    overlays.py      ChoicePrompt (the engine asking a question, including
+                     MULTI-SELECT with numbered order — see MULTI-SELECT),
+                     RevealOverlay (Gamechanger, random reveals, and the forced
+                     -play spotlight), ChestChoice (hand limit), CardPicker
+                     (looking into another hand — Spy).
+    match_overlays.py MatchStartOverlay (Piotrek's private colour pick, and the
+                     wait everybody else sees) and VictoryOverlay (the two
+                     endings).  PRESENTATION ONLY — they report a click and
+                     decide nothing.
     hud.py           HudContext + panels (RoundPanel, DeckPanel, ModPanel,
                      CharacterPanel, PlayerTiles, RecentlyPlayed, StatusBar).
                      RecentlyPlayed also has draw_overlay(), drawn last of all.
@@ -286,7 +301,11 @@ pedzacy_piotrek/
   assets/            Optional PNG/TTF/OGG overrides (see assets/README.md).
   main.py            Entry point and CLI.
 
-tests/               test_engine, test_board, test_session, test_ui.
+tests/               test_engine, test_board, test_session, test_ui,
+                     test_card_effects (stage 19: the four cards above),
+                     test_turn_progression (stage 20: the turn cursor —
+                     it walks real turns, which is the only kind of test
+                     that can see a scheduler stall).
 tools/               screenshot.py, inspect_frame.py (headless verification).
 docs/ARCHITECTURE.md Polish design rationale for the owner.
 
@@ -395,7 +414,9 @@ HOW GAMEPLAY STATES WORK
 
 engine/statuses.py.  A status has a kind, a subject (PAWN / PLAYER / TABLE), a
 payload and an expiry measured in TURNS (GameState.turn_counter, which advances
-when the active seat changes).  "For one full turn" is duration_turns=1.
+ONCE PER TURN TAKEN — not only when the seat changes; with a single hunter the
+cadence really does give one seat two slots in a row, and a turn that did not
+count was a status that never expired).  "For one full turn" is duration_turns=1.
 
 Kinds: FROZEN, SKIP_TURN, LINKED, EXTRA_TURN, MOVEMENT_BONUS,
 RESTRICTED_MOVEMENT, FORBIDDEN_ADJACENCY, CHECK_REFUSAL.
@@ -410,6 +431,112 @@ NEVER add a one-off boolean to GameState for a new mechanic — add a StatusKind
 
 
 ================================================================================
+THE TURN CURSOR  (stage 20 — read before touching the turn loop)
+================================================================================
+
+WHAT WENT WRONG
+---------------
+The game looped over the first three slots of round one for ever:
+
+    Piotrek -> Glockboy -> Atencjusz -> Piotrek -> Glockboy -> Atencjusz -> ...
+
+Everybody further down the round never played. Rounds never ended, so the round
+counter froze, chest hand-outs stopped, statuses never expired, and Troll and
+Stańczyk could not be reached at all.
+
+It was reported as a regression from stage 19. IT WAS NOT. The same three-seat
+loop reproduces on the stage-18 tree, byte-identical code, and thirteen of the
+new turn tests fail there too. Stage 19 only made it VISIBLE, by adding the
+first mechanics that depend on a round ever finishing. Worth remembering: "the
+last change broke it" and "the last change revealed it" look identical from the
+outside, and the way to tell them apart is to run the reproduction against the
+previous tree before touching anything.
+
+ROOT CAUSE
+----------
+`turn_slot` is a CURSOR into the round's order, but `_end_turn` recovered it by
+SEARCHING for the seat that was about to play:
+
+    self.turn_slot = order.index(seat) if seat in order else 0     # WRONG
+
+`list.index` returns the FIRST match. Piotrek occupies every third slot, so
+round one's order
+
+    [Piotrek, Glockboy, Atencjusz, Piotrek, Dziubdziuch, Mitoman, Piotrek, ...]
+       0         1          2         3          4           5        6
+
+put the cursor back to 0 every single time his turn came round. The cursor
+advanced 0, 1, 2, then reset to 0 and did it again for ever.
+
+The reason it is a search at all is the underlying mistake: A SEAT DOES NOT
+IDENTIFY A SLOT. Any seat may hold several slots in one round, so the seat
+number simply does not contain enough information to say where in the round the
+game is standing.
+
+THE CORRECTED FLOW
+------------------
+`next_turn()` returns a `NextTurn(seat, round_number, slot)` — the slot travels
+WITH the seat so that no caller can reconstruct it wrongly — and `_end_turn`
+moves the cursor to the slot it was handed:
+
+    upcoming = self.next_turn()
+    if upcoming.round_number != self.round_number:
+        self._begin_round(upcoming.round_number)      # cursor back to 0
+    self.turn_slot = upcoming.slot                    # MOVED, never searched
+    self.active_player_index = upcoming.seat
+    self.turn_counter += 1                            # every turn counts
+    self._begin_turn(depth)                           # interrupts may take it
+
+INVARIANT, and the whole point:  seat_order()[turn_slot] == active_player_index
+
+`current_slot()` is the only reader, and it repairs the cursor when that
+invariant is broken from outside — a seat set directly in edit mode, a round
+jumped to, a state built before the cursor existed. `_slot_for_seat()` searches
+FORWARD from where the round already stands and only falls back to the first
+occurrence, so a repair can never rewind a round either.
+
+The cadence in `turn_order.py` was never wrong and was not touched. Piotrek
+still takes every third slot, hunters still cycle continuously, and a round
+still ends once every hunter has appeared in it — which is why rounds differ in
+length and why a hunter may legitimately appear twice in one round. Do not
+"simplify" that into a plain round-robin: the chest rota and Piotrek's tempo
+both hang off it.
+
+MODIFIED
+--------
+  engine/turn_order.py   + NextTurn (seat, round_number, slot)
+  engine/game_state.py   next_turn(), current_slot(), _slot_for_seat() new;
+                         next_seat() kept as a look-ahead that does not move
+                         the cursor; _end_turn() and _set_active_player()
+                         rewritten to move it; snapshot() carries turn_slot.
+
+SYNCHRONISATION
+---------------
+`turn_slot` is now IN THE SNAPSHOT, and that is the sharpest part of the fix.
+The cursor is real turn state that cannot be recomputed from the seat, so two
+machines could stand on different slots, agree perfectly on whose turn it was,
+and disagree about the entire rest of the round — with nothing in the
+fingerprint able to see it. It is in there now, so that drift is a detected
+desync rather than a silent one.
+
+No new commands, and no change to how turns are transmitted: `EndTurn` still
+carries a seat and every machine derives the cursor by replaying the log. That
+is also why reconnection needs nothing — the cursor is rebuilt with everything
+else.
+
+WHY IT CANNOT COME BACK
+-----------------------
+`tests/test_turn_progression.py` walks REAL TURNS and asserts on the seats that
+actually played. That distinction is the lesson: `compute_round_turn_order` had
+been tested since stage 4 and was always correct, and 683 tests passed against a
+game that was playing three seats in a circle, because every one of them tested
+the FUNCTION THAT COMPUTES THE ORDER and none of them tested the cursor that
+walks it. Thirteen of the new tests fail against the old code; the online one
+needs six players, because with three Piotrek holds only one slot and the bug
+cannot appear.
+
+
+================================================================================
 HOW THE CARD SYSTEM WORKS
 ================================================================================
 
@@ -417,9 +544,12 @@ cards.json -> CardDef (immutable, shared) -> Card (one physical copy, has uid).
 Decks are built by expanding "count" into that many Card objects.
 
 A card may declare:
-  "badge":  {"pawn": "żółty"|"rainbow", "sign": "+"|"++"|"-"|"--", "arrow": bool}
-            Purely visual. NOTE: the prototype inferred badges by string
-            matching the title. Never go back to that.
+  "badge":  {"pawn": "żółty"|"rainbow", "sign": "+"|"++"|"-"|"--",
+             "arrow": bool, "count": N}
+            Purely visual. "count" is how many pawn dots are drawn, so a card
+            that moves two pawns says so on its face (Plagiat!). NOTE: the
+            prototype inferred badges by string matching the title. Never go
+            back to that.
   "effect": {"type": "move_pawn",
              "target": "fixed"|"hindmost"|"choice",
              "pawn": "<pawn id>",         (only for target=fixed)
@@ -441,9 +571,213 @@ A card may also declare:
                      (ChatGPT: movement_cards_delta -2, chest_limit 1)
   "presentation": {...}  how the card announces itself when drawn
                      (Gamechanger's role_reveal)
+  "on_draw": {...}   an effect resolved THE MOMENT THE CARD ENTERS A HAND,
+                     through the same registry as "effect".  Troll and Stańczyk
+                     use it.  Not run by the opening deal — see "locked".
+  "locked": true     the card may not be played or discarded BY HAND.  The
+                     engine refuses both commands, so a client that simply does
+                     not draw the lock is still told no.  A locked card is
+                     unlocked by whatever armed it (an on_draw interrupt), and
+                     is therefore NEVER dealt at setup — CardDef.opens_a_hand
+                     derives that from "locked" rather than trusting the JSON,
+                     because a locked card in an opening hand can never be
+                     played, discarded or resolved and costs its owner a hand
+                     slot for the whole game.  Stańczyk shipped that way for
+                     one commit; test_no_locked_card_can_be_dealt_at_the_start
+                     is what stops it happening again.
+  "in_opening_hand": false
+                     keep the card out of the opening deal for a reason OTHER
+                     than being locked.  Troll declares it explicitly as well,
+                     because the rule is its own ("nobody begins the game
+                     holding a Troll") and should not silently depend on the
+                     lock.
 
 ADDING A NEW DETERMINISTIC CARD = one JSON entry. No Python.
 See HOW THE EFFECT ENGINE WORKS above for anything more involved.
+
+
+================================================================================
+TURN INTERRUPTS, FORCED PLAYS AND MULTI-SELECT  (stage 19)
+================================================================================
+
+Four movement cards — Troll, Stańczyk, Spy, Plagiat! — needed four things the
+effect engine could not yet express. None of them was implemented as a special
+case; each became a general mechanism, because the Chest cards and Patus Mods
+still to come will want the same four.
+
+READ THIS BEFORE IMPLEMENTING ANY CHEST CARD. Most of what a Chest card wants
+to do already exists here.
+
+
+A CARD THAT ACTS WHEN IT IS DRAWN
+---------------------------------
+`_after_draw` used to know about Gamechanger BY NAME. That was already one
+branch too many and Troll and Stańczyk would have made it three, so a card now
+declares `"on_draw"` and `effects.resolve_on_draw()` sends it through the same
+registry, the same Plan and the same executor as a card that is played.
+
+Draws can cascade — Troll draws its own replacement, and the replacement can be
+another Troll — so `GameState._draw_depth` bounds the chain at MAX_DRAW_CHAIN.
+Every draw in the game now goes through `_draw_one()`, which owes the same
+debts wherever it came from: reshuffle when the pile runs out, report the draw,
+run `on_draw`.
+
+
+A CARD THAT TAKES OVER A TURN
+-----------------------------
+StatusKind.TURN_INTERRUPT. The status CARRIES ITS OWN EFFECT SPECIFICATION in
+`data["effect"]`, plus `data["card_uid"]` so it can point back at the physical
+card that started it. `GameState._begin_turn()` runs at the start of every turn
+and asks the registry to resolve whatever the status is carrying — so it knows
+nothing whatever about Troll or Stańczyk.
+
+A future card that hijacks a turn is therefore JSON and no Python at all.
+
+Two things can take a turn, in this order:
+
+  SKIP_TURN       — the seat simply loses its move.
+  TURN_INTERRUPT  — a card takes the turn over and says what to do with it.
+
+IMPORTANT, and the reason Stańczyk needed almost no new code: SKIP_TURN has
+existed since stage 4 and until stage 19 NOTHING READ IT. Lubin and Dziubdziuch
+both granted it and both were silently doing nothing. If you find a status
+nobody consumes, assume the same.
+
+Both consume the turn: the hand refills by the ordinary rule and play passes
+on, exactly as if a card had been played. That is why the end-of-turn draw
+lives in `_begin_turn` and not inside the operations — an interrupt IS a turn,
+and a turn ends the same way whoever spent it.
+
+The recursion is real (a skipped turn hands on to a seat that may also be
+skipped) and bounded by MAX_TURN_INTERRUPTS. A table where every seat is
+interrupted for ever is a content bug and must not become a hang.
+
+`_begin_turn` is called from `_end_turn` AND from `_set_active_player`. Both:
+a turn handed over directly in edit mode is still a turn beginning, and without
+the second call a seat holding a Troll could be given the turn and keep it.
+
+GrantStatus(..., stack=True) queues rather than replaces. The default replaces,
+which is right for nearly everything — using an ability twice should refresh a
+freeze, not queue a second one — but a second Troll is a second hijacked turn.
+
+
+FORCED PLAY (Troll)
+-------------------
+`ForcedPlay` is an Operation, not a handler decision, because choosing the card
+needs the seeded RNG and A HANDLER MUST NEVER CONSUME RANDOMNESS — the UI calls
+handlers to preview while dragging, so a handler that rolled a die would change
+what the card does every frame. Same reason PlayRandomCard is an operation.
+
+The executor picks with `self.rng.choice()` from a list SORTED BY UID. Hand
+order is not something two replicas are obliged to agree on, and relying on it
+would desync the moment one of them differed.
+
+`priority_decks` then `fallback_decks` is the whole of Troll's rule ("a Chest
+card if you have one, otherwise a Movement card") expressed as data.
+
+A card whose effect is unimplemented, or which would need a decision nobody can
+be asked for mid-execution, is played, discarded, and does nothing. That is the
+rule and not a shortcut: a forced play must NEVER be able to stop the game.
+
+
+LOOKING INTO ANOTHER HAND (Spy)
+-------------------------------
+`steal_card`. Only cards of the named deck are ever offered, which is both the
+rule and the secrecy — Piotrek's Chest cards stay face down.
+
+A hunter always robs Piotrek (there is one of him and he is worth robbing);
+Piotrek picks which hunter, because from his side they are interchangeable and
+the choice is the interesting part.
+
+The end-of-turn draw needs NO special case, and it is worth understanding why
+before "fixing" it: the thief holds `wanted` movement cards including Spy,
+plays Spy (`wanted - 1`), steals one (`wanted`), so `_refill_movement_hand`
+draws nothing of its own accord. The victim is one short and `DrawCards`
+replaces it. Both halves of the spec fall out of the existing rule.
+
+
+MULTI-SELECT, AND ORDER (Plagiat!)
+----------------------------------
+`Choice` gained `count` and `ordered`. More than one turns the prompt into a
+multi-select with a confirm button that enables at EXACTLY `count`; `ordered`
+makes the interface number the picks ①②, and clicking a picked one removes it
+and renumbers the rest.
+
+The answer travels as the ids joined by commas in the existing
+`PlayCard.choices` dict — `Dict[str, str]`, unchanged, survives JSON — rather
+than as a new command field. `effects.split_ids` / `join_ids`.
+
+`move_pawns` is parameterised by count, distance and direction, so "move three
+pawns one forward" is a JSON entry and no code.
+
+THE HARD PART, and the reason `MoveBySteps` exists: the second pawn departs
+from a board the first one has already rearranged. It may have been carried
+along inside a tower. `MovePawn` carries a finished route, which is correct for
+one pawn and wrong for two, so `MoveBySteps` has the EXECUTOR recompute the
+route against the board as it is when that operation's turn comes. Stacking,
+towers, widened rows and the walk animation then need no special case at all,
+because by then it is an ordinary move of a pawn that really is where the
+engine thinks it is.
+
+The one thing that cannot wait is the 12a/12b question — nobody can be asked
+halfway through applying a plan — so the handler works out the destination
+POSITION (which is pure, via `MoveProjection`) and asks in advance, one keyed
+question per pawn (`pawns_tile0`, `pawns_tile1`) so two answers cannot
+overwrite each other. `MoveBySteps.preview_tiles` is the handler's projection,
+for the board highlight only; the executor never reads it.
+
+
+NEW OPERATIONS (engine/effects.py, all registered in `_OPERATIONS`)
+-------------------------------------------------------------------
+  MoveBySteps        move a pawn, routed at execution time (above)
+  DrawCards          draw into a hand through the ordinary draw path
+  TransferCard       move one card between hands (Spy)
+  HighlightHeldCard  point at a card for N seconds; no state behind it
+  ForcedPlay         choose a card from a hand and play it (Troll)
+  TurnLost           report that a seat got no move out of this turn
+
+NEW EFFECT TYPES: `turn_interrupt`, `skip_turn`, `forced_play`, `steal_card`,
+`move_pawns`.
+
+NEW EVENTS: CardDrawEffect, CardSpotlighted, CardStolen, TurnSkipped.
+
+
+THE SPOTLIGHT, AND WHY THE ENGINE STILL DOES NOT WAIT
+-----------------------------------------------------
+Troll and Stańczyk must show the chosen card for two or three seconds BEFORE
+anything appears to happen. The engine does not wait for it and must not (see
+rule N36). The state changes at once; the PICTURE is staged, exactly as
+CardRevealed already did for Gamechanger:
+
+  `CardSpotlighted` carries `seconds`, and the game screen both holds the card
+  up (RevealOverlay, with a halo) and sets `BoardView.walk_delay`, which is
+  added to every walk started while it is counting down.
+
+So the pawn moves after the card has been shown, while the engine finished the
+whole thing in one command. If you ever need this again, reach for walk_delay
+rather than making the engine sleep.
+
+
+MULTIPLAYER
+-----------
+NO NEW COMMANDS WERE ADDED. Every one of these mechanics replays from the
+commands that already existed, which is why none of them can desync:
+
+  Troll / Stańczyk  resolve inside whatever command ended the previous turn.
+  Spy / Plagiat!    are ordinary PlayCard with `choices` filled in.
+
+The rules that keep it that way, all of which already existed:
+
+  - The forced-play RNG is the seeded game RNG, consumed in the same order on
+    every replica, from a uid-sorted list (above).
+  - Spy's hidden information rides on N40: ChoiceRequired is delivered to the
+    peer that asked and to NOBODY else. The card titles in that question are
+    the opponent's hand, so this is load-bearing — do not broadcast it.
+  - CardStolen names the seats, the uid and the deck. NEVER the title: it goes
+    to the whole table and only the thief was shown the hand.
+  - Reconnect: TURN_INTERRUPT is a Status, so it is already in the snapshot and
+    already restored. This is exactly why N18 says new mechanics become a
+    StatusKind rather than a boolean on GameState.
 
 
 ================================================================================
@@ -1077,12 +1411,153 @@ PLANNED FUTURE FEATURES
 - Cards that need a choice: a target-selection mode where the board asks for a
   pawn and the chosen pawn goes into PlayCard.target_pawn (the field exists).
 - Chest and mod card effects.
-- Win conditions: Piotrek reaching the finish; hunters checking the bottom of a
-  full tower.
 - Turn enforcement driven by turn_order.py (optional switch, off for testing).
 - Sound and music; external card art.
 - Save / load and replays from the command log.
 - PyInstaller .exe build.
+
+
+================================================================================
+VICTORY AND THE HIDDEN IDENTITY  (stage 17)
+================================================================================
+
+HOW A MATCH IS DECIDED
+  ``engine/victory.py``.  One function — ``review(state)`` — is the whole of it.
+  It is called by the AUTHORITY after every accepted command and answers with a
+  list of commands, almost always empty:
+
+    * Piotrek's colour is standing on the FINISH tile        → DeclareVictory
+    * every pawn is on ONE field and the BOTTOM of that tower
+      is his colour                                          → DeclareVictory
+    * ...and the bottom is some other colour that has not
+      been checked before                                    → EliminatePawn
+    * anything else                                           → nothing
+
+  A colour is checked ONCE.  Once it is in ``state.eliminated_pawns`` the same
+  tower may sit there for ever and nothing more happens; the hunters have to
+  rearrange the table to learn anything new.
+
+  Why it returns commands instead of mutating: every other change in this game
+  is a logged, broadcast command, and an ending has to be one too — otherwise a
+  player who reconnects replays the log and lands in a match that never
+  finished, and the fingerprint that catches desyncs stops covering the one
+  fact everybody cares about.
+
+  ``review`` is a pure function of the state, so it is safe to call anywhere —
+  but it only ever DECIDES anything where the hidden colour is known, which is
+  the authority and nowhere else.
+
+WHERE THE IDENTITY LIVES
+  ``Player.secret_pawn``, on the copy of the state that is entitled to it:
+
+    server (online)       set by ``GameState.set_piotrek_pawn`` when the chosen
+                          colour arrives.  This is THE copy that counts.
+    Piotrek's client      set from IDENTITY_ACCEPTED — his own secret, and he
+                          is allowed to see which pawn is his.
+    every other client    ``None`` for the whole match, until DeclareVictory
+                          reveals it.
+    hot-seat game         dealt from the seed as before: one keyboard, no
+                          secret to keep, nobody to ask.
+
+  IT IS NOT IN ``snapshot()``.  That is what lets the server know something five
+  clients do not without drifting from them: the fingerprint is computed over
+  public state only, so a server that has just been told the colour still
+  matches every replica.  There is a test that holds this down by comparing
+  snapshots of the same state with three different secrets in it.
+
+  IT IS NOT IN THE COMMAND LOG either — the log is replayed to anyone who
+  resyncs.  The colour travels in IDENTITY_CHOSEN, addressed to one peer, and
+  that message is never logged, never broadcast and never relayed.
+
+  Which is also why ``setup.assign_secret_pawn`` is SKIPPED online.  It draws
+  from the shared seed, so anything it picks can be recomputed by every client
+  — a "secret" sitting in the open on five machines.
+
+WHERE THE SELECTION BEGINS  (one flow, two sources of the question)
+  ONLINE: START_GAME → the server builds the state, broadcasts GAME_START, and
+  sends IDENTITY_REQUIRED to the one peer holding the Piotrek card.  Every
+  machine is now in ``MatchPhase.STARTING`` and NOTHING is playable: the engine
+  refuses every command that is not authority-issued, so a client that skips
+  the overlay gets nowhere.  IDENTITY_CHOSEN comes back, the server stores it
+  with ``set_piotrek_pawn`` and appends BeginMatch to the log — one broadcast,
+  so everybody starts at the same moment.  If Piotrek drops while choosing,
+  ``catch_up`` asks again; if he drops AFTER choosing, ``catch_up`` sends
+  IDENTITY_ACCEPTED again, because his rebuilt replica gets the colour from
+  neither the seed nor the log.
+
+  HOT-SEAT: the same overlay, asked by ``GameScreen._identity_question`` from
+  the library instead of from a server, answered into ``set_piotrek_pawn`` and
+  followed by a locally submitted BeginMatch.  Everyone is at one keyboard, so
+  there is nobody to hide it from and nobody else to wait for.
+
+  THE RANDOM DRAW IS NOT A PRODUCTION PATH.  ``config.piotrek_picks_pawn`` is
+  true for BOTH real entry points — ``lobby.to_config`` and ``MenuScreen`` — and
+  ``setup.assign_secret_pawn`` only runs when it is false, which now means
+  ``--players`` and ``--selftest``: a table with no interface and nobody to
+  click.  Stage 17 left the local menu on the old path, which is why the picker
+  looked as though it never appeared to anyone testing alone.
+
+THE END OF A MATCH
+  DeclareVictory sets ``state.victory`` (a ``Verdict``: outcome, colour, seat,
+  name) and the phase to ENDED.  Applying it also writes the revealed colour
+  into the player, because that is the moment it stops being a secret and a
+  client has no other way to learn it.  Nothing is playable afterwards.
+
+  GameScreen watches the STATE, not the events — ``_sync_match_overlays`` runs
+  every frame — so a player replaying twenty commands after a reconnection ends
+  up looking at the right screen rather than at whichever event went past last.
+
+  THE THREE WAYS OUT, and they are not variations of each other:
+
+    Wróć do poczekalni  keeps the connection, keeps the room, keeps the seats.
+                        RETURN_TO_LOBBY → the server throws the match away and
+                        broadcasts LOBBY_STATE; every client drops its session
+                        on that message and lands back in the poczekalnia.  The
+                        host can press Start again immediately — nobody
+                        reconnects, nobody re-joins.
+    Menu główne         CLOSES the connection and leaves the room, so the seat
+                        is freed instead of being held open behind a grace
+                        period nobody is waiting through.
+    Wyjdź z gry         closes the application.
+
+  A hot-seat match has no room to keep, so it offers only the last two.
+
+  WHAT A REMATCH INHERITS: NOTHING.  ``return_to_lobby`` drops the GameState,
+  the command log, the fingerprint and the hidden colour, and the next START
+  builds a brand-new game from a NEW seed — board, decks, discard piles, hands,
+  mods, statuses, ability counters, round, turn, active seat and pawn positions
+  all come from ``create_game`` rather than from being cleared one by one.
+  Clients throw their replica away on LOBBY_STATE and ``_on_game_start`` clears
+  ``identity_pawn``, or the old colour would be written into the new replica.
+  What DOES survive is what belongs to the lobby: the people, their nicknames,
+  their character picks and the table settings.
+
+  "Wróć do poczekalni" sends RETURN_TO_LOBBY.  The server drops the match
+  (state, log, fingerprint, hidden colour), sets the lobby back and broadcasts
+  LOBBY_STATE; every client sees ``started`` false, drops its session, and every
+  GameScreen goes back to the poczekalnia on the SAME message.  Refused while a
+  match is still running — otherwise one player could end everybody else's.
+  A hot-seat game has no lobby to return to and does not offer the button.
+
+PIOTREK'S OWN REMINDER  (stage 18)
+  A filled circle and the colour name, in the right-hand panel above "Twoja
+  Postać" (``CharacterPanel._draw_identity_badge``).  Two independent reasons it
+  cannot leak: the row is only drawn when ``show_skill`` — a Piotrek panel, and
+  a client may not look at anybody else's — and a hunter's replica has no
+  colour in it to draw.  The row is RESERVED whenever the panel is Piotrek's,
+  colour chosen or not, so the geometry depends on one thing both the drawing
+  and the click handling already have; making it appear when the colour arrives
+  would shift every rect below it by a few pixels and put the ability card just
+  outside its own rectangle.  ``Layout.r_identity_h`` is in the right column's
+  vertical budget, so it costs the card height rather than overflowing at
+  1280×760.
+
+THE NOTEPAD IS NOT A NOTEPAD ANY MORE
+  "Kolory Piotrka" draws ``state.eliminated_pawns`` and is not clickable.  A
+  colour is crossed off when a check failed, which is something only the
+  authority knows; a hunter's private hunch on a panel that looks shared is
+  worse than no panel.  ``ToggleMark`` and ``Player.marks`` still exist and
+  still work — nothing issues them.
 
 
 ================================================================================
@@ -1117,7 +1592,8 @@ LAYERS (and they do not leak)
   * net/client.py    GameClient: handshake, lobby mirror, resync, reconnection
   * net/service.py   HostService / ClientService — all the UI is allowed to see
   * server/hub.py    routing, identities, resume tokens.  NO asyncio, NO sockets
-  * server/room.py   the authoritative GameState, seats, command log
+  * server/room.py   the authoritative GameState, seats, command log, THE
+                     HIDDEN COLOUR, and the victory review after every command
   * server/app.py    ~200 lines of asyncio.  NO game rules.
 
   server/hub, room and registry are SYNCHRONOUS AND FREE OF I/O on purpose:
@@ -1512,6 +1988,71 @@ N69. Never trust a clipboard round trip through pygame as proof that copying
      scrap_win.c stand-in in tests/test_usability.py.
 N70. Never rstrip NULs before decoding UTF-16. The high byte of a trailing
      ASCII character is one, and "ABCD12" loses its 2.
+N71. Never put the hidden colour in snapshot(), in a command, or in the command
+     log. The snapshot is the fingerprint (the server would drift from every
+     client the moment it was told); the log is replayed to anyone who resyncs.
+     It travels in one message, to one peer.
+N72. Never let a client decide a winner. victory.review() runs on the authority
+     only, and authorise_remote refuses BeginMatch, EliminatePawn and
+     DeclareVictory from a client outright — sending one is claiming to have
+     won.
+N73. Never deal Piotrek's colour from the seed in an online match. Every client
+     builds its state from that same number, so a dealt secret is not a secret.
+N74. Never drive an end-of-match screen from an event alone. A reconnecting
+     player replays the whole log in one frame; drive the overlays from the
+     STATE, every frame, or they show whatever went past last.
+N75. Never add a second way to decide the identity. If a screen skips the
+     picker, fix the config flag; do not deal a colour "just for that case".
+     Stage 17 shipped with the local menu on the old random path and the whole
+     feature looked broken to anybody testing on one machine.
+N76. Never carry anything across a rematch by hand. return_to_lobby DROPS the
+     state and the next start builds a new one from a new seed. Clearing
+     fields one at a time is how the eleventh one gets forgotten.
+N77. Never re-apply a remembered secret to a freshly built replica without
+     checking which match it belongs to. _on_game_start clears identity_pawn
+     first, or the previous match's colour is written into the new one.
+
+
+N78. Never let a handler consume randomness. The UI resolves handlers to draw
+   previews while a card is being dragged, so a handler that rolled a die would
+   change what the card does every frame. Randomness belongs to the executor —
+   ForcedPlay and PlayRandomCard are both operations for this reason — and it
+   must be drawn from state.rng, over a list with a REPLICA-STABLE order (sort
+   by uid; hand order is not something two machines are obliged to agree on).
+
+N79. Never mark a card "locked" without also keeping it out of the opening
+   deal. Locked cards are armed by on_draw, which the opening deal does not
+   run, so one dealt at setup can never be played, discarded or resolved and
+   silently costs its owner a hand slot for the entire game. CardDef.opens_a_hand
+   derives this from "locked" so it cannot be got wrong again — do not
+   reintroduce a path that reads in_opening_hand directly.
+
+N80. Never assume a status is enforced because something grants it. SKIP_TURN
+   was granted by two abilities from stage 4 to stage 19 and read by nothing at
+   all; both cards looked implemented and did nothing. When adding a StatusKind,
+   add the code that CONSUMES it in the same change, and a test that proves the
+   consumption happens.
+
+N81. Never put a card title into an event that the whole table sees. CardStolen
+   carries seats, a uid and a deck id, and that is deliberate — only the thief
+   was shown the hand. The same goes for any future effect that reveals hidden
+   information to one player.
+
+
+N82. Never identify a turn by its seat. A seat can hold several slots in one
+   round (Piotrek holds every third), so `order.index(seat)` finds the first of
+   them and rewinds the round. The cursor is `turn_slot`, it is MOVED and never
+   searched for, and the invariant is seat_order()[turn_slot] == active seat.
+
+N83. Never test a schedule by testing the function that computes it. The order
+   generator was correct and tested for sixteen stages while the game looped
+   over three seats. Assert on the turns ACTUALLY TAKEN, by driving EndTurn, and
+   check the walk reaches every seat.
+
+N84. Never size a turn-order test so small that the bug cannot appear. Three
+   players give Piotrek exactly one slot per round, so a repeat-slot bug is
+   invisible; the online test uses six and asserts up front that he holds more
+   than one.
 
 
 ================================================================================
@@ -1547,9 +2088,13 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
 1. THE CHECKING MECHANIC. Several abilities are built and waiting on it
    (Glockboy, Ice Block, and Ondrej's link already marks both pawns). It is
    also what makes the game finishable.
-2. Effects for the remaining movement, mod and chest cards. Most are now a JSON
-   entry plus at most one handler: "move all pawns", "swap mods", "steal a
-   card". Check whether an existing effect type already covers it first.
+2. Effects for the remaining mod and chest cards. THE MOVEMENT DECK IS NOW
+   COMPLETE (stage 19 finished Troll, Stańczyk, Spy and Plagiat!). Most of
+   what remains is a JSON entry plus at most one handler — and before writing
+   the handler, read TURN INTERRUPTS, FORCED PLAYS AND MULTI-SELECT, because
+   "act when drawn", "take over a turn", "look into another hand", "move
+   several pawns in order" and "steal a card" ALL ALREADY EXIST and are
+   parameterised. Check whether an existing effect type covers it first.
 3. Server-side hidden-information filtering (L1). Transport, lobby and online
    play are DONE (stage 11).
 4. Chest and mod effects (they interact with movement, so do them after 1–2).
@@ -1566,7 +2111,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 595 tests, ~120 s
+    python -m pytest -q                     # 647 tests, ~140 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -1583,6 +2128,11 @@ HOW TO VERIFY A CHANGE
       tests/test_handshake.py    — the handshake gate, friendly errors, the
                                    shared text editor, 2-player debug games,
                                    and that the server runs without pygame
+      tests/test_victory.py      — the rules against a bare GameState, the
+                                   synchronisation against the real server,
+                                   and the secrecy, which is checked by looking
+                                   at what the OTHER machines know while the
+                                   match is still running
       tests/test_usability.py    — every editable field, held-key repeat, the
                                    copy buttons and their placement at four
                                    resolutions, the remembered address, and

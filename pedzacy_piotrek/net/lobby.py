@@ -200,6 +200,9 @@ class LobbyState:
             # An online match never allows hot-seat editing: one machine plays
             # one seat, which is the whole point of the mode.
             edit_mode=False,
+            # ...and it is the mode where Piotrek's colour is a secret worth
+            # keeping, so he chooses it himself and only the server is told.
+            piotrek_picks_pawn=True,
             seed=seed,
         ).normalised()
 

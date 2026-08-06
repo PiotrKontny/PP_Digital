@@ -260,15 +260,22 @@ def test_table_settings_belong_to_the_host(table):
 # ── playing ──────────────────────────────────────────────────────────────────
 def test_an_action_reaches_every_machine_and_they_stay_identical(table):
     host, clients = table.playing("Kuba", "Ola", "Norbert")
+    room = table.room(host.room_code)
+    # The log already holds BeginMatch — the server's own command, written when
+    # Piotrek named his colour — so what is counted here is the DELTA.  An
+    # absolute number would have to be edited every time the authority learns
+    # to say something new.
+    before = room.sequence
     seat = take_a_turn(table, host, clients)
     assert all_agree(host, *clients)
     assert host.state.active_player_index != seat, "the turn moved on"
-    assert table.room(host.room_code).sequence == 1, "one action, one log entry"
+    assert room.sequence == before + 1, "one action, one log entry"
 
 
 def test_a_client_cannot_act_for_another_seat(table):
     """The seat comes from the server's own map, never from the message."""
     host, clients = table.playing("Kuba", "Ola", "Norbert")
+    before = table.room(host.room_code).sequence
     by_seat = table.by_seat(host, clients)
     active = host.state.active_player_index
     impostor = by_seat[(active + 1) % 3]
@@ -279,11 +286,12 @@ def test_a_client_cannot_act_for_another_seat(table):
     table.pump()
     assert host.state.active_player_index == active, "nothing happened"
     assert len(host.state.player(active).hand) == len(victim.hand)
-    assert table.room(host.room_code).sequence == 0
+    assert table.room(host.room_code).sequence == before, "nothing was logged"
 
 
 def test_a_client_cannot_act_out_of_turn(table):
     host, clients = table.playing("Kuba", "Ola", "Norbert")
+    before = table.room(host.room_code).sequence
     by_seat = table.by_seat(host, clients)
     active = host.state.active_player_index
     waiting_seat = (active + 1) % 3
@@ -293,7 +301,7 @@ def test_a_client_cannot_act_out_of_turn(table):
     waiting.session.submit(cmd.DiscardCard(player_index=waiting_seat,
                                            card_uid=card.uid))
     table.pump()
-    assert table.room(host.room_code).sequence == 0
+    assert table.room(host.room_code).sequence == before, "nothing was logged"
     assert all_agree(host, *clients)
 
 
@@ -336,6 +344,7 @@ def test_a_pending_decision_is_asked_of_one_player_only(library):
             if card is None:
                 continue
 
+            before = table.room(host.room_code).sequence
             seen = {s.session.seat: [] for s in [host, *clients]}
             for service in [host, *clients]:
                 service.session.bus.subscribe(
@@ -346,7 +355,8 @@ def test_a_pending_decision_is_asked_of_one_player_only(library):
             table.pump()
             assert seen[seat], "the player who asked is asked"
             assert all(not seen[other] for other in seen if other != seat)
-            assert table.room(host.room_code).sequence == 0, "nothing was logged"
+            assert table.room(host.room_code).sequence == before, \
+                "nothing was logged"
             assert all_agree(host, *clients)
             return
         finally:
@@ -357,10 +367,15 @@ def test_a_pending_decision_is_asked_of_one_player_only(library):
 def test_a_whole_match_keeps_every_machine_in_step(table):
     """A dozen turns, compared after every single action."""
     host, clients = table.playing("Kuba", "Ola", "Norbert")
+    room = table.room(host.room_code)
+    before = room.sequence
     for _ in range(12):
         take_a_turn(table, host, clients)
         assert all_agree(host, *clients)
-    assert table.room(host.room_code).sequence == 12
+    # Twelve turns, twelve entries — plus anything the authority said of its
+    # own accord.  A colour ruled out mid-match is legitimate here, so the
+    # floor is what is asserted, not an exact count.
+    assert room.sequence >= before + 12
 
 
 def test_the_server_stamps_a_fingerprint_every_machine_can_check(table):
@@ -558,6 +573,15 @@ def test_two_machines_play_over_real_websockets(library):
         pump(2.5)
         assert host.session is not None and ola.session is not None
         assert host.state.snapshot() == ola.state.snapshot()
+
+        # Piotrek names his colour before anybody may move.  Over a real socket
+        # like everything else here: this is the one test that proves the
+        # identity round trip survives the transport, not just the queues.
+        piotrek = next(s for s in (host, ola) if s.identity_request)
+        piotrek.choose_identity(piotrek.identity_request[0]["id"])
+        pump(2.0)
+        assert not piotrek.identity_request, "the server confirmed the choice"
+        assert host.state.phase.playable and ola.state.phase.playable
 
         seat = host.state.active_player_index
         actor = host if host.session.seat == seat else ola

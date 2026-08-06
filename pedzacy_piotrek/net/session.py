@@ -26,6 +26,7 @@ from typing import Callable, List, Optional
 
 from ..engine import commands as cmd
 from ..engine import events as ev
+from ..engine import victory
 from ..engine.game_state import GameState
 from .transport import ConnectionState, NullTransport, Transport
 
@@ -102,11 +103,28 @@ class Session:
 
 
 class LocalSession(Session):
-    """One machine, no networking."""
+    """One machine, no networking — and therefore its own authority.
+
+    In an online match the server is the one that notices somebody has won; on
+    one machine there is nobody else to notice, so this session runs the same
+    :func:`~pedzacy_piotrek.engine.victory.review` after every command and
+    applies whatever it answers.  The rules live in one module either way; only
+    the caller differs.
+    """
 
     def __init__(self, state: GameState, bus: Optional[ev.EventBus] = None) -> None:
         super().__init__(state, bus)
         self.transport: Transport = NullTransport()
+
+    def submit(self, command: cmd.Command) -> List[ev.GameEvent]:
+        events = super().submit(command)
+        if self._rejected(events):
+            return events
+        for followed in victory.review(self.state):
+            extra = self.state.apply(followed, local=False)
+            self.bus.emit_all(extra)
+            events.extend(extra)
+        return events
 
 
 class NetworkSession(Session):

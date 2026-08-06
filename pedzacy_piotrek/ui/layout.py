@@ -197,6 +197,8 @@ class Layout:
         self.counter_small_d = _clamp(self.counter_big_d * 0.62, 24, 40)
         self.counter_gap = 8
         self.chest_box_w = _clamp(self.centre_w * 0.17, 130, 230)
+        #: Gap between cards in a picker row.  Scales, like every other space.
+        self.picker_gap = _clamp(20 * self.ui_scale, 12, 34)
         self.rename_mark = _clamp(self.player_strip_h * 0.2, 14, 22)
         self.tile_gap = _clamp(self.centre_w * 0.008, 6, 14)
         self.turn_circle_actual_d = self.turn_circle_d
@@ -341,6 +343,13 @@ class Layout:
 
         self.r_title_h = int(20 * self.ui_scale)
         self.r_name_h = int(26 * self.ui_scale)
+        #: Piotrek's own colour badge, above 'Twoja Postać'.  Reserved whenever
+        #: the panel is Piotrek's, chosen colour or not, so the geometry depends
+        #: on ONE thing (show_skill) that both the drawing and the click
+        #: handling already have.  Making it depend on whether a colour is known
+        #: yet would let the two drift apart by a few pixels and put the ability
+        #: card just out of reach of its own rectangle.
+        self.r_identity_h = int(24 * self.ui_scale)
         # Same single-line band as the left column: name plus counters.
         self.r_label_h = self.section_label_h
         #: Room under the ability card for the "use ability" button.
@@ -368,6 +377,7 @@ class Layout:
             fixed = (
                 2 * self.right_inner + self.r_title_h + self.r_name_h
                 + labels * self.r_label_h + self.r_button_h + grid
+                + (self.r_identity_h if show_skill else 0)
                 + (6 if show_skill else 5) * self.r_gap
             )
             card_h = min(max(70.0, (panel.height - fixed) / rows), by_width)
@@ -406,7 +416,7 @@ class Layout:
         total = (self.r_title_h + self.r_name_h + gap // 2 + card_h
                  + self.r_button_h + gap)
         if show_skill:
-            total += self.r_label_h + card_h + gap
+            total += self.r_identity_h + self.r_label_h + card_h + gap
         total += self.r_label_h + card_h + gap
         if not show_skill:
             total += grid_h
@@ -429,12 +439,17 @@ class Layout:
         pair_x = self.right_pair_left(show_skill)
         gap = self.r_gap
 
-        title_y = panel.top + self.right_inner + self.right_content_offset(show_skill)
+        top = panel.top + self.right_inner + self.right_content_offset(show_skill)
+        identity = pygame.Rect(panel.left + self.right_inner, top,
+                               panel.width - 2 * self.right_inner,
+                               self.r_identity_h)
+        title_y = top + (self.r_identity_h if show_skill else 0)
         name_y = title_y + self.r_title_h
         card_y = name_y + self.r_name_h + gap // 2
         card_rect = pygame.Rect(panel.centerx - card_w // 2, card_y, card_w, card_h)
 
         rects: Dict[str, object] = {
+            "identity": identity,
             "title_y": title_y, "name_y": name_y, "card": card_rect,
         }
         # The ability button lives directly under the card, so everything below
@@ -496,36 +511,74 @@ class Layout:
         board = self.board_viewport
         return (board.centerx, board.centery)
 
-    def chest_choice_panel(self, count: int) -> pygame.Rect:
-        """Backdrop for the 'which chest cards do you keep' overlay."""
-        card_w, card_h = self.chest_choice_card_size(count)
-        gap = 20
+    # A row of cards laid out for the player to pick from.  Two things use it:
+    # the chest hand limit and Spy looking into somebody else's hand.  The
+    # geometry is written once because it is the same problem — "n cards side
+    # by side, shrinking so they always fit" — and because the second use
+    # arrived by copying the first, which is how two overlays end up drifting
+    # apart at 4K.
+    def card_picker_panel(self, count: int) -> pygame.Rect:
+        card_w, card_h = self.card_picker_card_size(count)
+        gap = self.picker_gap
         width = count * card_w + (count + 1) * gap
         height = card_h + 130
         return pygame.Rect(
             self.win_w // 2 - width // 2, self.win_h // 2 - height // 2, width, height
         )
 
-    def chest_choice_card_size(self, count: int) -> Tuple[int, int]:
+    def card_picker_card_size(self, count: int) -> Tuple[int, int]:
         height = _clamp(self.win_h * 0.34, 200, 420)
         width = int(height / CARD_ASPECT)
-        # Shrink if a wide spread would run off the screen.
-        available = self.win_w * 0.8 - (count + 1) * 20
+        # Shrink if a wide spread would run off the screen.  A stolen hand can
+        # hold eight cards where the chest limit never showed more than three,
+        # so this branch is now the ordinary case rather than the safety net.
+        available = self.win_w * 0.8 - (count + 1) * self.picker_gap
         if count * width > available:
             width = int(available / max(1, count))
             height = int(width * CARD_ASPECT)
         return (width, height)
 
-    def chest_choice_card_rect(self, index: int, count: int) -> pygame.Rect:
-        panel = self.chest_choice_panel(count)
-        card_w, card_h = self.chest_choice_card_size(count)
-        gap = 20
-        x = panel.left + gap + index * (card_w + gap)
+    def card_picker_card_rect(self, index: int, count: int) -> pygame.Rect:
+        panel = self.card_picker_panel(count)
+        card_w, card_h = self.card_picker_card_size(count)
+        x = panel.left + self.picker_gap + index * (card_w + self.picker_gap)
         return pygame.Rect(x, panel.top + 56, card_w, card_h)
 
+    def card_picker_confirm_rect(self, count: int) -> pygame.Rect:
+        panel = self.card_picker_panel(count)
+        width = _clamp(self.win_w * 0.14, 200, 300)
+        return pygame.Rect(panel.centerx - width // 2, panel.bottom - 56,
+                           width, int(40 * self.ui_scale))
+
+    # The chest limit keeps its own names: they are what the tests and the
+    # overlay were written against, and "which chest cards do you keep" is not
+    # the same question as "which card do you steal" even where the furniture
+    # is.
+    def chest_choice_panel(self, count: int) -> pygame.Rect:
+        return self.card_picker_panel(count)
+
+    def chest_choice_card_size(self, count: int) -> Tuple[int, int]:
+        return self.card_picker_card_size(count)
+
+    def chest_choice_card_rect(self, index: int, count: int) -> pygame.Rect:
+        return self.card_picker_card_rect(index, count)
+
     def chest_confirm_rect(self, count: int) -> pygame.Rect:
-        panel = self.chest_choice_panel(count)
+        panel = self.card_picker_panel(count)
         return pygame.Rect(panel.centerx - 110, panel.bottom - 56, 220, 40)
+
+    def choice_confirm_rect(self) -> pygame.Rect:
+        """Confirm button for a multi-select question, inside the prompt strip.
+
+        Only drawn when the engine asked for more than one thing; a single
+        answer is confirmed by picking it, and a button there would be a click
+        nobody needs.
+        """
+        panel = self.choice_prompt
+        width = _clamp(panel.width * 0.20, 150, 260)
+        height = _clamp(panel.height * 0.26, 30, 44)
+        return pygame.Rect(panel.right - width - 16,
+                           panel.bottom - height - 12, width, height)
 
     def pawn_grid_top(self, show_skill: bool) -> int:
         """Top edge of the 'Kolory Piotrka' notepad.

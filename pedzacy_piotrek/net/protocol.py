@@ -79,6 +79,16 @@ class MessageType(str, Enum):
     PLAYER_RECONNECTED = "player_reconnected"     # server → room
     MATCH_ENDED = "match_ended"        # server → room: the room is closing
 
+    # ── the hidden identity ──────────────────────────────────────────────────
+    # The only part of this game that is addressed to ONE player and must never
+    # be broadcast.  It does not travel as a COMMAND for that reason: a command
+    # is logged and replayed to everybody, which is precisely what a secret
+    # cannot survive.
+    IDENTITY_REQUIRED = "identity_required"   # server → Piotrek alone: choose
+    IDENTITY_CHOSEN = "identity_chosen"       # Piotrek → server: this colour
+    IDENTITY_ACCEPTED = "identity_accepted"   # server → Piotrek alone: noted
+    RETURN_TO_LOBBY = "return_to_lobby"       # client → server: play again
+
 
 #: What a ``COMMAND`` message may carry, for the reader's benefit.  The
 #: authoritative list is ``engine.commands.COMMAND_REGISTRY``; this is the map
@@ -251,6 +261,25 @@ class Message:
                    {"config": config, "seats": seats, "log": log,
                     "seq": sequence, "fingerprint": fingerprint},
                    room=room or None)
+
+    @classmethod
+    def identity_required(cls, pawns: List[Dict[str, Any]],
+                          room: str = "") -> "Message":
+        """Ask Piotrek which pawn he is hiding behind.
+
+        Sent to one peer and nobody else.  The pawn list travels with it so the
+        client draws exactly the colours the server will accept.
+        """
+        return cls(MessageType.IDENTITY_REQUIRED, {"pawns": list(pawns)},
+                   room=room or None)
+
+    @classmethod
+    def identity_chosen(cls, pawn_id: str) -> "Message":
+        return cls(MessageType.IDENTITY_CHOSEN, {"pawn_id": pawn_id})
+
+    @classmethod
+    def identity_accepted(cls, pawn_id: str) -> "Message":
+        return cls(MessageType.IDENTITY_ACCEPTED, {"pawn_id": pawn_id})
 
     @classmethod
     def error(cls, reason: str, fatal: bool = False) -> "Message":

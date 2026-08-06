@@ -213,11 +213,62 @@ class RenamePlayer(Command):
 
 @dataclass(frozen=True)
 class ToggleMark(Command):
-    """Hunter notepad: cross a pawn colour off the suspect list."""
+    """Hunter notepad: cross a pawn colour off the suspect list.
+
+    Kept, but no longer issued by the interface: since stage 17 the notepad is
+    filled in by the server, which is the only party that knows whether a check
+    failed.  A player crossing colours off by hand could disagree with it.
+    """
 
     kind: ClassVar[str] = "toggle_mark"
     player_index: int = 0
     pawn_id: str = ""
+
+
+# ── the match itself ─────────────────────────────────────────────────────────
+# These three are issued by the AUTHORITY, never by a player: the server (or,
+# in a hot-seat game, the local session) appends them to the same log every
+# other command travels in, so a replaying client reaches the same ending and
+# the state fingerprint keeps matching.  ``authorise_remote`` refuses them from
+# a client for exactly that reason.
+@dataclass(frozen=True)
+class BeginMatch(Command):
+    """Piotrek has chosen his colour; the table may move.
+
+    The moment everyone starts, in one message, so nobody plays a turn against
+    a table that is still being set up.
+    """
+
+    kind: ClassVar[str] = "begin_match"
+
+
+@dataclass(frozen=True)
+class EliminatePawn(Command):
+    """A tower was checked and its bottom colour was not Piotrek.
+
+    That colour is out of suspicion for the rest of the match, on every
+    notepad at once — the hunters share what they learn, because they all
+    watched the same tower being lifted.
+    """
+
+    kind: ClassVar[str] = "eliminate_pawn"
+    pawn_id: str = ""
+
+
+@dataclass(frozen=True)
+class DeclareVictory(Command):
+    """The match is over, and this is who won and what was hidden.
+
+    Carries the reveal rather than pointing at it: by the time this is applied
+    the secret is public, and a client has no other way to learn it — its own
+    copy of Piotrek's ``secret_pawn`` has been ``None`` all game.
+    """
+
+    kind: ClassVar[str] = "declare_victory"
+    outcome: str = ""                  # "piotrek" | "hunters"
+    pawn_id: str = ""
+    piotrek_seat: int = -1
+    piotrek_name: str = ""
 
 
 COMMAND_REGISTRY: Dict[str, Type[Command]] = {
@@ -240,5 +291,13 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
         SetActivePlayer,
         RenamePlayer,
         ToggleMark,
+        BeginMatch,
+        EliminatePawn,
+        DeclareVictory,
     )
 }
+
+#: Commands only the authority may issue.  A client sending one is not making a
+#: mistake, it is cheating: these are how a match starts, how a colour is ruled
+#: out and how a winner is declared.
+AUTHORITY_ONLY = (BeginMatch, EliminatePawn, DeclareVictory)

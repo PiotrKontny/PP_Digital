@@ -70,7 +70,18 @@ class MovePawn(Operation):
 
 @dataclass(frozen=True)
 class GrantStatus(Operation):
+    """Attach a status.
+
+    ``stack`` decides what happens when the subject already has one of the same
+    kind.  The default replaces it, which is right for almost everything —
+    using an ability twice should refresh a freeze, not queue a second one.
+    Turn interrupts are the exception: drawing a second Troll is a second
+    hijacked turn, and silently dropping it would make the card unreliable in
+    exactly the situation it is most likely to come up.
+    """
+
     status: Status
+    stack: bool = False
 
 
 @dataclass(frozen=True)
@@ -115,6 +126,110 @@ class DrawIntoMods(Operation):
 
 
 @dataclass(frozen=True)
+class MoveBySteps(Operation):
+    """Move a pawn a number of positions, worked out AT EXECUTION TIME.
+
+    :class:`MovePawn` carries a finished route, which is right for a card that
+    moves one pawn: the handler sees the board the move will happen on.  It is
+    wrong for a card that moves several pawns in a chosen order, because the
+    second pawn departs from a board the first one has already changed — it may
+    have been carried along in a tower, or had a tower land on top of it.
+
+    So the route is recomputed by the executor, against the board as it is when
+    this operation's turn comes.  The one thing that cannot wait is the 12a/12b
+    question: nobody can be asked halfway through applying a plan, so the
+    handler works out the destination *position* (which is pure) and asks in
+    advance.  ``preview_tiles`` is the handler's projection, for the highlight
+    only — the executor never reads it.
+    """
+
+    pawn_id: str
+    steps: int
+    chosen_tile: Optional[int] = None
+    preview_tiles: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class DrawCards(Operation):
+    """Draw cards into a hand, through the ordinary draw path.
+
+    Ordinary matters: a card drawn this way still announces itself, still
+    triggers its own ``on_draw``, and still trips the chest limit.  Troll draws
+    a replacement so the player keeps a playable hand, and if that replacement
+    is another Troll the second one queues up behind the first by itself.
+    """
+
+    player_index: int
+    deck_id: str = "movement"
+    count: int = 1
+
+
+@dataclass(frozen=True)
+class TransferCard(Operation):
+    """Move one card from one hand to another (Spy).
+
+    Deliberately silent about what the card IS: the event this produces names
+    the seats and the uid, never the title, because it is broadcast to the
+    whole table and only the thief is allowed to have seen the hand.
+    """
+
+    from_player: int
+    to_player: int
+    card_uid: int
+
+
+@dataclass(frozen=True)
+class HighlightHeldCard(Operation):
+    """Point at a card in a hand for a few seconds before anything happens.
+
+    Presentation with a mechanical guarantee attached: the player is about to
+    lose control of their turn, so they are shown exactly which card did it.
+    The STATE does not wait for the animation (see N36) — the view holds the
+    card up and delays the walk that follows it.
+    """
+
+    player_index: int
+    card_uid: int
+    seconds: float = 2.0
+    caption: str = ""
+
+
+@dataclass(frozen=True)
+class ForcedPlay(Operation):
+    """Choose a card from a hand and play it for the player (Troll).
+
+    The choice needs the seeded RNG, so — like :class:`PlayRandomCard` — the
+    executor makes it rather than the handler: a preview must never consume
+    randomness or dragging a card about would change what it does.
+
+    ``priority_decks`` is tried first and ``fallback_decks`` after it, which is
+    the whole of Troll's rule ("a Chest card if you have one, otherwise a
+    Movement card") expressed as data.
+    """
+
+    player_index: int
+    source_uid: int = 0
+    priority_decks: Tuple[str, ...] = ()
+    fallback_decks: Tuple[str, ...] = ()
+    seconds: float = 2.5
+    caption: str = ""
+
+
+@dataclass(frozen=True)
+class TurnLost(Operation):
+    """Report that a seat is not getting a move out of this turn.
+
+    Only a report: the turn is already being consumed by the interrupt
+    machinery.  It exists so that "you were skipped" and "the game played a
+    card for you" are distinguishable to the interface, which has to say
+    different things about them.
+    """
+
+    player_index: int
+    source: str = ""
+
+
+@dataclass(frozen=True)
 class Announce(Operation):
     """Say something happened that has no other mechanical trace."""
 
@@ -146,6 +261,8 @@ class ChoiceOption:
     label: str
     pawn: Optional[str] = None
     tile: Optional[int] = None
+    #: The card being offered, when the question is "which of these cards?".
+    card_uid: Optional[int] = None
     data: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -158,10 +275,20 @@ class Choice:
     """
 
     key: str
-    kind: str                       # "pawn" | "tile" | "option"
+    kind: str                       # "pawn" | "tile" | "option" | "card"
     prompt: str
     options: Tuple[ChoiceOption, ...]
     description: str = ""
+    #: How many things must be picked.  One is the ordinary case; more than one
+    #: turns the prompt into a multi-select with a confirm button, and the
+    #: answer comes back as the ids joined by commas.
+    count: int = 1
+    #: Whether the ORDER of a multi-select matters.  Plagiat! moves the pawns in
+    #: the order they were picked, so the interface numbers them.
+    ordered: bool = False
+    #: Whose cards are on offer, for a "card" question.  The interface needs it
+    #: to find them; nobody else is ever sent this question (see N40).
+    owner: Optional[int] = None
 
     @property
     def ok(self) -> bool:
@@ -222,6 +349,10 @@ class EffectContext:
     actor: int = 0
     choices: Mapping[str, str] = field(default_factory=dict)
     source: str = ""
+    #: The card this effect came from, when there is one.  A card that acts on
+    #: the way into a hand has to be able to refer to itself — Troll's status
+    #: has to know which physical Troll started it.
+    card_uid: Optional[int] = None
 
     def choice(self, key: str) -> Optional[str]:
         value = self.choices.get(key)
@@ -255,6 +386,7 @@ def effect(name: str) -> Callable[[Handler], Handler]:
 def resolve_spec(
     state, spec: Optional[EffectSpec], actor: int = 0,
     choices: Optional[Mapping[str, str]] = None, source: str = "",
+    card_uid: Optional[int] = None,
 ) -> Resolution:
     """Resolve any effect specification against the current state."""
     if spec is None:
@@ -262,7 +394,9 @@ def resolve_spec(
     handler = HANDLERS.get(spec.type)
     if handler is None:
         return Refusal(f"Nieznany typ efektu: {spec.type}")
-    return handler(spec, EffectContext(state, actor, dict(choices or {}), source))
+    return handler(
+        spec, EffectContext(state, actor, dict(choices or {}), source, card_uid)
+    )
 
 
 def resolve(
@@ -270,7 +404,20 @@ def resolve(
     choices: Optional[Mapping[str, str]] = None,
 ) -> Resolution:
     """Resolve a card's effect."""
-    return resolve_spec(state, card.effect, actor, choices, card.title)
+    return resolve_spec(state, card.effect, actor, choices, card.title, card.uid)
+
+
+def resolve_on_draw(state, card: Card, actor: int = 0) -> Resolution:
+    """What a card does the moment it lands in a hand.
+
+    Separate entry point, same registry: ``_after_draw`` used to know about
+    Gamechanger by name, and adding Troll and Stańczyk that way would have been
+    the second and third branches of exactly the chain this module exists to
+    prevent.  A card that acts on the way in declares ``on_draw`` and is done.
+    """
+    if card.on_draw is None:
+        return Refusal("Ta karta nic nie robi przy dobraniu")
+    return resolve_spec(state, card.on_draw, actor, None, card.title, card.uid)
 
 
 def resolve_ability(
@@ -303,8 +450,11 @@ def preview_tiles(state, result: Resolution) -> Tuple[int, ...]:
     """Fields the board should highlight for a resolution, whatever its kind."""
     if isinstance(result, Plan):
         tiles: List[int] = []
-        for op in result.routes:
-            tiles.extend(op.tiles)
+        for op in result.operations:
+            if isinstance(op, MovePawn):
+                tiles.extend(op.tiles)
+            elif isinstance(op, MoveBySteps):
+                tiles.extend(op.preview_tiles)
         return tuple(tiles)
     if isinstance(result, Choice) and result.kind == "tile":
         return result.tiles
@@ -440,6 +590,52 @@ def fields_word(count: int) -> str:
     if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
         return "pola"
     return "pól"
+
+
+def split_ids(answer: Optional[str]) -> List[str]:
+    """Read a multi-select answer back out of the command.
+
+    Answers travel in ``PlayCard.choices``, which is ``Dict[str, str]`` and has
+    to survive a trip through JSON unchanged, so a list of picks is one comma
+    separated string rather than a new command field.  Order is preserved
+    because for some cards it is the whole point.
+    """
+    if not answer:
+        return []
+    return [part for part in (piece.strip() for piece in answer.split(",")) if part]
+
+
+def join_ids(ids: Sequence[str]) -> str:
+    return ",".join(ids)
+
+
+class MoveProjection:
+    """Where the pawns stand once the moves already planned have happened.
+
+    A handler is pure, so it cannot move a pawn and look again.  But a card
+    that moves two pawns in order has to know where the second one is AFTER the
+    first one went — otherwise a pawn carried along in a tower is moved twice
+    from a position it left a moment ago.
+
+    Only positions are projected, and only for the pawns this plan touches.
+    Everything else — who ends up carrying whom, which half of a widened row a
+    tower walks through — is left to the executor, which sees the real board.
+    """
+
+    def __init__(self, state) -> None:
+        self.state = state
+        self._moved: Dict[str, int] = {}
+
+    def index_of(self, pawn_id: str) -> int:
+        if pawn_id in self._moved:
+            return self._moved[pawn_id]
+        return pawn_index(self.state, pawn_id)
+
+    def move(self, pawn_id: str, destination: int) -> None:
+        """Record a move, taking the pawn's tower with it."""
+        self._moved[pawn_id] = destination
+        for rider in travellers(self.state, pawn_id):
+            self._moved[rider] = destination
 
 
 def _turn_expiry(state, spec: EffectSpec) -> Optional[int]:
@@ -863,4 +1059,287 @@ def _random_movement_card(spec: EffectSpec, ctx: EffectContext) -> Resolution:
             announce_seconds=float(spec.get("announce_seconds", 2.0)),
         ),),
         "Losowa karta ruchu",
+    )
+
+
+# ── a card that takes over the player's next turn ────────────────────────────
+@effect("turn_interrupt")
+def _turn_interrupt(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Queue something to happen INSTEAD of the player's next move.
+
+    Declared by Troll and Stańczyk on ``on_draw``.  The status carries the
+    effect specification it should run when the turn arrives, so the mechanism
+    is one status kind and one resolution step rather than one of each per
+    card: a future Chest card that hijacks a turn writes JSON and nothing else.
+
+    The card itself STAYS IN THE HAND.  That is what gives the interface
+    something to point at when the turn comes round, and — because the card is
+    also ``locked`` — what stops the player throwing the consequence away.
+    """
+    state = ctx.state
+    interrupt = spec.get("interrupt")
+    if not isinstance(interrupt, Mapping):
+        raise EffectError("turn_interrupt bez opisu efektu w polu 'interrupt'")
+
+    operations: List[Operation] = [GrantStatus(
+        Status.for_player(
+            StatusKind.TURN_INTERRUPT, ctx.actor,
+            data={"effect": dict(interrupt), "card_uid": ctx.card_uid},
+            source=ctx.source,
+        ),
+        stack=True,
+    )]
+
+    # Some interrupts hand a replacement card over straight away, so the player
+    # still has a normal number of things to do on the turns before it fires.
+    draw = spec.get("draw")
+    if isinstance(draw, Mapping):
+        operations.append(DrawCards(
+            player_index=ctx.actor,
+            deck_id=str(draw.get("deck", "movement")),
+            count=max(1, int(draw.get("count", 1))),
+        ))
+
+    player = state.player(ctx.actor)
+    name = player.name if player is not None else "gracz"
+    return Plan(tuple(operations), f"{name}: następna tura przejęta")
+
+
+@effect("skip_turn")
+def _skip_turn(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Stańczyk: show the card, then lose the turn.
+
+    Everything mechanical about "the turn is skipped" belongs to the interrupt
+    machinery in ``GameState._begin_turn`` — an interrupt consumes the turn by
+    definition — so all this contributes is the two seconds the player spends
+    looking at the card that did it.
+    """
+    lost = TurnLost(player_index=ctx.actor, source=ctx.source)
+    if ctx.card_uid is None:
+        return Plan((lost,), "Tura pominięta")
+    return Plan(
+        (
+            HighlightHeldCard(
+                player_index=ctx.actor,
+                card_uid=ctx.card_uid,
+                seconds=float(spec.get("highlight_seconds", 2.0)),
+                caption=str(spec.get("caption", "tura pominięta")),
+            ),
+            lost,
+        ),
+        "Tura pominięta",
+    )
+
+
+@effect("forced_play")
+def _forced_play(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Troll: the game picks a card out of the hand and plays it.
+
+    Which card needs the seeded RNG, so the handler only describes the search —
+    the executor performs it (see :class:`ForcedPlay`).
+    """
+    decks = spec.get("priority_decks") or ["chest"]
+    fallback = spec.get("fallback_decks") or ["movement"]
+    return Plan(
+        (ForcedPlay(
+            player_index=ctx.actor,
+            source_uid=ctx.card_uid or 0,
+            priority_decks=tuple(str(d) for d in decks),
+            fallback_decks=tuple(str(d) for d in fallback),
+            seconds=float(spec.get("highlight_seconds", 2.5)),
+            caption=str(spec.get("caption", "zagrywasz tę kartę")),
+        ),),
+        "Wymuszone zagranie",
+    )
+
+
+# ── taking a card out of somebody else's hand ────────────────────────────────
+def _steal_victim(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Whose hand Spy looks into.
+
+    A hunter always robs Piotrek — he is the one worth robbing and there is
+    only one of him.  Piotrek picks which hunter, because from his side they
+    are interchangeable and the choice is the interesting part.
+    """
+    state = ctx.state
+    actor = state.player(ctx.actor)
+    if actor is None:
+        return Refusal("Nieznany gracz")
+
+    if not actor.is_piotrek:
+        seat = piotrek_player(state)
+        if seat is None:
+            return Refusal("Nikt nie gra Piotrkiem")
+        return seat
+
+    answer = ctx.choice("victim")
+    hunters = [p for p in state.players if p.index != actor.index]
+    if not hunters:
+        return Refusal("Nie ma kogo okraść")
+    seats = {str(p.index): p.index for p in hunters}
+    if answer in seats:
+        return seats[answer]
+    if len(hunters) == 1:
+        return hunters[0].index
+    return Choice(
+        key="victim", kind="option", prompt="Kogo przejrzeć?",
+        options=tuple(
+            ChoiceOption(id=str(p.index), label=p.name) for p in hunters
+        ),
+    )
+
+
+@effect("steal_card")
+def _steal_card(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Spy: look through one deck's worth of an opponent's hand and take one.
+
+    Only the cards of ``deck`` are ever offered, which is the rule and also the
+    secrecy: Piotrek's Chest cards stay face down, and so does everything else
+    about the hand.  The question itself reaches ONE player — the engine sends
+    ChoiceRequired to whoever asked and to nobody else (N40) — so the hidden
+    information never crosses a wire it should not.
+    """
+    state = ctx.state
+    deck_id = str(spec.get("deck", "movement"))
+    actor = state.player(ctx.actor)
+    if actor is None:
+        return Refusal("Nieznany gracz")
+
+    victim_index = _steal_victim(spec, ctx)
+    if isinstance(victim_index, (Choice, Refusal, NotAvailable)):
+        return victim_index
+    victim = state.player(int(victim_index))
+    if victim is None:
+        return Refusal("Nieznany gracz")
+    if victim.index == actor.index:
+        return Refusal("Nie okradniesz sam siebie")
+
+    offered = [card for card in victim.hand if card.deck_id == deck_id]
+    if not offered:
+        return Refusal(f"{victim.name} nie ma kart ruchu do zabrania")
+    if actor.hand_is_full:
+        return Refusal("Twoja ręka jest pełna")
+
+    answer = ctx.choice("stolen")
+    available = {str(card.uid): card for card in offered}
+    if answer not in available:
+        return Choice(
+            key="stolen", kind="card",
+            prompt=f"Karty ruchu: {victim.name}",
+            options=tuple(
+                ChoiceOption(id=str(card.uid), label=card.title, card_uid=card.uid)
+                for card in offered
+            ),
+            description="Wybierz jedną kartę do zabrania",
+            owner=victim.index,
+        )
+
+    card = available[answer]
+    # The description is broadcast with CardPlayed, so it names the seats and
+    # not the card.  Everyone may know that Spy was played and on whom; only
+    # the two hands involved may know what changed.
+    return Plan(
+        (
+            TransferCard(from_player=victim.index, to_player=actor.index,
+                         card_uid=card.uid),
+            DrawCards(player_index=victim.index, deck_id=deck_id, count=1),
+        ),
+        f"{actor.name} zabiera kartę ruchu: {victim.name}",
+    )
+
+
+# ── moving several pawns, in a chosen order ──────────────────────────────────
+@effect("move_pawns")
+def _move_pawns(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Move ``count`` chosen pawns the same distance, one after another.
+
+    Written for Plagiat! and deliberately not written for Plagiat!: the number
+    of pawns, the distance and the direction are all parameters, so "move three
+    pawns one forward" is a JSON entry and no code at all.
+
+    The pawns move STRICTLY in the order they were picked, and each move sees
+    the board the previous one left behind — hence :class:`MoveBySteps` and
+    :class:`MoveProjection`.  Stacking, towers, widened rows and the animation
+    are then exactly what they are for any other move, because by the time the
+    executor runs it is doing an ordinary move.
+    """
+    state = ctx.state
+    wanted = max(1, int(spec.get("count", 2)))
+    key = str(spec.get("choice_key", "pawns"))
+    steps = spec.signed_steps
+
+    known = {pawn.id for pawn in state.library.pawns}
+    picked: List[str] = []
+    for pawn_id in split_ids(ctx.choice(key)):
+        if pawn_id in known and pawn_id not in picked:
+            picked.append(pawn_id)
+
+    if len(picked) != wanted:
+        way = "do tyłu" if steps < 0 else "do przodu"
+        return Choice(
+            key=key, kind="pawn",
+            prompt=f"Wybierz {wanted} pionki w kolejności ruchu",
+            options=pawn_options(state),
+            description=f"każdy przesunie się o {abs(steps)} "
+                        f"{fields_word(abs(steps))} {way}",
+            count=wanted, ordered=True,
+        )
+
+    allowed = state.statuses.movement_range()
+    projection = MoveProjection(state)
+    operations: List[Operation] = []
+    names: List[str] = []
+
+    for order, pawn_id in enumerate(picked):
+        name = pawn_name(state, pawn_id)
+        if state.statuses.pawn_has(StatusKind.FROZEN, pawn_id):
+            return Refusal(f"Pionek {name} jest zamrożony")
+
+        start = projection.index_of(pawn_id)
+        route = route_between(state, start, steps)
+        if not route:
+            if steps < 0 and start == CAMP_INDEX:
+                return Refusal(f"Pionek {name} jeszcze nie wyruszył")
+            if steps < 0:
+                return Refusal(f"Pionek {name} jest już na starcie")
+            return Refusal(f"Pionek {name} jest już na mecie")
+        if allowed is not None and not (allowed[0] <= route[-1] <= allowed[1]):
+            return Refusal(
+                f"Ruch ograniczony do pól {allowed[0] + 1}–{allowed[1] + 1}"
+            )
+
+        destination = state.board.position(route[-1])
+        chosen_tile: Optional[int] = None
+        if destination is not None and destination.is_doubled:
+            # One question per pawn, keyed by its place in the order, so two
+            # pawns landing on widened rows ask twice and neither answer
+            # overwrites the other.
+            tile_key = f"{key}_tile{order}"
+            answer = ctx.choice(tile_key)
+            valid = {tile.index for tile in destination.tiles}
+            if answer is not None and int(answer) in valid:
+                chosen_tile = int(answer)
+            else:
+                halves = " albo ".join(t.label for t in destination.tiles)
+                return Choice(
+                    key=tile_key, kind="tile",
+                    prompt=f"Pionek {name} — wybierz pole: {halves}",
+                    options=tuple(
+                        ChoiceOption(id=str(t.index), label=t.label, tile=t.index)
+                        for t in destination.tiles
+                    ),
+                    description=f"ruch {order + 1} z {wanted}",
+                )
+
+        operations.append(MoveBySteps(
+            pawn_id=pawn_id, steps=steps, chosen_tile=chosen_tile,
+            preview_tiles=tile_route(state, pawn_id, route, chosen_tile),
+        ))
+        projection.move(pawn_id, route[-1])
+        names.append(name)
+
+    way = "do tyłu" if steps < 0 else "do przodu"
+    return Plan(
+        tuple(operations),
+        f"{' → '.join(names)}: {abs(steps)} {fields_word(abs(steps))} {way}",
     )

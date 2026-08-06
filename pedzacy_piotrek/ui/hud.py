@@ -412,6 +412,9 @@ class CharacterPanel(Panel):
         show_skill = player.is_piotrek
         rects = layout.character_panel(show_skill)
 
+        if show_skill:
+            self._draw_identity_badge(ctx, rects["identity"])
+
         r.section_heading("Twoja Postać",
                           r.fonts.get(int(12 * layout.ui_scale), bold=True),
                           panel.centerx, rects["title_y"],
@@ -456,6 +459,48 @@ class CharacterPanel(Panel):
 
         if player.character is not None and not show_skill:
             self._draw_pawn_grid(ctx, layout.pawn_grid_top(show_skill))
+
+    def _draw_identity_badge(self, ctx: HudContext, rect: pygame.Rect) -> None:
+        """Piotrek's own colour, kept in front of him for the whole match.
+
+        Drawn ONLY on a Piotrek panel, and a Piotrek panel is only ever on
+        Piotrek's own screen — a hunter's client has ``show_skill`` false for
+        its own seat and is not allowed to look at anybody else's
+        (``GameScreen.may_view``).  On top of that, a hunter's copy of the state
+        does not contain the colour to draw: ``secret_pawn`` is ``None`` there
+        all match.  Two independent reasons, because this is the one thing on
+        screen that must never leak.
+
+        Before the colour is chosen the badge is an empty ring rather than
+        nothing, so the row does not appear from nowhere and shift the panel.
+        """
+        r, theme, surface = ctx.r, ctx.theme, ctx.surface
+        pawn_id = ctx.player.secret_pawn
+        pawn = ctx.state.library.pawn(pawn_id) if pawn_id else None
+        scale = ctx.layout.ui_scale
+
+        radius = max(5, int(rect.height * 0.34))
+        centre_y = rect.centery
+        font = r.fonts.get(max(9, int(12 * scale)), bold=True)
+        label = pawn.name.upper() if pawn is not None else "NIE WYBRANO"
+        text = r.text_surface(label, font, theme.brass_light if pawn is not None
+                              else theme.text_dim)
+        total = radius * 2 + int(8 * scale) + text.get_width()
+        left = rect.centerx - total // 2
+
+        centre = (left + radius, centre_y)
+        if pawn is not None:
+            r.aa_circle((centre[0], centre[1] + max(1, int(2 * scale))), radius,
+                        darken(theme.background_deep, 0.6), surface=surface)
+            r.aa_circle(centre, radius, pawn.color, darken(pawn.color, 0.55), 2,
+                        surface)
+            r.soft_ellipse((centre[0] - radius * 0.3, centre[1] - radius * 0.35),
+                           radius * 0.45, radius * 0.3, lighten(pawn.color, 0.75),
+                           alpha=140, surface=surface)
+        else:
+            r.aa_ring(centre, radius, theme.text_dim, 2, surface=surface)
+        surface.blit(text, (left + radius * 2 + int(8 * scale),
+                            centre_y - text.get_height() // 2))
 
     def _draw_ability_button(self, ctx: HudContext, show_skill: bool,
                              ability: Optional[Card]) -> None:
@@ -503,7 +548,15 @@ class CharacterPanel(Panel):
         return level
 
     def _draw_pawn_grid(self, ctx: HudContext, top_y: int) -> None:
-        """'Kolory Piotrka' — the hunters' elimination notepad."""
+        """'Kolory Piotrka' — the hunters' elimination notepad.
+
+        AUTOMATIC since stage 17.  A colour is crossed off when a tower was
+        checked and turned out not to be Piotrek, and that is a fact the server
+        establishes and broadcasts — so the panel reads
+        ``state.eliminated_pawns`` and every hunter's notepad is identical.
+        Clicking does nothing on purpose: a player crossing colours off by hand
+        could contradict the only party that actually knows.
+        """
         r, layout, state, theme = ctx.r, ctx.layout, ctx.state, ctx.theme
         surface = ctx.surface
         pawns = state.library.pawns
@@ -527,7 +580,7 @@ class CharacterPanel(Panel):
             r.soft_ellipse((rect.centerx - radius * 0.3, rect.centery - radius * 0.35),
                            radius * 0.45, radius * 0.3, lighten(pawn.color, 0.75),
                            alpha=140, surface=surface)
-            if pawn.id in ctx.player.marks:
+            if pawn.id in state.eliminated_pawns:
                 inset = max(4, rect.width // 6)
                 x0, y0 = rect.left + inset, rect.top + inset
                 x1, y1 = rect.right - inset, rect.bottom - inset
@@ -549,12 +602,7 @@ class CharacterPanel(Panel):
         if rects["char_draw"].collidepoint(ctx.mouse):  # type: ignore[union-attr]
             return [cmd.DrawCharacter(player_index=player.index)]
 
-        if player.character is not None and not show_skill:
-            top_y = ctx.layout.pawn_grid_top(show_skill)
-            pawns = ctx.state.library.pawns
-            for pawn, rect in zip(pawns, ctx.layout.pawn_grid_rects(top_y, len(pawns))):
-                if rect.collidepoint(ctx.mouse):
-                    return [cmd.ToggleMark(player_index=player.index, pawn_id=pawn.id)]
+        # The notepad is not clickable any more — see :meth:`_draw_pawn_grid`.
         return []
 
 

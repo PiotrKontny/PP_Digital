@@ -39,6 +39,7 @@ class StatusKind(str, Enum):
     RESTRICTED_MOVEMENT = "restricted"   # movement confined to a span of fields
     FORBIDDEN_ADJACENCY = "forbidden_adjacency"   # two pawns may not neighbour
     CHECK_REFUSAL = "check_refusal"      # a check may be declined (Ice Block)
+    TURN_INTERRUPT = "turn_interrupt"    # a card takes the player's next turn over
 
 
 class Subject(str, Enum):
@@ -140,6 +141,20 @@ class StatusTracker:
         ]
         return before - len(self._statuses)
 
+    def discard(self, status: Status) -> bool:
+        """Drop ONE particular status object.
+
+        :meth:`remove` takes everything of a kind on a subject, which is wrong
+        for statuses that legitimately stack: a player holding two Trolls has
+        two turn interrupts queued and resolving the first must not silently
+        cancel the second.
+        """
+        for index, existing in enumerate(self._statuses):
+            if existing is status:
+                del self._statuses[index]
+                return True
+        return False
+
     def clear_kind(self, kind: StatusKind) -> int:
         before = len(self._statuses)
         self._statuses = [s for s in self._statuses if s.kind is not kind]
@@ -187,6 +202,20 @@ class StatusTracker:
 
     def player_has(self, kind: StatusKind, player_index: int) -> bool:
         return self.find(kind, Subject.PLAYER, str(player_index)) is not None
+
+    def interrupts_for(self, player_index: int) -> List[Status]:
+        """Turn interrupts queued against a seat, oldest first.
+
+        They STACK rather than replace, because "you drew a second Troll" is a
+        second forced turn, not a re-run of the first one.  Order is the order
+        they were granted, which is the same on every machine because they all
+        replay the same commands.
+        """
+        return [
+            status for status in self._statuses
+            if status.kind is StatusKind.TURN_INTERRUPT
+            and status.matches(Subject.PLAYER, str(player_index))
+        ]
 
     def linked_partners(self, pawn_id: str) -> List[str]:
         """Pawns that travel with this one because of a link.
@@ -244,4 +273,5 @@ STATUS_LABELS: Dict[StatusKind, str] = {
     StatusKind.RESTRICTED_MOVEMENT: "Ruch ograniczony",
     StatusKind.FORBIDDEN_ADJACENCY: "Zakaz sąsiedztwa",
     StatusKind.CHECK_REFUSAL: "Odmowa sprawdzenia",
+    StatusKind.TURN_INTERRUPT: "Tura przejęta",
 }

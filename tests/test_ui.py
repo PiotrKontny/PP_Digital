@@ -239,15 +239,40 @@ def test_clicking_a_playable_card_plays_it(screen):
     assert state.board.pawn_tiles["żółty"] == 0
 
 
-def test_clicking_a_card_without_an_effect_still_discards_it(screen):
-    """The 14 cards that need a decision keep the prototype's behaviour."""
+def test_clicking_a_card_the_engine_cannot_resolve_still_discards_it(screen):
+    """A card with no effect keeps the prototype's behaviour: click discards.
+
+    Every movement card now has an effect or an on-draw effect, so the card
+    that demonstrates this is dealt from the chest deck — which is the honest
+    version of the test anyway, since "no implementation yet" is where the
+    chest cards are and no longer where the movement cards are.
+    """
     state = screen.state
-    card = give_card(screen, lambda c: c.effect is None)
+    deck = state.deck(settings.DECK_CHEST)
+    card = next(c for c in deck.draw_pile
+                if c.effect is None and not c.locked)
+    deck.draw_pile.remove(card)
+    state.active_player.add_card(card)
     settle(screen)
     click(screen, screen.hand.slots[card.uid].position)
     assert card not in state.active_player.hand
-    assert state.deck(settings.DECK_MOVEMENT).discard_count >= 1
+    assert deck.discard_count >= 1
     assert not state.board.pawn_tiles
+
+
+def test_a_locked_card_cannot_be_clicked_away(screen):
+    """Troll is not a card you play, and not one you throw away either.
+
+    Clicking it used to discard it — which would have been a free way out of
+    the forced turn it just booked.  The engine refuses both the play and the
+    discard, so a client that does not draw the lock is refused too.
+    """
+    state = screen.state
+    card = give_card(screen, lambda c: c.title == "Troll")
+    settle(screen)
+    click(screen, screen.hand.slots[card.uid].position)
+    assert card in state.active_player.hand
+    assert state.deck(settings.DECK_MOVEMENT).find_discarded(card.uid) is None
 
 
 def test_dragging_a_card_onto_the_board_plays_it(screen):
@@ -601,16 +626,30 @@ def test_renaming_swallows_other_input(screen):
     assert screen.state.deck(settings.DECK_MOVEMENT).draw_count == before
 
 
-def test_hunters_can_cross_off_a_colour(screen):
+def test_the_notepad_is_filled_in_by_the_game_not_by_the_player(screen):
+    """Stage 17 took the pencil away.
+
+    A colour is crossed off when a checked tower turned out not to be Piotrek,
+    which is something only the authority knows.  A hunter clicking a circle
+    used to record a private hunch on a shared-looking panel; now the panel
+    means one thing and means it on every machine.
+    """
     state = screen.state
     hunter = next(p for p in state.players if not p.is_piotrek)
-    click(screen, screen.app.layout.player_tile_rect(hunter.index, len(state.players)).center)
+    click(screen, screen.app.layout.player_tile_rect(hunter.index,
+                                                     len(state.players)).center)
     frame(screen)
 
     top = screen.app.layout.pawn_grid_top(show_skill=False)
     rects = screen.app.layout.pawn_grid_rects(top, len(state.library.pawns))
+    pawn_id = state.library.pawns[0].id
     click(screen, rects[0].center)
-    assert state.library.pawns[0].id in hunter.marks
+    assert not hunter.marks, "clicking records nothing any more"
+    assert pawn_id not in state.eliminated_pawns
+
+    state.apply(cmd.EliminatePawn(pawn_id=pawn_id), local=False)
+    frame(screen)
+    assert pawn_id in state.eliminated_pawns, "the game crossed it off"
 
 
 def test_escape_cancels_a_staged_mod_instead_of_quitting(screen):
@@ -1563,3 +1602,550 @@ def test_the_end_turn_button_does_not_sit_on_the_board_controls(library):
         assert layout.board_viewport.contains(button)
         assert not button.colliderect(layout.zoom_slider)
         assert not button.colliderect(layout.status_bar)
+
+
+# ── the match beginning and ending (stage 17) ────────────────────────────────
+def _finish(state):
+    from pedzacy_piotrek.board.tiles import TileKind
+
+    return next(t for t in state.board.tiles if t.kind is TileKind.FINISH)
+
+
+def _win(screen, outcome: str = "piotrek"):
+    """Declare a winner the way the authority does, and let the screen react."""
+    state = screen.state
+    pawn = state.piotrek_pawn or state.library.pawns[0].id
+    state.apply(cmd.DeclareVictory(outcome=outcome, pawn_id=pawn,
+                                  piotrek_seat=state.piotrek_seat or 0,
+                                  piotrek_name="Kuba"), local=False)
+    frame(screen)
+    return pawn
+
+
+def test_a_hot_seat_game_is_playable_at_once(screen):
+    """Nobody to ask, so nothing to wait for: only an online match pauses."""
+    assert screen.state.phase.playable
+    frame(screen)
+    assert not screen.match_start.active
+
+
+def test_winning_puts_the_ending_on_screen(screen):
+    pawn_id = _win(screen)
+    assert screen.victory.active
+    assert screen.victory.piotrek_won
+    assert screen.victory.pawn_name == screen.state.library.pawn(pawn_id).name
+
+
+def test_the_two_endings_do_not_look_alike(screen):
+    """Different colour, different words — you should not have to read it."""
+    _win(screen, "piotrek")
+    escaped = screen.victory.accent
+    screen.state.victory = None
+    screen.victory.hide()
+    _win(screen, "hunters")
+    assert screen.victory.accent != escaped
+    assert not screen.victory.piotrek_won
+
+
+def test_the_ending_paints_something_over_the_table(screen):
+    frame(screen)
+    before = screen.app.canvas.copy()
+    _win(screen)
+    settle(screen, 20)
+    canvas = screen.app.canvas
+    changed = sum(
+        canvas.get_at((x, y))[:3] != before.get_at((x, y))[:3]
+        for x in range(0, canvas.get_width(), 29)
+        for y in range(0, canvas.get_height(), 29)
+    )
+    assert changed > 100, "an overlay that changes nothing is not an overlay"
+
+
+def test_gameplay_is_dead_once_somebody_has_won(screen):
+    state = screen.state
+    _win(screen)
+    before = state.deck(settings.DECK_MOVEMENT).draw_count
+    click(screen, screen.app.layout.deck_draw_rect(0).center)
+    click(screen, screen.app.layout.board_viewport.center)
+    assert state.deck(settings.DECK_MOVEMENT).draw_count == before
+
+
+def test_the_ending_offers_a_way_out(screen):
+    _win(screen)
+    settle(screen, 10)
+    keys = [key for key, _ in screen.victory.buttons]
+    assert "quit" in keys, "there is always a way out of the application"
+    # A hot-seat game has no lobby to return to, so it does not pretend to.
+    assert "lobby" not in keys
+
+
+class _FakeService:
+    """Just enough of NetworkService for the screen to believe it is online.
+
+    The identity question is something the SERVER asks, so a test that reaches
+    into the overlay and shows it by hand proves nothing: the screen rebuilds
+    the overlay from the service every frame, exactly so a late answer or a
+    reconnection cannot leave a stale picture on screen.
+    """
+
+    def __init__(self, session, pawns=()):
+        self.session = session
+        self.identity_request = [dict(p) for p in pawns]
+        self.identity_pawn = ""
+        self.disconnected = None
+        self.reconnecting = False
+        self.chosen = None
+        self.returned = False
+        self.closed = False
+
+    def poll(self, library=None):
+        pass
+
+    def drain_notices(self):
+        return []
+
+    def choose_identity(self, pawn_id):
+        self.chosen = pawn_id
+        self.identity_pawn = pawn_id
+        self.identity_request = []
+
+    def return_to_lobby(self):
+        self.returned = True
+
+    def close(self):
+        self.closed = True
+
+
+def _online_screen(library, pawns=()):
+    from pedzacy_piotrek.engine.victory import MatchPhase
+
+    app = App(Layout(), headless=True, size=WINDOW)
+    state = create_game(SessionConfig(num_players=4, board_cells=18, seed=5,
+                                      piotrek_picks_pawn=True), library)
+    assert state.phase is MatchPhase.STARTING
+    session = LocalSession(state)
+    service = _FakeService(session, pawns)
+    game = GameScreen(app, session, service=service)
+    app.push(game)
+    return game, service
+
+
+def test_a_player_who_is_not_piotrek_only_waits(library):
+    game, _service = _online_screen(library)
+    frame(game)
+    assert game.match_start.active and not game.match_start.choosing
+
+    before = game.state.deck(settings.DECK_MOVEMENT).draw_count
+    click(game, game.app.layout.deck_draw_rect(0).center)
+    assert game.state.deck(settings.DECK_MOVEMENT).draw_count == before, \
+        "nothing is playable yet"
+
+
+def test_piotrek_picks_a_colour_and_the_choice_goes_to_the_server(library):
+    game, service = _online_screen(
+        library,
+        [{"id": p.id, "name": p.name, "color": list(p.color)}
+         for p in ContentLibrary.load().pawns],
+    )
+    settle(game, 5)
+    assert game.match_start.choosing
+
+    wanted = game.match_start.pawns[1]["id"]
+    click(game, game.match_start.rects[1].center)
+    assert service.chosen == wanted, "the colour was sent, once"
+
+    settle(game, 5)
+    assert game.match_start.active, "still waiting for the table to start"
+    assert not game.match_start.choosing, "but not asked twice"
+
+    game.state.apply(cmd.BeginMatch(), local=False)
+    frame(game)
+    assert not game.match_start.active, "everybody starts together"
+
+
+def test_the_ending_of_an_online_match_offers_the_lobby(library):
+    game, service = _online_screen(library)
+    game.state.apply(cmd.BeginMatch(), local=False)
+    _win(game)
+    settle(game, 10)
+    keys = [key for key, _ in game.victory.buttons]
+    assert keys == ["lobby", "menu", "quit"], "three ways out, best one first"
+
+    lobby_rect = dict(game.victory.buttons)["lobby"]
+    click(game, lobby_rect.center)
+    assert service.returned, "the server is asked to reopen the room"
+    assert not service.closed, "and the connection is kept"
+
+
+def test_the_main_menu_button_closes_the_connection(library):
+    """The other two endings differ in exactly this.
+
+    Returning to the poczekalnia keeps the room; going to the main menu leaves
+    it, and leaving without closing would hold a seat open behind a grace
+    period nobody is waiting through.
+    """
+    game, service = _online_screen(library)
+    game.state.apply(cmd.BeginMatch(), local=False)
+    _win(game)
+    settle(game, 10)
+
+    click(game, dict(game.victory.buttons)["menu"].center)
+    assert service.closed and not service.returned
+    from pedzacy_piotrek.ui.network_screens import MainMenuScreen
+    assert isinstance(game.app.screen, MainMenuScreen)
+
+
+# ── stage 18: the hot-seat picker, and Piotrek's own reminder ────────────────
+def _hot_seat(library, **overrides):
+    app = App(Layout(), headless=True, size=WINDOW)
+    state = create_game(SessionConfig(num_players=4, board_cells=18, seed=11,
+                                      piotrek_picks_pawn=True, **overrides),
+                        library)
+    game = GameScreen(app, LocalSession(state))
+    app.push(game)
+    return game
+
+
+def test_one_machine_is_asked_too(library):
+    """The bug: only online matches paused to ask, so testing alone never saw it."""
+    game = _hot_seat(library)
+    assert game.state.piotrek_pawn is None, "nothing dealt behind anybody's back"
+    frame(game)
+    assert game.match_start.active and game.match_start.choosing
+    assert len(game.match_start.pawns) == len(game.state.library.pawns)
+
+
+def test_the_hot_seat_pick_starts_the_match(library):
+    game = _hot_seat(library)
+    settle(game, 5)
+    wanted = game.match_start.pawns[2]["id"]
+    click(game, game.match_start.rects[2].center)
+    frame(game)
+
+    assert game.state.piotrek_pawn == wanted
+    assert game.state.phase.playable, "and the table is live"
+    assert not game.match_start.active
+
+
+def test_the_pick_cannot_be_taken_back(library):
+    game = _hot_seat(library)
+    settle(game, 5)
+    first = game.match_start.pawns[0]["id"]
+    click(game, game.match_start.rects[0].center)
+    frame(game)
+    assert game.state.piotrek_pawn == first
+    assert not game.state.set_piotrek_pawn(game.state.library.pawns[3].id)
+    assert game.state.piotrek_pawn == first
+
+
+def _panel_shows_pawn(game, player) -> bool:
+    """Is a filled colour circle drawn in the identity row of the right panel?"""
+    game.view_seat = player.index
+    frame(game)
+    rect = game.app.layout.character_panel(player.is_piotrek)["identity"]
+    canvas = game.app.canvas
+    pawn = game.state.library.pawn(player.secret_pawn) if player.secret_pawn else None
+    if pawn is None:
+        return False
+    wanted = pawn.color
+    return any(
+        max(abs(canvas.get_at((x, y))[i] - wanted[i]) for i in range(3)) < 30
+        for x in range(rect.left, rect.right, 2)
+        for y in range(rect.top, rect.bottom, 2)
+    )
+
+
+def test_piotrek_always_sees_which_pawn_is_his(library):
+    game = _hot_seat(library)
+    settle(game, 5)
+    click(game, game.match_start.rects[1].center)
+    settle(game, 5)
+
+    piotrek = game.state.player(game.state.piotrek_seat)
+    assert _panel_shows_pawn(game, piotrek), "the badge is drawn in his own panel"
+
+
+def test_the_reminder_outlives_a_dozen_turns(library):
+    game = _hot_seat(library)
+    settle(game, 5)
+    click(game, game.match_start.rects[1].center)
+    settle(game, 5)
+    piotrek = game.state.player(game.state.piotrek_seat)
+
+    for _ in range(12):
+        seat = game.state.active_player_index
+        game.state.apply(cmd.EndTurn(player_index=seat), local=False)
+    assert _panel_shows_pawn(game, piotrek), "still there at the far end"
+
+
+def test_nobody_else_has_a_colour_to_show(library):
+    """A hunter's panel has no identity row at all — and no colour to draw."""
+    game = _hot_seat(library)
+    settle(game, 5)
+    click(game, game.match_start.rects[1].center)
+    settle(game, 5)
+
+    for player in game.state.players:
+        if player.is_piotrek:
+            continue
+        assert player.secret_pawn is None
+        assert not _panel_shows_pawn(game, player)
+
+
+def test_a_hunters_client_cannot_draw_a_badge_it_does_not_have(library):
+    """The real protection online: the colour is not in a hunter's state.
+
+    The panel is only Piotrek's, but the reason it cannot leak is simpler than
+    that — a hunter's replica has ``secret_pawn`` set to None for everybody.
+    """
+    game = _hot_seat(library)
+    settle(game, 5)
+    click(game, game.match_start.rects[1].center)
+    settle(game, 5)
+
+    piotrek = game.state.player(game.state.piotrek_seat)
+    piotrek.secret_pawn = None                  # what a hunter's copy looks like
+    frame(game)
+    assert not _panel_shows_pawn(game, piotrek)
+
+
+# ── the four cards, seen from the interface ──────────────────────────────────
+def _place(screen, pawn_id, position):
+    board = screen.state.board
+    board.place_pawn(pawn_id, board.position(position).tiles[0].index)
+    screen.state._sync_token_positions()
+
+
+def _pawn_option_rect(screen, pawn_id):
+    """Where the prompt drew a particular pawn button."""
+    for option in screen.choice_prompt.options:
+        if option.id == pawn_id:
+            return option.rect
+    raise AssertionError(f"{pawn_id} nie jest w pytaniu")
+
+
+def test_plagiat_asks_for_two_pawns_and_numbers_them(screen):
+    """The generic multi-select: pick, pick, confirm — and the picks are ordered."""
+    state = screen.state
+    card = give_card(screen, lambda c: c.title == "Plagiat!")
+    green, pink = state.library.pawns[1].id, state.library.pawns[4].id
+    _place(screen, green, 6)
+    _place(screen, pink, 9)
+    settle(screen)
+
+    click(screen, screen.hand.slots[card.uid].position)
+    settle(screen, 10)
+
+    prompt = screen.choice_prompt
+    assert prompt.active and prompt.is_multi and prompt.count == 2
+    assert not prompt.ready, "nothing is picked yet"
+
+    click(screen, _pawn_option_rect(screen, green).center)
+    settle(screen, 5)
+    click(screen, _pawn_option_rect(screen, pink).center)
+    settle(screen, 5)
+
+    assert prompt.selected == [green, pink]
+    assert prompt.order_of(green) == 1 and prompt.order_of(pink) == 2
+    assert prompt.ready
+    # The board shows the same numbers, so the decision reads where the pawns are.
+    assert screen.board_view.choice_selected == [green, pink]
+
+    click(screen, prompt.confirm_rect.center)
+    settle(screen, 60)
+
+    assert state.board.position_of_pawn(green) == 5
+    assert state.board.position_of_pawn(pink) == 8
+
+
+def test_unpicking_a_pawn_closes_the_numbers_up(screen):
+    """1 green, 2 pink → unpick green → 1 pink.  The example from the brief."""
+    state = screen.state
+    card = give_card(screen, lambda c: c.title == "Plagiat!")
+    green, pink = state.library.pawns[1].id, state.library.pawns[4].id
+    _place(screen, green, 6)
+    _place(screen, pink, 9)
+    settle(screen)
+    click(screen, screen.hand.slots[card.uid].position)
+    settle(screen, 10)
+
+    click(screen, _pawn_option_rect(screen, green).center)
+    click(screen, _pawn_option_rect(screen, pink).center)
+    settle(screen, 5)
+    assert screen.choice_prompt.order_of(pink) == 2
+
+    click(screen, _pawn_option_rect(screen, green).center)
+    settle(screen, 5)
+
+    assert screen.choice_prompt.selected == [pink]
+    assert screen.choice_prompt.order_of(pink) == 1
+    assert screen.choice_prompt.order_of(green) is None
+    assert not screen.choice_prompt.ready, "confirm goes dead again"
+
+
+def test_confirm_does_nothing_until_exactly_two_are_picked(screen):
+    state = screen.state
+    card = give_card(screen, lambda c: c.title == "Plagiat!")
+    green = state.library.pawns[1].id
+    _place(screen, green, 6)
+    settle(screen)
+    click(screen, screen.hand.slots[card.uid].position)
+    settle(screen, 10)
+
+    click(screen, _pawn_option_rect(screen, green).center)
+    settle(screen, 5)
+    click(screen, screen.choice_prompt.confirm_rect.center)
+    settle(screen, 10)
+
+    assert screen.pending_choice is not None, "still waiting"
+    assert state.board.position_of_pawn(green) == 6, "and nothing has moved"
+
+
+def test_spy_opens_a_card_picker_showing_only_movement_cards(screen):
+    state = screen.state
+    piotrek = next(p for p in state.players if p.is_piotrek)
+    hunter = next(p for p in state.players if not p.is_piotrek)
+    state.active_player_index = hunter.index
+    screen.view_seat = hunter.index
+    chest = state.deck(settings.DECK_CHEST).take_card()
+    piotrek.hand.append(chest)
+    spy = _give(state, hunter, "Spy")
+    settle(screen)
+
+    click(screen, screen.hand.slots[spy.uid].position)
+    settle(screen, 10)
+
+    picker = screen.card_picker
+    assert picker.active
+    shown = {c.uid for c in picker.cards}
+    assert chest.uid not in shown, "a Chest card is not a Movement card"
+    assert shown == {c.uid for c in piotrek.hand
+                     if c.deck_id == settings.DECK_MOVEMENT}
+
+    target = picker.cards[0]
+    rect = screen.app.layout.card_picker_card_rect(0, len(picker.cards))
+    click(screen, rect.center)
+    settle(screen, 20)
+
+    assert not screen.card_picker.active
+    assert hunter.card_by_uid(target.uid) is target
+    assert piotrek.card_by_uid(target.uid) is None
+
+
+def test_the_card_picker_can_be_backed_out_of(screen):
+    state = screen.state
+    hunter = next(p for p in state.players if not p.is_piotrek)
+    state.active_player_index = hunter.index
+    screen.view_seat = hunter.index
+    spy = _give(state, hunter, "Spy")
+    settle(screen)
+    click(screen, screen.hand.slots[spy.uid].position)
+    settle(screen, 10)
+    assert screen.card_picker.active
+
+    screen.handle_event(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, unicode=""), (0, 0)
+    )
+    settle(screen, 5)
+
+    assert not screen.card_picker.active
+    assert screen.pending_choice is None
+    assert hunter.card_by_uid(spy.uid) is spy, "and the card is still in hand"
+
+
+def test_a_spotlit_card_holds_the_board_back_before_it_moves(screen):
+    """The forced card is shown, and only then does anything appear to move.
+
+    The STATE has already changed by this point — that is deliberate and the
+    engine must never wait for a frame (N36).  What is checked here is that the
+    picture arrives in the order a player can follow.
+    """
+    from pedzacy_piotrek.engine import events as ev
+
+    seat = screen.state.active_player_index
+    screen.bus.emit(ev.CardSpotlighted(
+        player_index=seat, deck_id=settings.DECK_MOVEMENT, card_uid=-1,
+        title="Troll", text="…", seconds=2.5, caption="Troll wybrał tę kartę",
+        forced=True,
+    ))
+
+    assert screen.reveal.active, "the card is held up"
+    assert screen.reveal.phases[0].halo, "with a ring round it, not just shown"
+    assert screen.board_view.walk_delay == pytest.approx(2.5)
+
+    settle(screen, 30)          # half a second of frames
+    assert screen.board_view.walk_delay < 2.5, "the hold counts down in real time"
+    settle(screen, 200)
+    assert screen.board_view.walk_delay == 0.0, "and then lets the board go"
+
+
+def test_a_two_pawn_badge_is_wider_than_a_one_pawn_badge(screen):
+    """Plagiat! shows two pawns, and the difference has to be visible.
+
+    Rendered and measured rather than asked: the badge is drawn, so the test
+    that proves it changed is one that looks at the pixels.
+    """
+    from pedzacy_piotrek.cards.base_card import Badge
+
+    cards = screen.cards
+    size = (200, 280)
+    one = cards.face(_badge_card(screen, Badge("rainbow", "-", False, 1)), size)
+    two = cards.face(_badge_card(screen, Badge("rainbow", "-", False, 2)), size)
+    assert _badge_width(one) < _badge_width(two)
+
+
+def _give(state, player, title):
+    """Put the named card into a hand, wherever in the game it currently is.
+
+    Several of these cards exist in exactly one copy, so the opening deal may
+    already have handed it to somebody; a test that only looks in the draw pile
+    fails depending on the seed.
+    """
+    from pedzacy_piotrek.config import settings as _settings
+
+    for deck_id in (_settings.DECK_MOVEMENT, _settings.DECK_CHEST):
+        deck = state.deck(deck_id)
+        for pile in (deck.draw_pile, deck.discard_pile):
+            for card in list(pile):
+                if card.title == title:
+                    pile.remove(card)
+                    player.hand.append(card)
+                    return card
+    for other in state.players:
+        for card in list(other.hand):
+            if card.title == title:
+                other.remove_card(card)
+                player.hand.append(card)
+                return card
+    raise AssertionError(f"nie ma karty {title!r} w grze")
+
+
+def _badge_card(screen, badge):
+    """A throwaway card carrying nothing but the badge under test."""
+    from dataclasses import replace as dataclass_replace
+
+    from pedzacy_piotrek.cards.base_card import Card
+
+    definition = screen.state.deck(settings.DECK_MOVEMENT).definition.cards[0]
+    return Card(dataclass_replace(definition, badge=badge, image=None))
+
+
+def _badge_width(surface):
+    """How far across the bottom strip of a card face anything is painted.
+
+    Two details this has to get right, both learned the hard way.  The card has
+    a border and an inset brass rule, so the scan starts INSIDE them or every
+    card measures the full width and every comparison is 199 < 199.  And the
+    parchment is a vertical gradient, so "background" is sampled per row rather
+    than once — a single sample calls the next row down a painted pixel.
+    """
+    width, height = surface.get_size()
+    margin = int(width * 0.14)
+    band = range(int(height * 0.88), int(height * 0.97))
+    columns = []
+    for y in band:
+        background = surface.get_at((margin, y))[:3]
+        for x in range(margin, width - margin):
+            if surface.get_at((x, y))[:3] != background:
+                columns.append(x)
+    return (max(columns) - min(columns)) if columns else 0

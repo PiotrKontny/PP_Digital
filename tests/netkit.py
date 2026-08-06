@@ -89,11 +89,44 @@ class Table:
         self.pump()
         return host, clients
 
-    def playing(self, *nicknames: str):
+    def playing(self, *nicknames: str, colour: str = ""):
+        """A match that has actually begun — identity chosen and all.
+
+        Since stage 17 starting a game leaves the table in ``STARTING`` until
+        Piotrek names his colour, and nothing may be played before that.  Every
+        test that wants to play a turn therefore goes through this step, which
+        is the point: the new phase is exercised by the whole existing suite
+        rather than by one test that remembers to.
+        """
+        host, clients = self.seated(*nicknames)
+        host.start_game(self.library)
+        self.pump()
+        self.choose_identity(host, clients, colour)
+        return host, clients
+
+    def starting(self, *nicknames: str):
+        """A match built but NOT begun: Piotrek has not chosen yet."""
         host, clients = self.seated(*nicknames)
         host.start_game(self.library)
         self.pump()
         return host, clients
+
+    def piotrek(self, host, clients):
+        """Whichever service was asked for the hidden colour, if any."""
+        for service in [host, *clients]:
+            if service.identity_request:
+                return service
+        return None
+
+    def choose_identity(self, host, clients, colour: str = ""):
+        """Answer the identity question the way Piotrek's machine would."""
+        service = self.piotrek(host, clients)
+        if service is None:
+            return None
+        chosen = colour or service.identity_request[0]["id"]
+        service.choose_identity(chosen)
+        self.pump()
+        return chosen
 
     def by_seat(self, host, clients) -> dict:
         parties = [host, *clients]
@@ -105,9 +138,16 @@ class Table:
 
 
 def playable_card(service, seat: int):
-    """A movement card in that seat's hand — discarding one is how a turn passes."""
+    """A movement card in that seat's hand — discarding one is how a turn passes.
+
+    Locked cards are skipped.  Troll and Stańczyk sit in the hand refusing to be
+    played or discarded by hand (that refusal is the whole mechanic), so a
+    helper that took the first movement card it saw passed or failed depending
+    on where the shuffle happened to put them.
+    """
     player = service.state.player(seat)
-    return next(c for c in player.hand if c.deck_id == settings.DECK_MOVEMENT)
+    return next(c for c in player.hand
+                if c.deck_id == settings.DECK_MOVEMENT and not c.locked)
 
 
 def take_a_turn(table: Table, host, clients) -> int:

@@ -279,12 +279,18 @@ class HandFan:
     def _activate(self, uid: int) -> None:
         """A plain click: play the card if it can be played, else discard it.
 
-        Cards whose effect needs a decision are not implemented yet, and those
-        keep the prototype's behaviour — click discards — so nothing that used
-        to work stopped working.
+        Cards with no effect keep the prototype's behaviour — click discards —
+        so nothing that used to work stopped working.  A LOCKED card is the
+        exception and is neither: Troll booked a turn the moment it was drawn,
+        and discarding it would be a free way out of it.  The engine refuses
+        both anyway; this is so the player gets an explanation instead of a
+        rejection.
         """
         card = self.card_by_uid(uid)
         if card is None:
+            return
+        if card.locked:
+            self.notify(f"„{card.title}” zadziała sama na początku twojej tury")
             return
         if card.is_playable:
             self._play(card, effects.preview(self.state, card, self.seat()))
@@ -292,6 +298,9 @@ class HandFan:
             self._discard(uid)
 
     def _play(self, card: Card, preview: Optional[object]) -> None:
+        if card.locked:
+            self.notify(f"„{card.title}” zagra się sama, kiedy przyjdzie twoja tura")
+            return
         if preview is None:
             preview = effects.preview(self.state, card, self.seat())
         # A pending decision is not a refusal: submitting makes the engine ask,
@@ -305,6 +314,10 @@ class HandFan:
         )
 
     def _discard(self, uid: int) -> None:
+        card = self.card_by_uid(uid)
+        if card is not None and card.locked:
+            self.notify(f"„{card.title}” zostaje na ręce")
+            return
         self.submit(
             cmd.DiscardCard(player_index=self.seat(), card_uid=uid)
         )
@@ -422,7 +435,9 @@ class HandFan:
                 highlighted=highlighted, border_color=border,
                 shadow=16 if highlighted else 7,
             )
-            if playable and uid != self.dragging:
+            if slot.card.locked:
+                self._locked_marker(surface, slot, card_size)
+            elif playable and uid != self.dragging:
                 self._playable_marker(surface, slot, card_size)
 
         if self.dragging is not None:
@@ -439,6 +454,25 @@ class HandFan:
         )
         self.r.aa_circle(centre, 5, self.r.theme.valid,
                          lighten(self.r.theme.valid, 0.6), 1, surface)
+
+    def _locked_marker(self, surface: pygame.Surface, slot: FanSlot,
+                       card_size: Tuple[int, int]) -> None:
+        """A warning pip on a card the player does not control.
+
+        Same geometry as the playable pip and a different colour, because the
+        two answer the same question — "can I click this?" — and putting them
+        anywhere near each other in different places would make both harder to
+        read.
+        """
+        radians = math.radians(slot.angle)
+        offset = card_size[1] * slot.scale * 0.5 - 10
+        centre = (
+            slot.position[0] + math.sin(radians) * offset,
+            slot.position[1] - math.cos(radians) * offset,
+        )
+        theme = self.r.theme
+        self.r.aa_circle(centre, 5, theme.prompt, lighten(theme.prompt, 0.6), 1,
+                         surface)
 
     def _draw_drag_hint(self, surface: pygame.Surface) -> None:
         preview = self.drag_preview

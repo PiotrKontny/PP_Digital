@@ -7,8 +7,28 @@
       "cards": [
         {
           "title": "Troll",
-          "text": "Od razu po dobraniu wymusza użycia losowej karty ze Skrzyni z ręki. Jeśli gracz nie posiada takiej karty to grana jest losowa karta ruchu",
-          "count": 2
+          "text": "W następnej turze po dobraniu tej karty musisz zagrać losową Kartę Skrzyni z ręki. Jeśli jej nie masz, zagrana zostanie losowa karta ruchu.",
+          "count": 2,
+          "locked": true,
+          "in_opening_hand": false,
+          "on_draw": {
+            "type": "turn_interrupt",
+            "interrupt": {
+              "type": "forced_play",
+              "priority_decks": [
+                "chest"
+              ],
+              "fallback_decks": [
+                "movement"
+              ],
+              "highlight_seconds": 2.5,
+              "caption": "Troll wybrał tę kartę"
+            },
+            "draw": {
+              "deck": "movement",
+              "count": 1
+            }
+          }
         },
         {
           "title": "Janek",
@@ -22,13 +42,27 @@
         },
         {
           "title": "Stańczyk",
-          "text": "Kiedy dobierzesz tą kartę ruch w twojej następnej turze jest pominięty. Karta od razu odrzucana",
-          "count": 1
+          "text": "Kiedy dobierzesz tę kartę, twoja następna tura jest pominięta. Karta zostaje wtedy odrzucona.",
+          "count": 1,
+          "locked": true,
+          "on_draw": {
+            "type": "turn_interrupt",
+            "interrupt": {
+              "type": "skip_turn",
+              "highlight_seconds": 2.0,
+              "caption": "tura pominięta"
+            }
+          }
         },
         {
           "title": "Spy",
-          "text": "Przejrzyj karty przeciwnika, wybierz kartę do zabrania",
-          "count": 1
+          "text": "Przejrzyj karty ruchu przeciwnika i zabierz jedną wybraną kartę ruchu.",
+          "count": 1,
+          "effect": {
+            "type": "steal_card",
+            "deck": "movement",
+            "asks": true
+          }
         },
         {
           "title": "Thunderfuck",
@@ -82,12 +116,20 @@
         },
         {
           "title": "Plagiat!",
-          "text": "Porusz wybrany pionek jedno pole do tyłu, gracz po lewej porusza innego pionka jedno pole do tyłu",
+          "text": "Cofnij dwa wybrane pionki o jedno pole.",
           "count": 2,
           "badge": {
             "pawn": "rainbow",
+            "count": 2,
             "arrow": false,
             "sign": "-"
+          },
+          "effect": {
+            "type": "move_pawns",
+            "count": 2,
+            "steps": 1,
+            "direction": "backward",
+            "asks": true
           }
         },
         {

@@ -122,6 +122,14 @@ class BoardView:
         self.choice_tiles: List[int] = []
         #: Pawns the player is being asked to choose between.
         self.choice_pawns: List[str] = []
+        #: Pawns already picked, in the order they were picked.  Drawn with the
+        #: number that says when each one moves (Plagiat!).
+        self.choice_selected: List[str] = []
+        #: Seconds to hold every NEW walk back before it starts.  Set by the
+        #: screen while a card the player did not choose is being held up, so
+        #: what they watch is: card, pause, movement.  The state has already
+        #: changed — this delays the picture, never the rules (N36).
+        self.walk_delay = 0.0
         self._choice_pulse = 0.0
         #: True while the left button is dragging the map itself.
         self.map_dragging = False
@@ -202,7 +210,7 @@ class BoardView:
             colour = token.color
             self.walks[pawn_id] = Walk(
                 points=points,
-                delay=i * 0.09,
+                delay=self.walk_delay + i * 0.09,
                 hop=12.0 if not event.backward else 7.0,
                 on_step=lambda position, c=colour: self.particles.dust(position, c),
             )
@@ -418,9 +426,32 @@ class BoardView:
                 continue
             centre = self.camera.world_to_screen(self.display_position(pawn_id))
             radius = int(18 * self.camera.zoom) + 6
+            order = (self.choice_selected.index(pawn_id) + 1
+                     if pawn_id in self.choice_selected else None)
+            if order is not None:
+                # A picked pawn is ringed brighter and carries the number that
+                # says when it moves, because with two of them the order is the
+                # decision and not a detail of it.
+                self.r.ring_glow(centre, radius, theme.valid, surface,
+                                 strength=0.85 + 0.15 * pulse)
+                self.r.aa_ring(centre, radius + int(3 * pulse), theme.valid, 4,
+                               surface)
+                self._draw_pick_number(surface, centre, radius, order)
+                continue
             self.r.ring_glow(centre, radius, token.color, surface,
                              strength=0.6 + 0.4 * pulse)
             self.r.aa_ring(centre, radius + int(3 * pulse), theme.prompt_bright, 3, surface)
+
+    def _draw_pick_number(self, surface: pygame.Surface, centre: Tuple[int, int],
+                          radius: int, order: int) -> None:
+        """The badge on a pawn saying it is the nth to move."""
+        theme = self.r.theme
+        size = max(9, int(radius * 0.55))
+        spot = (centre[0] + radius - size // 2, centre[1] - radius + size // 2)
+        self.r.aa_circle(spot, size, theme.valid, darken(theme.valid, 0.55), 2,
+                         surface)
+        self.r.text(str(order), self.r.fonts.get(max(11, size + 1), bold=True),
+                    theme.ink, surface, center=spot)
 
     def _draw_status_marks(self, surface: pygame.Surface) -> None:
         """Small badges on pawns carrying a gameplay state.

@@ -227,6 +227,11 @@ class SessionConfig:
     #: Development option: allow a two-player table so multiplayer can be tested
     #: without rounding up a third person.  Nothing else about the game changes.
     debug_version: bool = False
+    #: Online match: Piotrek picks his own pawn colour before the first move,
+    #: privately, and the server is the only one told.  A hot-seat game leaves
+    #: this off and the colour is dealt from the seed as it always was — with
+    #: everybody at one keyboard there is no secret to keep and nobody to ask.
+    piotrek_picks_pawn: bool = False
 
     @property
     def min_players(self) -> int:
