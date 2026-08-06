@@ -169,7 +169,13 @@ class GameState:
         #: Every persistent gameplay state in play (frozen, linked, bonuses…).
         self.statuses = StatusTracker()
         #: Chest cards waiting for their owner to choose which to keep.
-        self.pending_chest_choice: Optional[Tuple[int, List[int]]] = None
+        #: A QUEUE, because a dealing round now feeds TWO seats and both can go
+        #: over the limit on the same round.  While this was a single slot the
+        #: second overflow silently overwrote the first, leaving that player
+        #: permanently over the limit and taking their extra card out of
+        #: circulation for good — which drained the eight-card chest deck after
+        #: a few rounds and looked exactly like a distribution bug (N95).
+        self._pending_chest_choices: List[Tuple[int, List[int]]] = []
         #: The round is paused while both factions pick a Mod Patusa.
         self.pending_mod_selection: Optional[ModSelection] = None
         #: How deep the current draw-causes-a-draw chain is.  Not game state —
@@ -225,6 +231,41 @@ class GameState:
     def chest_is_open(self) -> bool:
         return self.round_number >= self.chest_open_round
 
+    @property
+    def chest_is_sparse(self) -> bool:
+        """Whether this table only gets a chest card every second eligible round.
+
+        Small tables were the problem: the rota is short, so 'every eligible
+        round' comes back to the same hunter far too quickly and the chest
+        stopped being an event.  Five and six players keep the original
+        cadence exactly.
+
+        Derived from the table size, which is fixed for the whole match and the
+        same on every machine, so this needs no command, no RNG and nothing in
+        the snapshot — every replica answers it identically.
+        """
+        return len(self.players) <= RULES.chest_sparse_max_players
+
+    def chest_awards_cards(self, round_number: Optional[int] = None) -> bool:
+        """Whether THIS round actually hands a chest card out.
+
+        Distinct from :attr:`chest_is_open` on purpose.  On a small table the
+        chest can be open — the rota still turns, the indicator still moves —
+        while this particular round awards nothing.  The interface reads this
+        to decide whether the indicator is filled or outlined, and the engine
+        reads it to decide whether to deal; one source of truth for both, so
+        the marker can never promise a card that does not arrive.
+        """
+        number = round_number if round_number is not None else self.round_number
+        if number < self.chest_open_round:
+            return False
+        if not self.chest_is_sparse:
+            return True
+        interval = max(1, int(RULES.chest_sparse_interval))
+        # Counted from the opening round, so the chest ALWAYS awards on the
+        # round it opens and then skips every other one.
+        return (number - self.chest_open_round) % interval == 0
+
     # ── the Mod Patusa schedule ──────────────────────────────────────────────
     @property
     def mod_round_first(self) -> int:
@@ -277,11 +318,18 @@ class GameState:
             self.hunter_names,
         )
 
+    @property
+    def chest_interval(self) -> int:
+        """How many rounds pass between chest hand-outs at this table size."""
+        return (max(1, int(RULES.chest_sparse_interval)) if self.chest_is_sparse
+                else 1)
+
     def chest_recipient(self, round_number: Optional[int] = None) -> Optional[str]:
         return chest_recipient_for_round(
             round_number if round_number is not None else self.round_number,
             self.chest_open_round,
             self.hunter_names,
+            self.chest_interval,
         )
 
     # ── the turn loop ────────────────────────────────────────────────────────
@@ -314,6 +362,7 @@ class GameState:
             round_number if round_number is not None else self.round_number,
             self.chest_open_round,
             [str(index) for index in hunters],
+            self.chest_interval,
         )
         return None if name is None else int(name)
 
@@ -574,9 +623,7 @@ class GameState:
             held = self.chest_cards(player)
             limit = self.chest_limit(player)
             if len(held) > limit:
-                self.pending_chest_choice = (
-                    player.index, [c.uid for c in held]
-                )
+                self.queue_chest_choice(player.index, [c.uid for c in held])
                 events.append(ev.ChestLimitReached(
                     player_index=player.index,
                     limit=limit,
@@ -1019,32 +1066,69 @@ class GameState:
         self.pending_mod_selection = None
         return [ev.ModSelectionFinished(selection.round_number)]
 
+    def chest_recipient_seats(self, round_number: Optional[int] = None
+                              ) -> List[int]:
+        """Every seat due a chest card this round, in the ribbon's own order.
+
+        TWO recipients, not one: PIOTREK ALWAYS, plus whichever hunter the rota
+        has reached.  The turn ribbon has marked both since the chest existed —
+        a dot under Piotrek's first slot and one under the scheduled hunter —
+        but the engine only ever dealt to the hunter, so Piotrek's marker had
+        been promising a card that never arrived.
+
+        Piotrek comes first because that is how the ribbon reads, left to
+        right, and because a fixed order is what keeps the two draws coming off
+        the deck in the same sequence on every machine.
+
+        The hunter rota itself is untouched: it still steps once per hand-out
+        through :func:`chest_recipient_for_round`.  Piotrek is not part of that
+        rotation and never was — he is simply always fed.
+        """
+        seats: List[int] = []
+        piotrek = self.piotrek_seat
+        if piotrek is not None:
+            seats.append(piotrek)
+        hunter = self.chest_recipient_seat(round_number)
+        if hunter is not None and hunter not in seats:
+            seats.append(hunter)
+        return seats
+
     def _distribute_chest_card(self) -> List[ev.GameEvent]:
-        """Give this round's chest card to the hunter whose turn it is to get one.
+        """Give this round's chest cards to the seats due one.
 
         The interface already announced who was due and when; this is that
-        promise being kept.  It goes through the ordinary draw path, so the
-        hand limit and its keep-or-discard prompt behave exactly as they do for
-        a card drawn by hand.
+        promise being kept.  Each card goes through the ordinary draw path, so
+        the hand limit and its keep-or-discard prompt behave exactly as they do
+        for a card drawn by hand.
+
+        On a small table only every second eligible round awards anything —
+        ``chest_awards_cards`` decides, and the indicator asks the same
+        question, so a filled marker and a dealt card cannot disagree.  The
+        ROTA IS NOT PAUSED by a skipped round: the recipient still advances, so
+        a skipped round moves the marker on exactly as a dealing round does.
         """
-        if not self.chest_is_open:
-            return []
-        seat = self.chest_recipient_seat()
-        player = self.player(seat) if seat is not None else None
-        if player is None:
+        if not self.chest_awards_cards():
             return []
         deck = self.decks[settings.DECK_CHEST]
         events: List[ev.GameEvent] = []
-        needed_reshuffle = not deck.draw_pile and bool(deck.discard_pile)
-        card = deck.take_card()
-        if card is None:
-            return []
-        if needed_reshuffle:
-            events.append(ev.DeckReshuffled(deck.id))
-        player.add_card(card)
-        events.append(ev.CardDrawn(player.index, deck.id, card.uid))
-        events.append(ev.ChestCardAwarded(player.index, card.uid, self.round_number))
-        events.extend(self._after_draw(player, card))
+        for seat in self.chest_recipient_seats():
+            player = self.player(seat)
+            if player is None:
+                continue
+            needed_reshuffle = not deck.draw_pile and bool(deck.discard_pile)
+            card = deck.take_card()
+            if card is None:
+                # An empty chest stops the hand-out for everybody left this
+                # round rather than feeding some seats and not others.
+                break
+            if needed_reshuffle:
+                events.append(ev.DeckReshuffled(deck.id))
+            player.add_card(card)
+            events.append(ev.CardDrawn(player.index, deck.id, card.uid))
+            events.append(
+                ev.ChestCardAwarded(player.index, card.uid, self.round_number)
+            )
+            events.extend(self._after_draw(player, card))
         return events
 
     def _end_turn_command(self, command: cmd.EndTurn) -> List[ev.GameEvent]:
@@ -1774,6 +1858,37 @@ class GameState:
         ]
 
     # ── chest hand limit ─────────────────────────────────────────────────────
+    @property
+    def pending_chest_choice(self) -> Optional[Tuple[int, List[int]]]:
+        """The chest limit currently waiting to be answered, oldest first.
+
+        Kept as a single value because every caller — the turn gate, the
+        interface, the tests — only ever deals with one prompt at a time.  The
+        queue behind it is what stops a second overflow in the same round from
+        erasing the first.
+        """
+        return self._pending_chest_choices[0] if self._pending_chest_choices else None
+
+    @pending_chest_choice.setter
+    def pending_chest_choice(self, value: Optional[Tuple[int, List[int]]]) -> None:
+        """Assigning ``None`` clears the whole queue; a tuple replaces it."""
+        self._pending_chest_choices = [] if value is None else [value]
+
+    def queue_chest_choice(self, player_index: int, uids: List[int]) -> None:
+        """Add a seat's overflow to the queue, replacing any it already had."""
+        self._pending_chest_choices = [
+            entry for entry in self._pending_chest_choices
+            if entry[0] != player_index
+        ]
+        self._pending_chest_choices.append((player_index, list(uids)))
+
+    def resolve_chest_choice(self, player_index: int) -> None:
+        """That seat has answered; drop it and let the next prompt through."""
+        self._pending_chest_choices = [
+            entry for entry in self._pending_chest_choices
+            if entry[0] != player_index
+        ]
+
     def chest_limit(self, player: Player) -> int:
         """How many chest cards this player may hold.
 
@@ -1811,7 +1926,7 @@ class GameState:
             player.remove_card(card)
             self.decks[card.deck_id].return_card(card)
             events.append(ev.CardDiscarded(player.index, card.deck_id, card.uid))
-        self.pending_chest_choice = None
+        self.resolve_chest_choice(player.index)
         return events
 
     def _rename_player(self, command: cmd.RenamePlayer) -> List[ev.GameEvent]:

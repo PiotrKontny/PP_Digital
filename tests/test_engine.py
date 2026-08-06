@@ -56,7 +56,11 @@ def test_deck_sizes_match_the_data_file(library):
     assert len(library.deck(settings.DECK_MOVEMENT).build_cards()) == 72
     assert len(library.deck(settings.DECK_MODS).build_cards()) == 8
     # One blank placeholder card was dropped from the data file.
-    assert len(library.deck(settings.DECK_CHEST).build_cards()) == 8
+    # 16 since stage 23: every chest title went to two copies.  Eight could not
+    # supply a six-player table once two cards go out per dealing round —
+    # Piotrek plus the rota — because seven sit in hands at the limit.
+    # Doubled uniformly, so every title stays equally likely.
+    assert len(library.deck(settings.DECK_CHEST).build_cards()) == 16
     assert len(library.deck(settings.DECK_CHARACTERS).build_cards()) == 10
     assert len(library.deck(settings.DECK_SKILLS).build_cards()) == 3
     assert len(library.pawns) == 6

@@ -172,6 +172,7 @@ class RoundPanel(Panel):
             return
         diameter = layout.turn_circle_actual_d
         chest_open = state.chest_is_open
+        chest_awards = state.chest_awards_cards()
         chest_hunter = state.chest_recipient()
         chest_color = theme.deck_colors[settings.DECK_CHEST]
         arrow_color = theme.brass
@@ -217,7 +218,13 @@ class RoundPanel(Panel):
                 show_dot = True
             if show_dot:
                 centre = (rect.centerx, rect.bottom + 6)
-                if chest_open:
+                # FILLED means "a card arrives this round", OUTLINED means
+                # "not this one".  Before the chest opens nothing is dealt, and
+                # on a small table every second eligible round deals nothing
+                # either — both are the same statement to a player, so both
+                # draw the same hollow marker.  The marker still MOVES on a
+                # skipped round; only its fill changes.
+                if chest_open and chest_awards:
                     r.aa_circle(centre, 5, chest_color, surface=surface)
                 else:
                     r.aa_ring(centre, 5, chest_color, 2, surface)

@@ -375,6 +375,12 @@ class GameScreen(Screen):
             # Somebody else's overflowing hand: their machine answers it.
             self.status_bar.notify(f"{player.name} wybiera Kartę Skrzyni…")
             return
+        if self.chest_choice.active:
+            # Two seats can overflow on the same dealing round.  The first
+            # prompt stays up and the queue in the state holds the rest;
+            # ``_open_next_chest_choice`` brings them up in turn as each is
+            # answered.  Replacing the panel here would lose the first answer.
+            return
         cards = [c for c in player.hand if c.uid in set(event.card_uids)]
         self.chest_choice_seat = event.player_index
         self.view_seat = event.player_index
@@ -952,10 +958,41 @@ class GameScreen(Screen):
             self.chest_choice.hide()
             self.submit(cmd.KeepChestCards(
                 player_index=self.chest_choice_seat, keep_uids=keep))
+            # A dealing round feeds two seats, so two of them can go over the
+            # limit at once.  Answering one has to let the next through, or the
+            # second prompt would never be shown and that player would sit over
+            # the limit with a card nobody can put back.
+            self._open_next_chest_choice()
             return
         uid = self.chest_choice.card_at(layout, mouse)
         if uid is not None:
             self.chest_choice.toggle(uid)
+
+    def _open_next_chest_choice(self) -> None:
+        """Show the next queued chest limit this machine is entitled to answer.
+
+        Read from the state rather than from the events that filled it, so a
+        client replaying several commands in one frame — or reconnecting with
+        prompts already queued — opens the right one.
+        """
+        pending = self.state.pending_chest_choice
+        if pending is None:
+            return
+        seat, uids = pending
+        if not self.state.may_control(seat):
+            player = self.state.player(seat)
+            if player is not None:
+                self.status_bar.notify(f"{player.name} wybiera Kartę Skrzyni…")
+            return
+        player = self.state.player(seat)
+        if player is None:
+            return
+        cards = [c for c in player.hand if c.uid in set(uids)]
+        if not cards:
+            return
+        self.chest_choice_seat = seat
+        self.view_seat = seat
+        self.chest_choice.show(cards, self.state.chest_limit(player), None)
 
     @property
     def can_end_turn(self) -> bool:

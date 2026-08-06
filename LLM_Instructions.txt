@@ -1,6 +1,6 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 21 — Mod Patusa selection and hunter voting, Thunderfuck
+Last updated: stage 23 — Piotrek is dealt chest cards again, chest deck to 16
               (see CHANGELOG_LLM.md)
 ================================================================================
 
@@ -70,6 +70,16 @@ WORKING:
   Piotrek, the game refuses to start and says so in red.
 - Five decks with draw/discard/reshuffle: movement, mods, chest, characters,
   piotrek_skills.
+- CHEST TIMING (stage 22): five or six players are dealt a chest card every
+  eligible round as before; a table of FOUR OR FEWER is dealt one every SECOND
+  eligible round, and the rota steps once per hand-out so no hunter is starved.
+  The ribbon marker is FILLED on a dealing round and OUTLINED otherwise, and it
+  keeps moving either way.  See "HOW THE CHEST ROTA WORKS".
+- CHEST RECIPIENTS (stage 23): a dealing round feeds TWO seats — Piotrek every
+  time, plus the hunter the rota has reached.  Piotrek had never been dealt one
+  by the engine despite the ribbon marking him since the chest existed.  The
+  chest deck is SIXTEEN cards (eight titles, two of each) because two cards a
+  round need more supply than eight could give a full table.
 - Procedurally generated horizontal board with guaranteed field spacing,
   rivers, bridges, villages, forest, rocks, a starting camp and a finish banner.
 - Board positions vs fields: a widened row is ONE position holding two fields
@@ -314,7 +324,10 @@ tests/               test_engine, test_board, test_session, test_ui,
                      scheduler stall),
                      test_mod_selection (stage 21: the schedule, the slots,
                      hunter voting, the leftmost tie-break, the pause and
-                     the snapshot).
+                     the snapshot),
+                     test_chest_cadence (stage 22: which tables are sparse,
+                     that the rota feeds every hunter, and that the marker
+                     and the deal always agree).
 tools/               screenshot.py, inspect_frame.py (headless verification).
 docs/ARCHITECTURE.md Polish design rationale for the owner.
 
@@ -1051,6 +1064,174 @@ The game now starts on whichever seat the cadence puts first (Piotrek), not
 always seat 0.  With a single hunter (the two-player development option) the
 cadence gives that hunter a round of their own, so the same seat can legitimately
 play twice running — assert that a turn was *consumed*, not that the seat changed.
+
+
+================================================================================
+HOW THE CHEST ROTA WORKS
+================================================================================
+
+Three separate questions, and keeping them apart is the whole of stages 22-23:
+
+    chest_is_open           has the chest started at all?  round >= open_round.
+    chest_awards_cards()    does THIS round actually deal?
+    chest_recipient_seats() if it does, to whom?  TWO SEATS, not one.
+
+Before stage 22 the first two were the same question.  They are not.
+
+
+WHO IS DEALT A CARD — PIOTREK IS ONE OF THEM
+--------------------------------------------
+A dealing round feeds TWO seats:
+
+    1. PIOTREK, every single dealing round.  He is not in the rotation.
+    2. ONE HUNTER, whichever the rota has reached.
+
+``chest_recipient_seats()`` returns exactly that, Piotrek first, and both the
+engine and the ribbon read it.  ``chest_recipient_seat()`` (singular) is still
+the HUNTER rota alone and is unchanged — do not confuse the two.
+
+THIS WAS BROKEN FROM THE START AND NOBODY NOTICED UNTIL STAGE 23.  The ribbon
+had drawn a dot under Piotrek's first slot since the chest existed, but
+``_distribute_chest_card`` dealt only to ``chest_recipient_seat()``, which is
+hunters-only by construction.  His marker promised a card that never arrived,
+at every table size — it had nothing to do with the stage 22 timing work, which
+is simply when somebody looked closely enough to see it.  A test even asserted
+the broken behaviour outright (``assert not ...is_piotrek``), which is why the
+suite stayed green through it (N94).
+
+
+THE CADENCE
+-----------
+    5 or 6 players   a card every eligible round.  UNCHANGED.
+    4 or fewer       a card every SECOND eligible round.
+
+Small tables have a short rota, so "every eligible round" brought the chest
+back round to the same hunter almost immediately and it stopped being an event.
+The threshold and the interval are RULES.chest_sparse_max_players (4) and
+RULES.chest_sparse_interval (2).
+
+    round:      1  2  3  4  5  6  7  8  9
+    <=4 players .  .  F  o  F  o  F  o  F
+    5-6 players .  .  F  F  F  F  F  F  F
+
+    .  before the chest opens     F  deals     o  eligible but skipped
+
+The chest ALWAYS deals on the round it opens, whatever the table size, because
+the count runs from the opening round: (round - open) % interval == 0.
+
+
+THE ROTA STEPS ONCE PER HAND-OUT, NOT ONCE PER ROUND
+----------------------------------------------------
+READ THIS BEFORE CHANGING chest_recipient_for_round.
+
+The obvious implementation — leave the rota alone and just skip every other
+deal — is WRONG, and wrong in a way that is invisible at four players and fatal
+at three.  With TWO hunters and a rota that steps every round, the dealing
+rounds all land on the same half of it: hunter A takes every card in the game
+and hunter B is never dealt anything at all, for the whole match.
+
+So the rota steps once per HAND-OUT.  The index is a ceiling division:
+
+    index = ceil((round - open) / interval) % n_hunters
+
+An awarding round takes its own place in the rota; a skipped round borrows the
+place of the award that FOLLOWS it, which is what moves the marker onto the
+next hunter a round early.  Three players, chest opening on round 3:
+
+    round 3   FILLED    Norbur   Norbur is dealt a card
+    round 4   OUTLINED  Lubin    marker moves; nobody is dealt anything
+    round 5   FILLED    Lubin    Lubin is dealt a card
+    round 6   OUTLINED  Norbur   marker moves; nobody is dealt anything
+    round 7   FILLED    Norbur   ...and so on
+
+With interval 1 the ceiling division reduces to (round - open) % n, which is
+exactly what the function computed before an interval existed — so five and six
+players are unaffected card for card.  tests/test_chest_cadence.py asserts that
+equivalence directly; do not "simplify" it back into a subtraction.
+
+
+THE INDICATOR
+-------------
+The dot under a portrait in the turn ribbon (ui/hud.py, _draw_turn_map):
+
+    FILLED    a card arrives this round
+    OUTLINED  no card this round — either the chest has not opened yet, or
+              this is a skipped round on a small table
+
+Both of those are the same statement to a player ("not this round"), so both
+draw the hollow marker.  THE MARKER STILL MOVES ON A SKIPPED ROUND; only its
+fill changes.  Its position comes from chest_recipient() exactly as before.
+
+The fill is drawn from state.chest_awards_cards() and the POSITIONS from
+chest_recipient_seats() — the same two calls the engine deals on — so a filled
+marker cannot promise a card that never arrives.  If you add another rule about
+when or to whom the chest deals, put it in those methods and both the engine
+and the ribbon will follow it.
+
+Two dots are drawn on a dealing round: one under Piotrek's first slot and one
+under the scheduled hunter.  That is not decoration; both of those seats are
+dealt a card.
+
+
+THE PENDING-CHOICE QUEUE
+------------------------
+Two seats are fed per dealing round, so TWO of them can go over the chest limit
+on the same round.  ``pending_chest_choice`` used to be a single slot and the
+second overflow silently overwrote the first: that player stayed over the limit
+and their extra card was out of circulation for good.  With eight chest cards
+the deck bled dry within a few rounds and hunters stopped being dealt anything,
+which looks exactly like a distribution bug and is not one.
+
+It is a QUEUE now (``_pending_chest_choices``).  ``pending_chest_choice``
+survives as a property returning the oldest entry, so every existing caller and
+test still sees one prompt at a time; ``queue_chest_choice`` adds and
+``resolve_chest_choice`` removes one seat's entry.  In the interface,
+``_on_chest_limit`` refuses to replace a prompt that is already up, and
+``_open_next_chest_choice`` brings up the next one as each is answered.
+
+
+DECK CAPACITY — WHY THE CHEST DECK IS SIXTEEN CARDS
+----------------------------------------------------
+Eight cards, one per title, could not supply the table once TWO cards went out
+per dealing round.  At the limit a table holds Piotrek's 2 plus one per hunter:
+
+    players   held   circulating (deck of 8)   circulating (deck of 16)
+    2         3      5                         13
+    3         4      4                         12
+    4         5      3                         11
+    5         6      2                         10
+    6         7      1                          9
+
+A dealing round wants two.  With eight cards a six-player table had ONE, and
+since Piotrek is dealt first the HUNTER was the one who went without — a full
+table stopped feeding hunters entirely once everybody sat at their limit (short
+in 25 of 30 rounds in simulation).
+
+Fixed in stage 23 by giving every chest title ``"count": 2``.  DOUBLED
+UNIFORMLY, on purpose: bumping a single title to 2 would have reached the
+minimum workable size of 9 while making that one card twice as likely as the
+other seven.  Doubling everything leaves the relative odds exactly as they
+were, and leaves nine cards circulating at a full table instead of a bare two.
+
+If you change these counts, re-run the sweep: every table size from 2 to 6 must
+show zero short rounds.  ``test_the_deck_can_supply_a_full_table_indefinitely``
+checks it over forty rounds, and ``test_no_card_leaks_out_of_the_chest_deck``
+checks the accounting.
+
+
+MULTIPLAYER
+-----------
+NO NEW COMMANDS, NO NEW EVENTS, NOTHING IN THE SNAPSHOT.  Both the cadence and
+the recipient list are pure functions of the round number, the opening round,
+the table size and which seat holds Piotrek — all of which every replica
+already agrees on and none of which can drift.  They consume no RNG, so they
+cannot shift a deck shuffle out of step either, and a skipped round takes no
+card off the pile.  The server stays the only authority: it applies
+``_begin_round`` like any other command and broadcasts the result.
+
+The two cards are drawn in a FIXED ORDER, Piotrek first, because two draws off
+the same pile in a different order on two machines is a desync.  Do not sort
+the recipients, and do not make the order depend on anything local.
 
 
 ================================================================================
@@ -2268,6 +2449,47 @@ N90. Never add a settings row without re-running tests/test_menu_layout.py at
    alone and had been quietly letting the footer hang off the bottom; a fifth
    row made it visible. It now checks the real bottom edge — keep it that way.
 
+N91. Never make the chest skip rounds by leaving the rota stepping once per
+   ROUND. With an even number of hunters every dealing round then lands on the
+   same half of the rota and the other hunters are dealt NOTHING for the whole
+   match — with two hunters, one of them takes every card in the game. The rota
+   steps once per HAND-OUT (ceiling division by the interval). At three players
+   this is the difference between a working chest and a dead one.
+
+N92. Never draw the chest marker from chest_is_open. It answers "has the chest
+   started", not "does a card arrive this round", and on a small table those
+   differ every other round. Both the ribbon and the engine read
+   chest_awards_cards(), so a filled dot always means a card is coming.
+
+N93. Never give the chest cadence its own state, command or event. It is a pure
+   function of round number, opening round and table size, all of which every
+   replica already agrees on. Anything that needs syncing here is a sign the
+   rule has been put in the wrong place.
+
+N94. Never write a test that asserts a marker and its mechanic DISAGREE. The
+   chest ribbon marked Piotrek from the day the chest existed and the engine
+   never dealt to him, and the suite stayed green because a test asserted
+   outright that he is never fed ("assert not ...is_piotrek"). A test can
+   freeze a bug in place as easily as it can catch one: when a test encodes
+   "this thing does not work", check that somebody decided that on purpose.
+
+N95. Never assume only one player can be over the chest limit at a time. A
+   dealing round feeds two seats and both can overflow on the same round. While
+   pending_chest_choice was a single slot the second overflow erased the first,
+   stranding a card in a hand for the rest of the match — with eight chest
+   cards the deck bled dry and hunters stopped receiving. It is a queue; keep
+   it one.
+
+N96. Never reorder the chest recipients or make their order depend on anything
+   local. Piotrek is dealt first and the hunter second, on every machine, because
+   two draws off the same pile in a different order is a desync.
+
+N97. Never cut the chest deck back to one copy per title. Two cards go out per
+   dealing round, and eight cards cannot supply a six-player table that already
+   holds seven of them at the limit — the hunter goes without, every round,
+   for the rest of the match. It is sixteen (eight titles, two each) and the
+   doubling is UNIFORM so that no title is more likely than another.
+
 
 ================================================================================
 RECOMMENDED ORDER OF FUTURE DEVELOPMENT
@@ -2347,6 +2569,16 @@ HOW TO VERIFY A CHANGE
                                    and the secrecy, which is checked by looking
                                    at what the OTHER machines know while the
                                    match is still running
+      tests/test_chest_cadence.py — chest timing AND recipients: which table
+                                   sizes are sparse, the threshold at four,
+                                   that the opening round always deals, that
+                                   the rota feeds every hunter, that a skipped
+                                   round costs the deck nothing, that the
+                                   marker is filled exactly when a card
+                                   arrives, that PIOTREK is dealt on every
+                                   dealing round at every table size, that two
+                                   overflows in one round are both asked, and
+                                   that no card leaks out of the chest deck
       tests/test_mod_selection.py — the Mod Patusa round: when it fires, what
                                    each faction is dealt, which slot each side
                                    owns, one-vote-per-hunter and changing it,

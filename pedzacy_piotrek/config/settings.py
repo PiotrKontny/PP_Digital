@@ -69,6 +69,13 @@ class Rules:
     chest_open_min: int = 1
     chest_open_default: int = 3
 
+    #: Above this many players the chest is handed out every eligible round.
+    #: At or below it the rota comes round often enough that a card a round is
+    #: too much, so only every ``chest_sparse_interval``-th eligible round
+    #: actually awards one.  Five and six players are unaffected.
+    chest_sparse_max_players: int = 4
+    chest_sparse_interval: int = 2
+
     #: The round the first Mod Patusa selection happens on, and how many rounds
     #: apart the following ones are.  The physical game pauses every second
     #: round from the third, and both numbers are set in the lobby because

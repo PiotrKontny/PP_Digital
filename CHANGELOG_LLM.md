@@ -2313,3 +2313,212 @@ the idiom already used for the chest. No test was deleted or weakened.
 - An open selection is in the fingerprint — candidates, votes, both done flags —
   but it carries UIDs, not titles, so nothing in the snapshot reveals what
   Piotrek was offered.
+
+---
+
+## Stage 22 — Chest hand-out timing on small tables
+**Date:** 2026-08-06
+
+### Starting point
+The chest dealt a card every eligible round, to one hunter, rotating. That is
+right for five or six players. Below that the rota is short enough that the
+same hunter came round again almost immediately, and the chest stopped being an
+event at all — at three players there are only two hunters, so it alternated.
+
+### Implemented features
+
+**1. A sparse cadence for small tables.** Five or six players are unchanged. A
+table of four or fewer deals only every SECOND eligible round, counted from the
+opening round so the chest always deals on the round it opens.
+
+    round:      1  2  3  4  5  6  7  8  9
+    <=4 players .  .  F  o  F  o  F  o  F
+    5-6 players .  .  F  F  F  F  F  F  F
+
+`chest_awards_cards(round)` is the new question, deliberately separate from
+`chest_is_open` — the chest can be open while this particular round deals
+nothing. `RULES.chest_sparse_max_players` (4) and `chest_sparse_interval` (2)
+hold the numbers.
+
+**2. The rota steps once per hand-out.** This is the part that matters. The
+obvious implementation — leave the rota stepping every round and just skip
+every other deal — starves hunters: with two hunters the dealing rounds all
+land on the same half of the rota, so one takes every card in the game and the
+other is dealt nothing for the entire match. `chest_recipient_for_round` now
+takes an `interval` and indexes by ceiling division, so an awarding round takes
+its own place in the rota and a skipped round borrows the place of the award
+that follows it. At interval 1 this reduces to the old `(round - open) % n`
+exactly, so five and six players are unaffected card for card.
+
+**3. The indicator.** FILLED when a card arrives this round, OUTLINED
+otherwise — which now covers both "the chest has not opened" and "this is a
+skipped round". The marker still MOVES on a skipped round; only the fill
+changes. It is drawn from `chest_awards_cards()`, the same call the engine
+deals on, so a filled dot cannot promise a card that never turns up.
+
+### Verified against the design's worked example
+Three players, chest opening on round 3 — round for round:
+
+    round 3   FILLED    Norbur    dealt
+    round 4   OUTLINED  Lubin     marker moves, nobody dealt
+    round 5   FILLED    Lubin     dealt
+    round 6   OUTLINED  Norbur    marker moves, nobody dealt
+    round 7   FILLED    Norbur    dealt
+
+Rendered at 1920×1080 and inspected: filled dots on round 3, hollow dots on
+round 4 with the marker moved to Lubin, filled again on round 5.
+
+### Multiplayer
+No new command, no new event, nothing added to the snapshot. The cadence is a
+pure function of round number, opening round and table size, all of which every
+replica already agrees on. It consumes no RNG, so it cannot shift a deck
+shuffle out of step, and a skipped round takes no card off the pile — which is
+what keeps the chest deck identical everywhere.
+
+### Tests
+**767 passing** (746 before, +21), ~137 s.
+
+- `tests/test_chest_cadence.py` — 21 new: which table sizes are sparse, the
+  threshold at four, that the opening round always deals whatever the size,
+  that the rota feeds every hunter at 3 and 4 players, that interval 1 is the
+  old rota exactly, that a skipped round costs the deck nothing, that the
+  marker is filled exactly when a card arrives, and that two independently
+  built replicas agree without exchanging anything.
+
+One existing test needed adjusting, and it found a real interaction:
+`test_a_chest_card_is_handed_out_when_the_round_opens` asserts the chest
+rotates between hunters. Hand-outs are now four rounds apart on its
+three-player table, and its turn loop could not get there — not because of the
+budget but because the stage 21 Mod Patusa selection pauses the table in round
+3 and refuses every play. `_loop_game` now sets `mod_round_first=10_000`, the
+opt-out idiom stage 21 established, and the loop budget went 20 → 60. The
+assertion itself is untouched — it is the one that proves N91.
+
+### Notes
+- `chest_recipient_for_round`'s `interval` defaults to 1, so every existing
+  caller and the existing rota test keep working unchanged.
+- The old behaviour is still reachable: a 5–6 player table takes the
+  `interval == 1` path and is byte-identical to stage 21.
+
+---
+
+## Stage 23 — Piotrek is dealt chest cards again
+**Date:** 2026-08-06
+
+### The bug
+Piotrek never received a chest card. Hunters received theirs correctly, at
+every table size.
+
+### Root cause — and it is older than it looks
+`_distribute_chest_card` dealt to `chest_recipient_seat()`, and that method is
+hunters-only by construction:
+
+    hunters = [p.index for p in self.players if not p.is_piotrek]
+
+Meanwhile the turn ribbon has drawn a dot under Piotrek's first slot since the
+chest existed. So the marker promised him a card and the engine never delivered
+one — at every table size, in every mode.
+
+**This was not introduced by the stage 21 or 22 work.** I checked the stage 20
+archive: the same hunters-only filter and the same Piotrek dot are both there.
+Stage 22 made the marker meaningful (filled vs outlined), which is presumably
+what finally drew attention to a discrepancy that had always been on screen.
+
+The suite stayed green through all of it because a test asserted the broken
+behaviour outright:
+
+    for award in awarded:
+        assert not game.players[award.player_index].is_piotrek
+
+### The fix
+`chest_recipient_seats()` returns the seats due a card on a dealing round:
+**Piotrek always, plus the hunter the rota has reached**, Piotrek first.
+`_distribute_chest_card` loops over it; the ribbon reads the same call.
+
+Nothing about timing changed. The hunter rotation is untouched — Piotrek is
+additive and takes no place in it, so `chest_recipient_seat()` (singular) still
+means exactly what it did.
+
+### A second bug the fix exposed
+Two seats are now fed per round, so two can exceed the chest limit on the same
+round. `pending_chest_choice` was a single slot, and the second overflow
+silently overwrote the first: that player stayed over the limit and their extra
+card left circulation permanently. With eight chest cards the deck bled dry
+within a few rounds and hunters stopped being dealt anything — which looks
+exactly like the original bug.
+
+It is a queue now (`_pending_chest_choices`). `pending_chest_choice` survives
+as a property returning the oldest entry, so every existing caller and test
+still sees one prompt at a time. In the interface `_on_chest_limit` no longer
+replaces a prompt that is already up, and `_open_next_chest_choice` brings the
+next one forward as each is answered.
+
+### Verified
+Rounds 3–13 stepped for 2, 3, 4, 5 and 6 players. In every configuration the
+dealt seats equal `chest_recipient_seats()` exactly, Piotrek included, and the
+card accounting is conserved — nothing leaks. Online: a five-player table taken
+to round 5 across a real server, all replicas agreeing on both recipients and
+on the fingerprint. Rendered the ribbon at 1920×1080: two filled dots on
+dealing rounds, two hollow ones on skipped rounds.
+
+### Known content shortage, deliberately not fixed
+The chest deck holds eight cards. At the limit a table holds
+Piotrek 2 + one per hunter, so a full six-player table keeps seven of them and
+leaves one circulating — while a dealing round wants two. Piotrek is dealt
+first, so at six players the hunter is the one who goes without once everybody
+sits at their limit.
+
+Nothing leaks; there simply are not enough cards. The fix is a content one
+(raise the `count` values on the chest cards in data/cards.json), and deck size
+is a balance decision, so it is recorded here and in LLM_Instructions.txt
+rather than made silently. `test_a_full_table_runs_the_chest_deck_dry` pins the
+current behaviour so the decision stays visible.
+
+### Tests
+**791 passing** (767 before, +24), ~125 s.
+
+- `tests/test_chest_cadence.py` — +24: Piotrek dealt at 2/3/4/5/6 players, on
+  every dealing round and never on a skipped one; a dealing round feeds exactly
+  Piotrek plus one hunter; the indicator names exactly who is dealt; the hunter
+  rota is unchanged by Piotrek joining; a table with no Piotrek still deals;
+  two overflows in one round are both asked; no card leaks out of the deck; the
+  six-player shortage; replicas agree on both seats in order.
+- Three tests in `test_abilities.py` corrected — they asserted Piotrek is never
+  fed, and one stopped counting after two awards, which is now a single round.
+
+### Notes
+- N94: never write a test that asserts a marker and its mechanic disagree.
+- N95: two players can be over the chest limit at once; the prompt is a queue.
+- N96: recipient order is fixed (Piotrek first) because two draws off one pile
+  in a different order on two machines is a desync.
+
+### Follow-up (same stage) — the chest deck goes to sixteen
+The six-player shortage recorded above is fixed rather than left standing.
+
+Every chest title now carries `"count": 2`, taking the deck from 8 cards to 16.
+The doubling is uniform on purpose: the minimum workable size was 9, but
+reaching it means bumping a single title to two copies and making that one card
+twice as likely as the other seven. Doubling everything removes the shortage
+while leaving the relative odds exactly as they were, and leaves 9 cards
+circulating at a full table instead of a bare 2.
+
+Measured before and after, short rounds out of 30 at each table size:
+
+    deck   2p  3p  4p  5p  6p
+    8       0   0   0   0  25
+    16      0   0   0   0   0
+
+Re-checked over 40 rounds at every size from 2 to 6: zero short rounds, Piotrek
+fed on every dealing round, all 16 cards accounted for at all times.
+
+The `cards.json` edit was made by parsing and re-emitting the file, which
+round-trips byte-identically at indent 2 — so the diff is exactly 8 added
+lines inside the chest deck and nothing else. The mods (8) and movement (72)
+decks are untouched.
+
+`test_a_full_table_runs_the_chest_deck_dry` pinned the old shortage and is
+replaced by `test_the_deck_can_supply_a_full_table_indefinitely`, which asserts
+the opposite. Six players is back in the two strict recipient tests it had been
+excluded from, and the deck-size assertion in `test_engine.py` is 8 → 16.
+
+**797 passing** (791 before, +6), ~156 s. N97 added.

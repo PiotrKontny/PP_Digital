@@ -532,31 +532,38 @@
       "cards": [
         {
           "title": "Dzieckorolka",
-          "text": "Porusz pionka o trzy do przodu. Pionki stojące po drodze są zabierane (1 na pole)"
+          "text": "Porusz pionka o trzy do przodu. Pionki stojące po drodze są zabierane (1 na pole)",
+          "count": 2
         },
         {
           "title": "Rage Quit",
-          "text": "Wymień wszystkie aktywne Mody Patusa na losowe z talii"
+          "text": "Wymień wszystkie aktywne Mody Patusa na losowe z talii",
+          "count": 2
         },
         {
           "title": "Balbinka",
-          "text": "Porusz wszystkie pionki o dwa pola do przodu lub do tyłu"
+          "text": "Porusz wszystkie pionki o dwa pola do przodu lub do tyłu",
+          "count": 2
         },
         {
           "title": "Nie masz Rosji",
-          "text": "Zablokuj i spal dowolny ruch przeciwnika"
+          "text": "Zablokuj i spal dowolny ruch przeciwnika",
+          "count": 2
         },
         {
           "title": "Gambit Patusa",
-          "text": "Odwróć kierunek wszystkich kart ruchu na pełną rundę"
+          "text": "Odwróć kierunek wszystkich kart ruchu na pełną rundę",
+          "count": 2
         },
         {
           "title": "Shady",
-          "text": "Odbierz innemu graczowi specjalną kartę"
+          "text": "Odbierz innemu graczowi specjalną kartę",
+          "count": 2
         },
         {
           "title": "Gejtos",
-          "text": "Wybierz pole: Mężczyzna - Przenieś pionki z sąsiadujących pól na to pole; Kobieta - Oddal pionki z sąsiadujących pól o jedno pole"
+          "text": "Wybierz pole: Mężczyzna - Przenieś pionki z sąsiadujących pól na to pole; Kobieta - Oddal pionki z sąsiadujących pól o jedno pole",
+          "count": 2
         },
         {
           "title": "Gamechanger",
@@ -575,7 +582,8 @@
                 "text": "Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta"
               }
             }
-          }
+          },
+          "count": 2
         }
       ]
     }

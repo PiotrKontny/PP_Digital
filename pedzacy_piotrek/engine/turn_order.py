@@ -73,17 +73,40 @@ def compute_round_turn_order(
 
 
 def chest_recipient_for_round(
-    round_num: int, chest_open_round: int, hunter_names: Sequence[str]
+    round_num: int, chest_open_round: int, hunter_names: Sequence[str],
+    interval: int = 1,
 ) -> Optional[str]:
     """Which hunter draws from the chest this round.
 
     Before the chest opens, this previews the first hunter in the order — the
     one who will receive it on the opening round anyway.
+
+    ``interval`` is how many rounds pass between hand-outs: 1 on a table of
+    five or six, 2 on a small one where a card every round was too much.  The
+    rota steps once per HAND-OUT, not once per round, which is the whole point.
+    Stepping per round would have meant that with an even number of hunters the
+    skipped rounds always landed on the same half of the rota and those hunters
+    would never have been dealt anything at all — with two hunters, one of them
+    would have taken every card in the game.
+
+    On a skipped round it names the hunter who is next in line, so the marker
+    moves onto them a round early and then stays put while their card arrives.
+    That is the sequence the design asks for: the marker moves, the round after
+    it fills, and nobody is passed over.
+
+    With ``interval`` 1 the arithmetic reduces to ``(round - open) % n``, which
+    is exactly what this function did before an interval existed — so a table
+    of five or six is unaffected, card for card.
     """
     if not hunter_names:
         return None
     n = len(hunter_names)
-    index = 0 if round_num <= chest_open_round else (round_num - chest_open_round) % n
+    step = max(1, int(interval))
+    if round_num <= chest_open_round:
+        return hunter_names[0]
+    # Ceiling division: an awarding round takes its own place in the rota, a
+    # skipped one borrows the place of the award that follows it.
+    index = ((round_num - chest_open_round + step - 1) // step) % n
     return hunter_names[index]
 
 

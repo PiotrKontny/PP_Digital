@@ -815,8 +815,17 @@ def test_a_card_that_asks_is_still_playable(library):
 
 # ── the automatic turn loop (stage 8) ────────────────────────────────────────
 def _loop_game(library, **kwargs):
+    """A small table for turn-loop and chest tests, with mod rounds disabled.
+
+    A Mod Patusa round pauses the table until both factions have chosen, which
+    correctly refuses every move — including the plays these tests drive the
+    loop with.  That pause has its own tests (tests/test_mod_selection.py);
+    here it would stop the walk in round 3, which is before a three-player
+    table reaches its second chest hand-out.
+    """
     config = SessionConfig(num_players=3, board_cells=24, seed=6,
-                           chest_open_round=2, double_frequency=0.0, **kwargs)
+                           chest_open_round=2, double_frequency=0.0,
+                           mod_round_first=10_000, **kwargs)
     return create_game(config, library)
 
 
@@ -905,7 +914,12 @@ def test_a_refused_play_does_not_end_the_turn(library):
 def test_a_chest_card_is_handed_out_when_the_round_opens(library):
     game = _loop_game(library)
     awarded = []
-    for _ in range(20):
+    # Sixty turns rather than twenty: this is a three-player table, and since
+    # stage 22 a table of four or fewer is dealt a chest card only every SECOND
+    # eligible round.  Two hand-outs are therefore four rounds apart, and a
+    # budget that stopped at round 3 could only ever see the first one — which
+    # made the rotation assertion below unobservable rather than false.
+    for _ in range(60):
         player = game.active_player
         card = next(c for c in player.hand if c.deck_id == settings.DECK_MOVEMENT)
         events = game.apply(cmd.PlayCard(player_index=player.index, card_uid=card.uid))
@@ -916,15 +930,23 @@ def test_a_chest_card_is_handed_out_when_the_round_opens(library):
         if game.pending_chest_choice:
             seat, uids = game.pending_chest_choice
             game.apply(cmd.KeepChestCards(player_index=seat, keep_uids=(uids[-1],)))
-        if len(awarded) >= 2:
+        # Count HUNTER hand-outs, not hand-outs: two cards go out on every
+        # dealing round now (Piotrek plus the rota), so stopping at two awards
+        # would stop after a single round and never see the rota turn.
+        if len({a.player_index for a in awarded
+                if not game.players[a.player_index].is_piotrek}) >= 2:
             break
 
     assert awarded, "the chest promised a card and never handed one out"
     assert all(a.round_number >= game.chest_open_round for a in awarded)
     # It rotates between the hunters rather than always feeding the same one.
-    assert len({a.player_index for a in awarded}) > 1
-    for award in awarded:
-        assert not game.players[award.player_index].is_piotrek
+    hunters_fed = {a.player_index for a in awarded
+                   if not game.players[a.player_index].is_piotrek}
+    assert len(hunters_fed) > 1
+    # Piotrek is dealt one on every hand-out round, alongside the rota.  This
+    # used to assert the OPPOSITE — that he was never fed — which is how the
+    # engine ignoring his marker went unnoticed for so long (N94).
+    assert any(game.players[a.player_index].is_piotrek for a in awarded)
 
 
 def test_an_over_full_chest_hand_asks_before_anything_else_happens(library):
@@ -1003,8 +1025,10 @@ def test_the_round_counter_deals_the_chest_cards_it_skips(library):
             owner, uids = game.pending_chest_choice
             game.apply(cmd.KeepChestCards(player_index=owner, keep_uids=(uids[-1],)))
 
-    assert {a.player_index for a in awarded} == set(hunters), \
-        "every hunter takes their turn at the chest"
+    fed = {a.player_index for a in awarded}
+    assert fed >= set(hunters), "every hunter takes their turn at the chest"
+    # ...and Piotrek is fed on each of those rounds too.
+    assert game.piotrek_seat in fed
 
 
 def test_jumping_several_rounds_still_pays_everybody(library):
@@ -1012,4 +1036,6 @@ def test_jumping_several_rounds_still_pays_everybody(library):
     hunters = [p.index for p in game.players if not p.is_piotrek]
     events = game.apply(cmd.SetRound(round_number=2 + len(hunters)))
     awarded = [e for e in events if isinstance(e, ev.ChestCardAwarded)]
-    assert {a.player_index for a in awarded} == set(hunters)
+    fed = {a.player_index for a in awarded}
+    assert fed >= set(hunters)
+    assert game.piotrek_seat in fed
