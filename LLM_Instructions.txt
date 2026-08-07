@@ -1,8 +1,8 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 28 — the Chest finished: Gejtos, Alter Ego, and every Chest
-              card playable whether or not its rule exists yet
-              (see CHANGELOG_LLM.md)
+Last updated: stage 29 — responsive UI: three scales instead of one, and card
+              type no longer scaled twice, so a 1920x1200 laptop reads like
+              the 2560x1440 desktop (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -172,11 +172,15 @@ WORKING:
 - Two-slot "Mody Patusa" rack, character panel with abilities and Piotrek's
   skills, hunters' colour-elimination notepad, manual round counter, player
   renaming, free pawn dragging with snapping and stacking.
-- Responsive UI from 1280×760 to 4K.  Type and cards are sized against a
-  reference height of 1000 (stage 26; it was 1080), and the hand-card and
-  shelf ceilings SCALE rather than being flat pixel counts — before that a 4K
-  screen showed exactly the same 182×260 card as a 1920×1200 laptop.  See
-  "HOW SCALING WORKS".
+- GENUINELY RESPONSIVE UI from 1280×760 to 4K (stage 29).  THREE scales, not
+  one: ``ui_scale`` for geometry, ``type_scale`` for type, ``panel_scale`` for
+  the side columns — plus card type, which is a fraction of the CARD and of
+  nothing else.  Named breakpoints (wide / medium / compact) decide rules; the
+  pixels interpolate continuously so a dragged window never jumps.  When space
+  runs short the board gives up height first, then the columns, then the
+  margins, and the hand LAST — its share grows on a small screen, because the
+  movement cards are what is actually being read.  2560×1440 is the reference
+  and is byte-identical to stage 28.  See "HOW SCALING WORKS".
 - MULTIPLAYER over the internet, CLIENT/SERVER: a dedicated server process
   (``python -m pedzacy_piotrek.server``) owns the game; every player, the one
   who opened the room included, is a WebSocket client that connects OUTWARDS.
@@ -227,7 +231,7 @@ WORKING:
   stacking every pawn on one field and having his at the bottom. A wrong tower
   crosses that colour off every notepad at once. Two different endings, with a
   reveal, a way back to the poczekalnia and a way out.
-- 1084 automated tests.
+- 1182 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
@@ -1629,38 +1633,180 @@ quietly stops merging.
 
 
 ================================================================================
-HOW SCALING WORKS  (stage 26)
+HOW SCALING WORKS  (stages 26 and 29)
 ================================================================================
 
-``Layout.ui_scale`` is the one number that moves the whole interface: every
-pixel size in ``ui/`` is quoted against it, and ``FontBook.set_scale`` applies
-it to every requested type size as well, so a bigger screen gets bigger
-RENDERED glyphs rather than a stretched bitmap (N33).
+THERE ARE THREE SCALES, NOT ONE.  Until stage 28 a single ``ui_scale``
+multiplied everything, which is a zoom control, not a responsive layout: a
+1920x1200 laptop was simply a 2560x1440 desktop at 83%, the board kept its
+share, the hand kept its share, and the movement cards became narrow strips of
+unreadable type.  All three live on ``Layout`` and are set in ``resize``:
 
-    ui_scale = clamp(window_height / 1000, 0.85, 1.8)
+    ui_scale     GENERAL GEOMETRY.  Anything that is a distance rather than a
+                 letter.  clamp(window_height / 1000, 0.85, 1.8) — unchanged
+                 since stage 26, including the reference of 1000 rather than
+                 1080 (at 1080 a 1920x1200 laptop ran at 1.11 and was reported
+                 as hard to read while 2560x1440 was comfortable at 1.33).
 
-THE REFERENCE IS 1000, NOT 1080, and that is a deliberate change.  At 1080 a
-1920×1200 laptop — a physically small panel with a lot of pixels — ran at 1.11
-and was reported as hard to read, while a 2560×1440 desktop monitor was
-comfortable at 1.33.  Moving the reference lifts the middle of the range about
-8% and leaves both ends where they were.
+    type_scale   WHAT FONTBOOK IS SET TO.  Equal to ui_scale at and above the
+                 reference display; below it, decays MORE SLOWLY, so a caption
+                 keeps its absolute size while the furniture gives ground.
 
-**NEVER GIVE A CARD OR A SHELF A FLAT PIXEL CEILING.**  ``hand_h`` was capped at
-300 and the hand card at 260, so a 4K screen showed exactly the same 182×260
-card as a 1920×1200 laptop and every pixel past ~1224 tall became margin.  Both
-ceilings are now multiplied by ``ui_scale``.  The side columns cap themselves
-against ``hand_h``, so this one number decides how big a card is anywhere.
+    panel_scale  THE SIDE COLUMNS ONLY.  Decays FASTER than ui_scale.  A deck
+                 pile is reference material — legible, but nobody reads it the
+                 way they read the card they are about to play.
+
+Plus a fourth case that uses NONE of them: type on a card is a fraction of the
+CARD.  See "CARD TYPE" below.
+
+
+WHICH SCALE DOES A NUMBER BELONG TO?
+------------------------------------
+Ask this about every pixel number before writing it.  Getting it wrong is what
+stages 26 and 29 both had to fix.
+
+  a distance, a gap, a radius, a button ....... ui_scale
+  a band that exists to hold a line of text ... type_scale
+  a side-column floor or inner margin ......... panel_scale
+  anything drawn on a card face ............... the card's own height
+
+
+THE REFERENCE DISPLAY IS 2560x1440, AND IT MUST NOT MOVE
+--------------------------------------------------------
+``REFERENCE_WINDOW``.  Every responsive rule collapses to the stage-28
+behaviour there: ``compact`` is 0, ``type_boost`` is 1, and type_scale and
+panel_scale both equal ui_scale.  This is the owner's own monitor, and a "fix"
+that redesigns it is not a fix.  ``test_the_reference_display_is_untouched``
+writes the expected numbers out LITERALLY rather than recomputing them, because
+a formula that is wrong in the same way in the test and in the code agrees with
+itself.  If you change a responsive rule, that test is the one that tells you
+whether you changed the desktop too.
+
+
+BREAKPOINTS, AND WHY THE PIXELS STILL INTERPOLATE
+-------------------------------------------------
+``BREAKPOINTS`` is keyed on ``room = min(w/2560, h/1440)`` — the axis that fell
+furthest behind the reference.  WIDTH IS IN THERE ON PURPOSE: 1920x1200 has 83%
+of the reference height but only 75% of its width, and it was the width that
+squeezed the hand.
+
+    wide     room >= 0.95   2560x1440 and up — the reference layout, untouched
+    medium   room >= 0.66   1920x1200, 1920x1080 — the laptop band
+    compact  room >= 0.00   1600x900 down to MIN_WINDOW
+
+The NAMES are for decisions — a rule that is either on or off.  The PIXELS
+interpolate continuously through ``compact`` (0 at the reference, 1 at
+``TIGHT_WINDOW`` and below), because a window being dragged across a breakpoint
+must not make the board jump.  Every adaptive number goes through
+``Layout._lerp(roomy, tight)``, so "what changes on a smaller screen" is one
+readable pair of numbers at the call site rather than a formula to decode.
+
+
+THE PRIORITY ORDER WHEN SPACE RUNS SHORT
+----------------------------------------
+The movement cards are what the player READS, so they are protected and
+everything else is a source of pixels for them, in this order:
+
+  1. the BOARD gives up height — it is the only region with height to give;
+  2. the SIDE COLUMNS shrink (panel_scale, tighter width caps, and the
+     panel-card ceiling falling from hand_h*0.78 to hand_h*0.62);
+  3. MARGINS AND GAPS shrink (pad, section_gap, r_gap);
+  4. the HAND shrinks last — and in fact GROWS, its share of the window
+     running 0.245 at the reference to 0.300 when tight.
+
+Step 2's falling ceiling is not cosmetic.  ``hand_h`` now grows its share on a
+small screen, so leaving the panel cap at a fixed 0.78 would have handed the
+side columns the very pixels the hand had just won.
+
+The board is repaid in WIDTH what it gave up in height: at 1920x1200 it goes
+from 1281x642 to 1328x618, which is the same area to within 0.2%.  Doing all
+four priorities rather than only the first is what buys that.
+
+
+VERTICAL_ROOM: ADAPTATION HAS TO BE PAID FOR OUT OF SOMETHING
+-------------------------------------------------------------
+``compact`` is usually decided by the WIDTH.  But giving the hand a bigger
+share spends HEIGHT, and a 760-tall window has none to spend: every pixel the
+shelf takes there comes straight out of a side column already down to four
+stacked cards.  So the hand's share increase AND the type boost are both
+tapered by ``vertical_room`` (0 below 800px tall, 1 at 1200 and above).
+
+This is the rule that makes the scheme coherent rather than a pile of tuned
+constants.  AT MIN_WINDOW THERE IS NO SLACK ANYWHERE: the menu rows are already
+at ``MIN_ROW_GAP`` and the panel bands at their floor, so lifting type there
+does not make anything more readable — it pushes captions out of boxes that
+cannot grow.  The smallest window leans on ``MIN_HAND_CARD_W`` instead, which
+is what a floor is for.
+
+``TYPE_BOOST_MAX`` bounds how much bigger type may get RELATIVE to the
+furniture around it.  Type has to win space on a small screen or it is not
+readable, but a box quoted in ui_scale can only absorb so much before its
+caption touches the edges.
+
+
+CARD TYPE — NEVER QUOTE IT AGAINST THE INTERFACE SCALE
+------------------------------------------------------
+This was the whole of the stage 29 report.  ``CardRenderer._font`` sized type
+as a fraction of the card's HEIGHT — and the card's height already tracks
+ui_scale, because a bigger window makes a bigger card — and then
+``FontBook.get`` multiplied by ui_scale AGAIN.  **Card type moved with the
+interface scale SQUARED.**  Between 2560x1440 and 1920x1200 that turned a 17%
+smaller card into 32% smaller type printed on it, so descriptions collapsed
+into stacks of two-word lines.  The same line broke 4K the other way: type so
+large it crowded the description out.
+
+``_font`` now divides the font scale back out and anchors the ratio to
+``CARD_TYPE_ANCHOR`` (= 1.44, the scale at the reference display).  The
+arithmetic cancels exactly there, and:
+
+    A CARD OF A GIVEN PIXEL SIZE NOW RENDERS IDENTICALLY ON EVERY MONITOR.
+
+That invariant is worth protecting — it means a card face can be reasoned about
+from its size alone.  ``CARD_TYPE_ANCHOR`` (render) and ``TYPE_ANCHOR`` (ui)
+must stay equal; they live in packages that must not import each other, so a
+test asserts it.
+
+CARD TITLES SHRINK TO KEEP A WORD WHOLE.  ``Renderer.wrap_lines`` breaks
+mid-word when a word cannot fit — right for a paragraph, wrong for a title.
+"Thunderfuck" rendered as "Thunderfuc" over "k" at every resolution.
+``_title_font`` steps the size down until the longest word fits, to three
+quarters, past which the mid-word break is allowed again because an unreadable
+whole word is not a win.
+
+
+NEVER GIVE A CARD OR A SHELF A FLAT PIXEL CEILING
+-------------------------------------------------
+``hand_h`` was capped at 300 and the hand card at 260, so a 4K screen showed
+exactly the same 182x260 card as a 1920x1200 laptop and every pixel past ~1224
+tall became margin.  Both ceilings are multiplied by ``ui_scale``.
 
 The same mistake in a different box caused BOTH bugs stage 26 had to fix: a
 label band capped at a flat 26 px while the type inside it kept growing, and a
 deck heading with no idea how much room its counters had left it.  If a box
 holds text, either the box scales or the text is fitted to the box — see
-``Renderer.fitted_font`` / ``fit_text``.
+``Renderer.fitted_font`` / ``fit_text``.  Stage 29 moved those bands onto
+``type_scale``, which is the same rule one step further out.
 
 ENLARGED PREVIEWS ARE ALREADY CORRECT and were verified rather than changed:
 ``CardRenderer.quantised`` has no ceiling, so a hovered card is REPAINTED at its
-enlarged size (386×552 at 1920×1200) rather than zoomed from the small one.
-That is stage 9's work; do not add a cap to it.
+enlarged size rather than zoomed from the small one.  That is stage 9's work;
+do not add a cap to it.
+
+
+A TEST CAN PASS BECAUSE OF A BUG — CHECK IT AT THE REFERENCE DISPLAY
+-------------------------------------------------------------------
+``test_an_enlarged_card_is_redrawn_not_zoomed`` demanded a 1.25 ratio of MEAN
+edge energy between a redrawn card and a zoomed one, and passed for eight
+stages.  Measured under the old code at 2560x1440 it scores 1.089: IT WOULD
+HAVE FAILED ON THE OWNER'S OWN MONITOR.  It passed only because it hardcoded
+1920x1080 and one card size, where the double-scaling made the small card's
+type about 8 px and zooming it produced mush.  The test was measuring the bug.
+
+The mean averages over the whole card, most of which is flat parchment.  What
+enlargement destroys is the PEAK, so it now measures 99th-percentile contrast
+(1.96-2.28 everywhere) and is parametrized over four card sizes and four window
+sizes.  If a visual test has one hardcoded size in it, run it at the others
+before trusting it.
 
 
 ================================================================================
@@ -2185,7 +2331,9 @@ Layout regions (ui/layout.py, everything derived from window size):
   CENTRE main   : the board (the visual focus of the app).
   RIGHT column  : "Twoja Postać", ability card, character/skill decks,
                   "Kolory Piotrka" notepad.
-  BOTTOM        : the hand fan, full width.
+  BOTTOM        : the hand fan, full width.  Its SHARE of the window grows as
+                  the window shrinks (stage 29) — the one region that gets
+                  relatively bigger on a smaller screen.
   FLOATING      : "Ostatnio zagrane" over the board's top-right corner,
                   status bar over the board's bottom-left corner.
 
@@ -2348,6 +2496,15 @@ D5. RESPONSIVE, NOT SCALED. The game draws at the window's real resolution and
     Layout recomputes on resize. The old fixed-canvas-plus-scale approach made
     big monitors blurry and gave the board no extra room.
 
+D5a. RESPONSIVE MEANS REALLOCATING, NOT SHRINKING (stage 29).  One number
+    multiplying everything is a zoom control: every region keeps its share and
+    a smaller screen is just a smaller picture of the same layout, which is
+    what made a 1920x1200 laptop unreadable while 2560x1440 was fine.  A
+    responsive layout decides what gives ground and in what order.  Here that
+    order is fixed and deliberate — board height, then side columns, then
+    margins, and the hand last — because the movement cards are the one thing
+    on screen that is actually being READ.  See "HOW SCALING WORKS".
+
 D6. EFFECTS AS DATA. Card behaviour lives in JSON. Balancing is the whole point
     of the project, and balancing must not require editing Python.
 
@@ -2397,6 +2554,21 @@ KNOWN LIMITATIONS
   behaviour but no MOUSE selection: it owns no rect or font, and GameScreen
   treats a mouse press during a rename as "confirm". See TEXT FIELDS for why
   this is a UI decision rather than a missing patch.
+
+- THE CHARACTER NAME OVERRUNS ITS ABILITY CARD on large displays: about 7 px at
+  2560x1440 and 24 px at 4K.  DIAGNOSED, not mysterious — hud.py draws it with
+  ``fonts.get(int(21 * ui_scale))`` and FontBook multiplies by the scale again,
+  so the type moves with ui_scale SQUARED while the room under it
+  (``r_name_h``) moves with ui_scale.  It is the same double-scaling stage 29
+  removed from card faces, in the one place that was not part of the report.
+  Left alone because widening the band moves the reference display's right-hand
+  column and stage 29 promised not to touch it, so the fix is a small stage of
+  its own rather than a patch in passing.
+  ``test_the_character_name_does_not_run_into_its_ability_card`` pins it: no
+  overhang at all at or below 1920x1200, and the known overhang may not exceed
+  24 px.  Whoever fixes it should re-run that test AND
+  ``test_the_reference_display_is_untouched``, which is the one that will
+  object.
 
 L23. DECIDED, NOT SPECIFIED: Gejtos clamps at the FAR end of the board while
     refusing at the near one.  The card names only the start area ("przed polem

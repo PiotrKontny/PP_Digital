@@ -43,6 +43,18 @@ NATIVE_SIZE: Size = (CARD_W, CARD_H)
 #: Proportions every card keeps, whatever size it is painted at.
 CARD_ASPECT = CARD_H / CARD_W
 
+#: ``FontBook`` scale at the reference display (2560x1440).  Card type is
+#: quoted against THIS rather than against the live scale, so the fraction of a
+#: card its title and description occupy is the same on every monitor.  Keeping
+#: it equal to ``ui.layout.TYPE_ANCHOR`` is what makes the reference display
+#: render byte-for-byte the type it rendered before stage 29.
+CARD_TYPE_ANCHOR = 1.44
+
+#: Title height as a fraction of the card, and how far it may shrink to keep a
+#: long word whole.  Named because ``_title_font`` and ``face`` must agree.
+TITLE_FRACTION = 0.068
+TITLE_MIN_STEP = 0.75
+
 _CACHE_LIMIT = 320
 
 
@@ -84,7 +96,55 @@ class CardRenderer:
         return surface
 
     def _font(self, size: Size, fraction: float, bold: bool = False):
-        return self.r.fonts.get(max(8, int(size[1] * fraction)), bold=bold)
+        """Type on a card is a fraction of the CARD, not of the interface.
+
+        It used to be both, and that was the whole of the "cards are unreadable
+        on my laptop" report (stage 29).  ``size[1]`` already tracks the
+        interface scale — a bigger window makes a bigger card — and then
+        ``FontBook.get`` multiplied by that scale a SECOND time, so card type
+        moved with the scale SQUARED.  Between 2560x1440 and 1920x1200 that
+        turned an 17% smaller card into 32% smaller type on it: descriptions
+        wrapped into a stack of two-word lines and titles stopped being
+        titles.
+
+        Dividing the font scale back out anchors the ratio: a card is now
+        equally readable at every size, and at ``CARD_TYPE_ANCHOR`` the
+        arithmetic cancels exactly, so the reference display renders the type
+        it always did.  The 4K case is fixed by the same line — its cards had
+        the OPPOSITE problem, type so large it crowded out the description.
+        """
+        base = max(8, int(size[1] * fraction))
+        scale = max(0.01, float(self.r.fonts.scale))
+        # ONE rounding, not two: ``FontBook.get`` multiplies by the scale and
+        # rounds itself, so handing it a float makes the rendered size exactly
+        # ``base * CARD_TYPE_ANCHOR`` on every display.  Rounding here as well
+        # left small cards a pixel or two under, which is visible precisely
+        # where it matters least — and unmeasurable where it matters most.
+        return self.r.fonts.get(base * CARD_TYPE_ANCHOR / scale, bold=bold)
+
+    def _title_font(self, size: Size, text: str, max_width: int):
+        """The title font, shrunk until the longest WORD fits on a line.
+
+        ``Renderer.wrap_lines`` breaks mid-word when a word cannot fit, which
+        is the right fallback for a paragraph and the wrong one for a title:
+        "Thunderfuck" came out as "Thunderfuc" over "k" at every resolution,
+        the reference display included.  A title is a name, and a name split
+        across a line break stops reading as one.
+
+        The type gives way instead, down to three quarters of its size — past
+        that the cure is worse than the disease and the mid-word break is
+        allowed to happen, because an unreadable whole word is not a win.
+        """
+        words = text.split()
+        if not words:
+            return self._font(size, TITLE_FRACTION, bold=True)
+        step = 1.0
+        while step >= TITLE_MIN_STEP:
+            font = self._font(size, TITLE_FRACTION * step, bold=True)
+            if all(font.size(word)[0] <= max_width for word in words):
+                return font
+            step -= 0.04
+        return self._font(size, TITLE_FRACTION * TITLE_MIN_STEP, bold=True)
 
     # ── faces ────────────────────────────────────────────────────────────────
     def face(
@@ -102,9 +162,16 @@ class CardRenderer:
         # which stopped being true the moment a badge could carry a pawn COUNT:
         # two cards with the same words and different dots shared one surface.
         # It goes on the END: the size lives at index 4 and tests read it there.
+        #
+        # The FONT SCALE is on the end too (stage 29).  ``_font`` divides it
+        # back out, so a face painted before a resize and one painted after can
+        # legitimately want different type at the same pixel size — and a
+        # window can be resized without every screen holding a CardRenderer
+        # being on the stack to hear about it.
         key = (
             "face", card.definition.deck_id, card.title, card.text,
             size, highlighted, border_color, dim, card.badge,
+            round(float(self.r.fonts.scale), 3),
         )
         cached = self._faces.get(key)
         if cached is not None:
@@ -139,10 +206,10 @@ class CardRenderer:
 
         pawn_color = self._pawn_color(card.badge)
         title_color = darken(pawn_color, 0.55) if pawn_color else theme.card_title
-        title_font = self._font(size, 0.068, bold=True)
         body_font = self._font(size, 0.054)
 
         pad = inset + max(4, int(w * 0.05))
+        title_font = self._title_font(size, card.title, w - 2 * pad)
         title_lines = self.r.wrap_lines(card.title, title_font, w - 2 * pad)[:2]
         row_h = title_font.get_height() + 1
         title_top = inset + max(4, int(h * 0.030))

@@ -115,8 +115,13 @@ class App:
 
         Text is then *rendered* at the larger size, so a 1440p screen gets
         sharper text rather than the same bitmap stretched.
+
+        ``type_scale``, NOT ``ui_scale`` (stage 29).  The two are the same
+        number at 2560x1440 and above, so nothing the owner looks at every day
+        moved; below that, type decays more slowly than the furniture, which is
+        what makes a 1920x1200 laptop readable rather than merely smaller.
         """
-        self.fonts.set_scale(self.layout.ui_scale)
+        self.fonts.set_scale(self.layout.type_scale)
         self.renderer.clear_caches()
 
     def mouse(self) -> Tuple[int, int]:

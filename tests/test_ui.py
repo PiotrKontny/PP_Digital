@@ -1099,16 +1099,31 @@ def test_the_right_column_uses_the_space_it_has(size):
             assert leftover < panel.height * 0.25, "too much unused column"
 
 
-@pytest.mark.parametrize("size", [(1280, 760), (1920, 1080), (2560, 1440)])
+@pytest.mark.parametrize("size", [(1280, 760), (1600, 900), (1920, 1080),
+                                  (1920, 1200), (2560, 1440)])
 def test_panel_cards_are_a_readable_size(size):
-    """Side-panel cards should be worth reading, not thumbnails."""
+    """Side-panel cards should be worth reading, not thumbnails.
+
+    The floor is ABSOLUTE now, not a fraction of the hand card (stage 29).
+    Tying it to the hand was right while everything scaled together, but the
+    brief for stage 29 reorders the priorities explicitly: when space is short
+    the movement cards keep their size and the side columns give ground.  A
+    ratio would have made the hand unable to grow without dragging the decks
+    up with it, which is the coupling that made a 1920x1200 laptop unreadable
+    in the first place.  What still has to hold is that a panel card is
+    legible on its own terms.
+    """
     layout = Layout(*size)
     panel_card = layout.panel_card_size[1]
-    hand_card = layout.hand_card_size[1]
     assert panel_card >= 100
-    assert panel_card >= hand_card * 0.55
     for show_skill in (False, True):
         assert layout.right_cards(show_skill)[1] >= 120
+
+    # At the reference display nothing moved, so the old relationship still
+    # holds there and is worth pinning: this is the shape the columns are
+    # designed in, and only scarcity is allowed to depart from it.
+    if size == (2560, 1440):
+        assert panel_card >= layout.hand_card_size[1] * 0.55
 
 
 # ── abilities, prompts and overlays (stage 4) ────────────────────────────────

@@ -23,6 +23,23 @@ Region map::
     ├──────────┴────────────────────────────────┴──────────────┤
     │                    hand fan (full width)                 │
     └──────────────────────────────────────────────────────────┘
+
+THREE SCALES, NOT ONE (stage 29).  Until stage 28 a single ``ui_scale``
+multiplied everything, so a 1920x1200 laptop was simply a 2560x1440 desktop at
+83% — the board kept its share, the hand kept its share, and the movement cards
+became narrow strips of unreadable type.  "Everything shrinks together" is not
+responsive; it is a zoom control.  So the one number became three:
+
+    ui_scale     general geometry.  Unchanged formula, unchanged meaning.
+    type_scale   what FontBook renders at.  Decays MORE SLOWLY than ui_scale
+                 below the reference display, so type keeps its absolute size
+                 while the furniture around it gives ground.
+    panel_scale  the side columns only.  Decays FASTER, because a deck pile is
+                 the first thing that can afford to be smaller.
+
+and the shares themselves move: see ``compact`` and ``_lerp`` below.  Card type
+is a fourth case and does not use any of them — it is a fraction of the CARD
+(see ``CardRenderer._font``), so a card is equally readable at every size.
 """
 
 from __future__ import annotations
@@ -36,6 +53,45 @@ from ..config.settings import RULES
 
 #: Cards keep this aspect ratio wherever they are drawn.
 CARD_ASPECT = 200 / 140
+
+#: The display the game is DESIGNED on.  Everything below is expressed as "how
+#: far short of this are we", and at exactly this size every responsive rule
+#: collapses to the stage-28 behaviour — the owner's desktop must not move
+#: because a laptop was fixed.
+REFERENCE_WINDOW = (2560, 1440)
+
+#: The size at which the adaptation is spent: below it nothing gets tighter,
+#: because past this point the answer is a bigger window, not a cleverer layout.
+#: Both axes fall to 0.625 of the reference, which is why ``compact`` can be one
+#: number rather than two.
+TIGHT_WINDOW = (1600, 900)
+
+#: Named breakpoints, by ``room`` (the axis that fell furthest behind the
+#: reference).  These are for DECISIONS — a test, a log line, a rule that is
+#: either on or off.  The pixel numbers interpolate continuously through
+#: ``compact`` instead of snapping, because a window being dragged across a
+#: breakpoint should not make the board jump.
+BREAKPOINTS = (
+    ("wide", 0.95),     # 2560x1440 and up: the reference layout, untouched
+    ("medium", 0.66),   # 1920x1200, 1920x1080: the laptop band
+    ("compact", 0.0),   # 1600x900 down to MIN_WINDOW
+)
+
+#: ``ui_scale`` at the reference display.  Type is anchored here: at or above
+#: it the type curve IS ``ui_scale``, and below it type is boosted.
+TYPE_ANCHOR = REFERENCE_WINDOW[1] / 1000.0
+
+#: How much bigger type may get RELATIVE TO THE FURNITURE around it.  Type has
+#: to win space on a small screen or it is not readable, but a box quoted in
+#: ``ui_scale`` can only absorb so much before its caption touches the edges —
+#: past about a fifth, headings start colliding with things that were never
+#: measured against them.
+TYPE_BOOST_MAX = 1.18
+
+#: A hand card narrower than this cannot hold a Polish card title in two lines
+#: and a description in four, whatever the font does.  It only ever binds in
+#: the smallest supported window; everywhere else the shelf is already wider.
+MIN_HAND_CARD_W = 136
 
 
 def _clamp(value: float, low: float, high: float) -> int:
@@ -54,6 +110,36 @@ class Layout:
             height or settings.PREFERRED_WINDOW[1],
         )
 
+    # ── responsive helpers ───────────────────────────────────────────────────
+    def _lerp(self, roomy: float, tight: float) -> float:
+        """``roomy`` at the reference display, ``tight`` at TIGHT_WINDOW.
+
+        Every adaptive number in this class goes through here, so "what changes
+        on a smaller screen" is one readable pair of numbers at each call site
+        rather than a formula to decode.
+        """
+        return roomy + (tight - roomy) * self.compact
+
+    def _section_gap_px(self) -> int:
+        """Vertical gap between two stacked sections of a side column.
+
+        Lives in one place because the column's WIDTH is budgeted in
+        ``_column_metrics`` and its HEIGHT is spent in ``_compute_left``: two
+        copies of this differing by a rounding is how a column ends up one card
+        too tall for itself.
+        """
+        return _clamp(self.content_h * self._lerp(0.012, 0.0095), 6, 16)
+
+    def _label_band_px(self) -> int:
+        """Height of a one-line heading band in a side column.
+
+        Quoted against ``type_scale``, not ``ui_scale``: the type inside it now
+        decays more slowly than the furniture, and a band that cannot hold its
+        own line is not a band (stage 26 learned this with a flat 26).
+        """
+        return _clamp(self.content_h * 0.021 * self.type_scale,
+                      16, 26 * self.type_scale)
+
     # ── computation ──────────────────────────────────────────────────────────
     def resize(self, width: int, height: int) -> None:
         """Recompute everything.  Called at startup and on every window resize."""
@@ -61,9 +147,8 @@ class Layout:
         self.win_h = max(settings.MIN_WINDOW[1], int(height))
         w, h = self.win_w, self.win_h
 
-        #: Everything quoted in pixels is quoted against this factor, fonts
-        #: included, so a bigger screen gets bigger *rendered* type rather than
-        #: a stretched bitmap.
+        #: General GEOMETRY factor.  Everything that is a distance rather than
+        #: a letter is quoted against this.
         #:
         #: The reference height is 1000, not 1080 (stage 26).  Keying it to
         #: 1080 meant a 1920x1200 laptop — a physically SMALL panel with a lot
@@ -74,18 +159,75 @@ class Layout:
         #: hits the ceiling.
         self.ui_scale = max(0.85, min(1.8, h / 1000.0))
 
-        self.pad = _clamp(w * 0.008, 8, 18)
+        #: How much of the reference window we actually have, on the axis that
+        #: fell furthest behind.  WIDTH IS IN HERE ON PURPOSE: 1920x1200 has
+        #: 83% of the reference height but only 75% of its width, and it was
+        #: the width that squeezed the hand.
+        self.room = min(w / REFERENCE_WINDOW[0], h / REFERENCE_WINDOW[1])
+        self.breakpoint = next(
+            (name for name, floor in BREAKPOINTS if self.room >= floor),
+            BREAKPOINTS[-1][0],
+        )
+        #: 0 at the reference display, 1 at ``TIGHT_WINDOW`` and below.  Every
+        #: adaptive number is a straight interpolation on this, so there is no
+        #: visible step as a window is dragged between breakpoints.
+        tight = min(TIGHT_WINDOW[0] / REFERENCE_WINDOW[0],
+                    TIGHT_WINDOW[1] / REFERENCE_WINDOW[1])
+        self.compact = max(0.0, min(1.0, (1.0 - self.room) / (1.0 - tight)))
+
+        #: How much of the hand's SHARE INCREASE the window can actually pay
+        #: for.  ``compact`` is usually decided by the width — 1920x1200 has 75%
+        #: of the reference width and 83% of its height — but giving the hand a
+        #: bigger share spends HEIGHT, and a 760-tall window has none to spend:
+        #: every pixel the shelf takes there comes straight out of a side
+        #: column that is already down to four stacked cards.  So the increase
+        #: is tapered by the height alone, and a short window leans on
+        #: ``MIN_HAND_CARD_W`` instead, which is what a floor is for.
+        self.vertical_room = max(0.0, min(1.0, (h - 800) / 400.0))
+        self._hand_gain = self.compact * (0.25 + 0.75 * self.vertical_room)
+
+        #: TYPE factor, and the reason this stage exists.  Below the reference
+        #: display type decays more slowly than the layout does, so a caption
+        #: keeps its absolute size while the panel around it gives ground.  At
+        #: and above the reference it IS ``ui_scale``, so the desktop and 4K
+        #: render exactly the type they rendered in stage 28.
+        #:
+        #: TAPERED TO NOTHING AT ``MIN_WINDOW``, for the same reason the hand's
+        #: share is: a boost has to be paid for out of somewhere, and the
+        #: smallest supported window has no slack left to pay with.  Its menu
+        #: rows are already at their minimum gap and its panel bands at their
+        #: floor, so lifting type there does not make anything more readable —
+        #: it pushes captions out of boxes.  The laptop band is where the boost
+        #: is both needed and affordable.
+        boost = 1.0
+        if self.ui_scale < TYPE_ANCHOR:
+            boost = min(TYPE_BOOST_MAX, (TYPE_ANCHOR / self.ui_scale) ** 0.75)
+        self.type_boost = 1.0 + (boost - 1.0) * self.vertical_room
+        self.type_scale = self.ui_scale * self.type_boost
+
+        #: SIDE COLUMN factor.  A deck pile, a mod slot and a character card are
+        #: reference material: they have to be legible, but nobody reads them
+        #: the way they read the card they are about to play, so they are the
+        #: first thing asked to give up room.
+        self.panel_scale = self.ui_scale * self._lerp(1.0, 0.88)
+
+        self.pad = _clamp(w * self._lerp(0.008, 0.0062), 8, 18)
         pad = self.pad
 
         #: The hand is where the cards are READ, so its height is what decides
-        #: how big a card is anywhere: the side columns cap themselves against
-        #: it too.  The ceiling scales rather than being a flat 300, which had
-        #: made a 4K screen show exactly the same 182x260 card as a 1920x1200
-        #: laptop — every pixel past 1224 tall went into margin.
-        self.hand_h = _clamp(h * 0.245, 180, 300 * self.ui_scale)
+        #: how big a card is anywhere.  Its SHARE of the window grows as the
+        #: window shrinks — that is the whole of "the movement cards are the
+        #: highest priority".  At the reference display the share is stage 28's
+        #: 0.245 and nothing has moved.
+        #:
+        #: The ceiling scales rather than being a flat 300, which had made a 4K
+        #: screen show exactly the same 182x260 card as a 1920x1200 laptop —
+        #: every pixel past 1224 tall went into margin.
+        self.hand_h = _clamp(h * (0.245 + 0.055 * self._hand_gain), 180,
+                             320 * self.ui_scale)
         self.content_h = h - self.hand_h - 2 * pad
-        self.turn_bar_h = _clamp(h * 0.075, 58, 96)
-        self.player_strip_h = _clamp(h * 0.095, 76, 120)
+        self.turn_bar_h = _clamp(h * self._lerp(0.075, 0.068), 54, 96)
+        self.player_strip_h = _clamp(h * self._lerp(0.095, 0.088), 72, 120)
 
         # The board is the game, so the columns are measured rather than
         # guessed: the cards are sized from the height available, the column is
@@ -104,21 +246,24 @@ class Layout:
     # ── column widths follow their contents ──────────────────────────────────
     def _column_metrics(self, sections: int) -> Tuple[int, int, int]:
         """Card size and padding for a column of ``sections`` stacked rows."""
-        inner = _clamp(10 * self.ui_scale, 6, 14)
-        gap = _clamp(12 * self.ui_scale, 6, 14)
-        # Same band, same scaling ceiling as ``_compute_left`` — the column
-        # WIDTH is budgeted here and the height is spent there, so the two have
-        # to agree about how tall a label line is.
-        line_h = _clamp(self.content_h * 0.021 * self.ui_scale,
-                        16, 26 * self.ui_scale)
-        section_gap = _clamp(self.content_h * 0.012, 6, 16)
+        inner = _clamp(10 * self.panel_scale, 6, 14)
+        gap = _clamp(12 * self.panel_scale, 6, 14)
+        # Same band, same gap as ``_compute_left`` — the column WIDTH is
+        # budgeted here and the height is spent there, so the two have to agree
+        # about how tall a label line is.  Both read the shared helpers.
+        line_h = self._label_band_px()
+        section_gap = self._section_gap_px()
 
         available = (self.content_h - 2 * inner
                      - sections * (line_h + 3) - (sections + 1) * section_gap)
         card_h = max(90.0, available / sections)
         # A side-panel card never needs to be bigger than a card in hand: past
         # that it is not more readable, only more of the board's space.
-        card_h = min(card_h, self.hand_h * 0.78)
+        #
+        # THE FRACTION FALLS AS THE WINDOW SHRINKS, and it has to.  ``hand_h``
+        # now GROWS its share on a small screen, so a fixed 0.78 would have
+        # handed the side columns the very pixels the hand had just won.
+        card_h = min(card_h, self.hand_h * self._lerp(0.78, 0.62))
         card_w = int(card_h / CARD_ASPECT)
         return card_w, inner, gap
 
@@ -126,8 +271,9 @@ class Layout:
         """Mods rack plus the three table decks, two cards wide."""
         card_w, inner, gap = self._column_metrics(1 + len(settings.TABLE_DECKS))
         #: A floor so the deck names and counters still have room to breathe.
-        floor = int(230 * self.ui_scale)
-        return _clamp(max(floor, 2 * card_w + gap + 2 * inner), 230, self.win_w * 0.22)
+        floor = int(230 * self.panel_scale)
+        return _clamp(max(floor, 2 * card_w + gap + 2 * inner),
+                      210, self.win_w * self._lerp(0.22, 0.185))
 
     def _fit_right_column(self) -> int:
         """Character, ability and its decks, plus the colour notepad.
@@ -137,14 +283,15 @@ class Layout:
         for three made the column wide enough to matter to the board.
         """
         card_w, inner, gap = self._column_metrics(4)
-        floor = int(248 * self.ui_scale)
-        return _clamp(max(floor, 2 * card_w + gap + 2 * inner), 248, self.win_w * 0.23)
+        floor = int(248 * self.panel_scale)
+        return _clamp(max(floor, 2 * card_w + gap + 2 * inner),
+                      226, self.win_w * self._lerp(0.23, 0.195))
 
     # ── left column: mods rack and the three table decks ─────────────────────
     def _compute_left(self) -> None:
         panel = self.left_panel
         self.left_inner = _clamp(self.left_w * 0.035, 6, 14)
-        self.section_gap = _clamp(self.content_h * 0.012, 6, 16)
+        self.section_gap = self._section_gap_px()
         #: One line for the deck name, with its counters on the same row to the
         #: right.  Two stacked lines per deck spent 88 pixels of column on
         #: labels — pixels the cards themselves needed far more.
@@ -153,9 +300,9 @@ class Layout:
         #: the type inside it did not, so at 1440p the deck name overflowed its
         #: own band and touched the card below — a 2-pixel collision that a
         #: test caught the moment stage 26 made the cards bigger.  A band that
-        #: cannot hold its own line is not a band.
-        self.section_line_h = _clamp(self.content_h * 0.021 * self.ui_scale,
-                                     16, 26 * self.ui_scale)
+        #: cannot hold its own line is not a band.  Stage 29 moved it onto
+        #: ``type_scale`` for the same reason one step further out.
+        self.section_line_h = self._label_band_px()
         self.section_label_h = self.section_line_h + 3
 
         inner_w = panel.width - 2 * self.left_inner
@@ -364,26 +511,29 @@ class Layout:
         self.right_inner = _clamp(self.right_w * 0.04, 6, 14)
         inner_w = panel.width - 2 * self.right_inner
 
-        self.r_title_h = int(20 * self.ui_scale)
-        self.r_name_h = int(26 * self.ui_scale)
+        # Bands that exist only to hold a line of type follow ``type_scale``;
+        # gaps and buttons, which hold space rather than letters, follow the
+        # geometry.  Mixing the two is what makes a heading touch a card.
+        self.r_title_h = int(20 * self.type_scale)
+        self.r_name_h = int(26 * self.type_scale)
         #: Piotrek's own colour badge, above 'Twoja Postać'.  Reserved whenever
         #: the panel is Piotrek's, chosen colour or not, so the geometry depends
         #: on ONE thing (show_skill) that both the drawing and the click
         #: handling already have.  Making it depend on whether a colour is known
         #: yet would let the two drift apart by a few pixels and put the ability
         #: card just out of reach of its own rectangle.
-        self.r_identity_h = int(24 * self.ui_scale)
+        self.r_identity_h = int(24 * self.type_scale)
         # Same single-line band as the left column: name plus counters.
         self.r_label_h = self.section_label_h
         #: Room under the ability card for the "use ability" button.
         self.r_button_h = _clamp(self.content_h * 0.035, 26, 42)
-        self.r_gap = _clamp(self.content_h * 0.014, 6, 16)
+        self.r_gap = _clamp(self.content_h * self._lerp(0.014, 0.011), 6, 16)
 
         self.pk_circle_d = _clamp(inner_w * 0.19, 30, 56)
         self.pk_col_gap = _clamp(inner_w * 0.05, 8, 18)
         self.pk_row_gap = _clamp(inner_w * 0.045, 8, 16)
-        self.pk_title_h = int(21 * self.ui_scale)
-        self.pk_pad = int(10 * self.ui_scale)
+        self.pk_title_h = int(21 * self.type_scale)
+        self.pk_pad = int(10 * self.panel_scale)
         grid_h = self.pk_title_h + 2 * self.pk_circle_d + self.pk_row_gap + self.pk_pad
 
         # Vertical budget: title, name, ability card, the deck rows and the
@@ -736,8 +886,25 @@ class Layout:
         # once the shelf grew, the card on it stopped at 182x260 and the rest
         # became padding.  It scales now, so a card in hand is bigger on a
         # bigger display — which is the whole of "card readability".
-        card_h = _clamp(self.hand_h * 0.88, 150, 260 * self.ui_scale)
-        self.hand_card_size = (int(card_h / CARD_ASPECT), int(card_h))
+        #
+        # HOW MUCH OF THE SHELF THE CARD TAKES also moves (stage 29).  On a
+        # small window the breathing room above and below the fan is the
+        # cheapest thing on screen, so the card eats into it rather than
+        # getting narrower.
+        card_h = _clamp(self.hand_h * self._lerp(0.88, 0.93), 150,
+                        280 * self.ui_scale)
+        card_w = int(card_h / CARD_ASPECT)
+
+        # THE LAST RESORT, and the brief's "prefer reducing card height instead
+        # of width" read literally: the aspect ratio is fixed, so the only way
+        # to hold a width is to let the card claim the shelf's remaining
+        # padding.  Only ever binds near MIN_WINDOW.
+        if card_w < MIN_HAND_CARD_W:
+            card_w = MIN_HAND_CARD_W
+            card_h = card_w * CARD_ASPECT
+
+        self.hand_card_size = (int(card_w), int(card_h))
+        card_h = float(self.hand_card_size[1])
         #: Radius of the imaginary circle the fan is laid out on.  A large
         #: radius gives a shallow, readable arc instead of a wheel of cards.
         self.hand_arc_radius = float(card_h * 5.4)

@@ -60,25 +60,60 @@ def edge_energy(surface: pygame.Surface) -> float:
     return total / max(1, samples)
 
 
+def peak_contrast(surface: pygame.Surface, percentile: float = 0.99) -> float:
+    """The 99th-percentile jump between neighbouring pixels.
+
+    ``edge_energy`` averages over the WHOLE card, most of which is flat
+    parchment, so a genuinely blurry card and a sharp one differ by a few per
+    cent — the mean is dominated by the areas that have no edges in them
+    either way.  What enlargement actually destroys is the PEAK: a glyph edge
+    that steps 400 levels in one pixel when it is painted at size steps half
+    that once it has been through a rotozoom.  Measuring the peak tells the
+    two apart by a factor of two rather than a factor of 1.05.
+    """
+    jumps = []
+    for y in range(2, surface.get_height() - 3, 2):
+        for x in range(2, surface.get_width() - 3, 2):
+            here = surface.get_at((x, y))[:3]
+            right = surface.get_at((x + 1, y))[:3]
+            jumps.append(sum(abs(a - b) for a, b in zip(here, right)))
+    jumps.sort()
+    return float(jumps[int(len(jumps) * percentile)]) if jumps else 0.0
+
+
 def make_app(size) -> App:
     return App(Layout(), headless=True, size=size)
 
 
 # ── cards ────────────────────────────────────────────────────────────────────
-def test_an_enlarged_card_is_redrawn_not_zoomed(library):
-    """The whole point: a big card is laid out big, not blown up."""
-    app = make_app((1920, 1080))
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("small", [(110, 157), (140, 200), (180, 257), (216, 309)])
+def test_an_enlarged_card_is_redrawn_not_zoomed(library, size, small):
+    """The whole point: a big card is laid out big, not blown up.
+
+    This used to compare MEAN edge energy at one window size and one card
+    size, and demand a 1.25 ratio.  It passed for the wrong reason: card type
+    was scaled by the interface scale on top of the card's own size (see
+    ``CardRenderer._font``), so at 1920x1080 the small card's type came out at
+    about 8 pixels and zooming it 2.2x produced mush.  On the 2560x1440 the
+    game is designed against, the very same assertion scored 1.089 and would
+    have FAILED — the test was measuring the double-scaling bug, not the
+    property it named.
+
+    Peak contrast measures the property directly, and holds at every window
+    size and every card size instead of one lucky pair.
+    """
+    app = make_app(size)
     cards = CardRenderer(app.renderer, library)
     card = library.deck(settings.DECK_MOVEMENT).build_cards()[0]
 
-    small = (110, 157)
     big = cards.quantised(small, 2.2)
     assert big[1] > small[1] * 2, "the paint size follows the scale"
 
     redrawn = cards.face(card, big)
     zoomed = pygame.transform.rotozoom(cards.face(card, small), 0, 2.2)
     assert redrawn.get_height() == pytest.approx(zoomed.get_height(), abs=8)
-    assert edge_energy(redrawn) > edge_energy(zoomed) * 1.25, \
+    assert peak_contrast(redrawn) > peak_contrast(zoomed) * 1.6, \
         "a redrawn card must be visibly crisper than a zoomed one"
 
 
@@ -129,13 +164,17 @@ def test_a_hovered_played_card_is_drawn_at_its_hovered_size(library):
 # ── type ─────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("size", SIZES)
 def test_type_is_rendered_larger_on_larger_displays(size):
-    """Not scaled up afterwards — rendered at the larger size."""
+    """Not scaled up afterwards — rendered at the larger size.
+
+    ``type_scale``, not ``ui_scale``: since stage 29 type has its own curve,
+    which is the number FontBook is actually set to.
+    """
     reference = make_app((1920, 1080))
     baseline = reference.fonts.get(18).get_height()
 
     app = make_app(size)
     height = app.fonts.get(18).get_height()
-    expected = app.layout.ui_scale / reference.layout.ui_scale
+    expected = app.layout.type_scale / reference.layout.type_scale
     assert height >= baseline * min(expected, 1.0)
     if size[1] > 1080:
         assert height > baseline, "bigger screen, bigger glyphs"
