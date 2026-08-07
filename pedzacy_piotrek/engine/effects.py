@@ -201,6 +201,40 @@ class ReplaceMods(Operation):
 
 
 @dataclass(frozen=True)
+class TransferStack(Operation):
+    """Move a whole field's tower to another field, intact and in order.
+
+    Gejtos.  NOT a movement operation and deliberately not built out of one:
+    the pawns are not walking a route, they are being picked up as a block and
+    put down somewhere else, so there is no distance, no direction, no widened
+    row to settle on the way and nothing for a Mod Patusa to shorten.
+
+    The tower keeps its order and lands ON TOP of whatever is already standing
+    on the destination, which is the ordinary stacking rule — the arriving
+    block is simply several pawns deep.
+    """
+
+    from_tile: int
+    to_tile: int
+
+
+@dataclass(frozen=True)
+class RequestIdentitySwap(Operation):
+    """Alter Ego: stop the table and hand the identity question back to Piotrek.
+
+    Carries NO COLOUR, and that is the whole design.  This operation runs on
+    every replica, and every replica but the authority's (and Piotrek's own)
+    has never been told which colour is his — so an operation that named it
+    would produce a different plan on different machines, which is precisely
+    what N72 exists to prevent.
+
+    All this does is raise a public flag.  The reveal itself comes back from
+    the authority as an ordinary logged command, exactly the way an elimination
+    does.
+    """
+
+
+@dataclass(frozen=True)
 class DrawCards(Operation):
     """Draw cards into a hand, through the ordinary draw path.
 
@@ -2010,3 +2044,249 @@ def _reverse_movement(spec: EffectSpec, ctx: EffectContext) -> Resolution:
         ),),
         f"Runda {target}: karty ruchu działają odwrotnie",
     )
+
+
+@effect("manual")
+def _manual(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """A card whose rule the PLAYERS carry out, not the engine.
+
+    This is the difference between "not designed yet" and "unplayable".  A card
+    with no ``effect`` at all is not playable — ``Card.is_playable`` asks
+    exactly that — so a Chest card waiting on a ruling used to sit in the hand
+    refusing to be clicked, and a player holding two of them was holding two
+    dead cards at the chest limit.
+
+    So an undesigned card declares ``manual`` and behaves like every other:
+    it shows, it resolves to nothing, it goes to the discard pile, and the text
+    on its face reaches the status bar so the table knows what to do about it.
+    Replacing this with a real handler later is a JSON edit and a function; it
+    is NOT a stub in the sense N10 forbids, because nothing here pretends the
+    rule was applied.
+    """
+    text = str(spec.get("text", "")).strip()
+    if not text and ctx.card_uid is not None:
+        card = ctx.state.find_card(ctx.card_uid)
+        text = str(getattr(card, "text", "") or "").strip()
+    if not text:
+        text = ctx.source or "Ta karta jest rozliczana przy stole"
+    return Plan((Fizzle(text),), text)
+
+
+# ── Gejtos ───────────────────────────────────────────────────────────────────
+# One card, two rules that are mirror images, so they share their reading of
+# the board and differ only in where the neighbours end up.
+def _neighbour_positions(state, centre: int) -> List[int]:
+    """The positions immediately in front of and behind a field.
+
+    Ahead first, so the questions come in a stable order and the keys below
+    mean the same thing on every machine.  The camp is not a neighbour of
+    anything here: Gejtos gathers what is ON THE ROAD, and a pawn that has not
+    started yet is not one field behind the first one — it is not on the board.
+    """
+    out = []
+    for offset in (1, -1):
+        index = centre + offset
+        if 0 <= index <= state.board.last_position:
+            out.append(index)
+    return out
+
+
+def _pick_half(state, position_index: int, ctx: EffectContext, key: str,
+               prompt: str, description: str) -> Resolution:
+    """Which field of a widened row this rule means, asking when it is two.
+
+    Returns the chosen :class:`Tile`, or the unanswered :class:`Choice`.  A row
+    with one field answers itself and consumes no key at all, so a board with no
+    widened rows asks Gejtos nothing.
+    """
+    position = state.board.position(position_index)
+    if position is None or not position.tiles:
+        return None
+    if not position.is_doubled:
+        return position.tiles[0]
+    answer = ctx.choice(key)
+    valid = {tile.index: tile for tile in position.tiles}
+    if answer is not None and int(answer) in valid:
+        return valid[int(answer)]
+    return Choice(
+        key=key, kind="tile", prompt=prompt,
+        options=tuple(ChoiceOption(id=str(t.index), label=t.label, tile=t.index)
+                      for t in position.tiles),
+        description=description,
+    )
+
+
+def _gejtos_centre(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Which pawn the card is played on.  Both halves ask this the same way."""
+    answer = ctx.choice("pawn")
+    if answer:
+        if ctx.state.library.pawn(answer) is None:
+            raise EffectError(f"Efekt wskazuje nieznany pionek: {answer!r}")
+        return answer
+    if not ctx.can_ask:
+        return NotAvailable("Gejtos potrzebuje wskazanego pionka")
+    options = pawn_options(ctx.state)
+    if not options:
+        return Refusal("Nie ma pionka, na którym można zagrać tę kartę")
+    return Choice(key="pawn", kind="pawn", prompt="Wybierz pionka",
+                  options=options,
+                  description=str(spec.get("prompt", "")) or None)
+
+
+def _gejtos_option(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Mężczyzna or Kobieta — asked FIRST, because it changes everything after.
+
+    The two halves ask about different fields (Kobieta needs a destination
+    beyond each neighbour, Mężczyzna does not), so the option cannot be settled
+    after the pawn without the widened-row questions changing meaning halfway
+    through a resubmission.
+    """
+    answer = ctx.choice("option")
+    if answer in ("gather", "scatter"):
+        return answer
+    if not ctx.can_ask:
+        return NotAvailable("Gejtos potrzebuje wybranej opcji")
+    return Choice(
+        key="option", kind="option", prompt="Gejtos — wybierz opcję",
+        options=(
+            ChoiceOption(id="gather", label="Mężczyzna"),
+            ChoiceOption(id="scatter", label="Kobieta"),
+        ),
+        description="Mężczyzna przyciąga sąsiadów, Kobieta ich odpycha",
+    )
+
+
+@effect("gejtos")
+def _gejtos(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Gather the neighbouring fields onto a pawn, or push them one further out.
+
+    THE CHOSEN PAWN NEVER MOVES under either half.  It is the anchor the rule
+    is measured from, so moving it would change the neighbours mid-resolution.
+
+    Mężczyzna transfers each neighbouring stack ONTO the anchor's field, whole
+    and in order, landing on its head.  Kobieta sends each neighbouring stack
+    one field FURTHER AWAY — the one in front goes forward, the one behind goes
+    back — which is the same move mirrored.
+
+    Kobieta REFUSES rather than clamping when the pawns behind would be pushed
+    off the front of the board.  Every other backward move in the game clamps at
+    field one, and that is right for a card that says "move back": arriving at
+    the start is a legal outcome.  Here it is not a move at all, the card says
+    so, and a card that silently did three quarters of its rule would be worse
+    than one that would not be played.
+    """
+    state = ctx.state
+
+    option = _gejtos_option(spec, ctx)
+    if isinstance(option, (Choice, Refusal, NotAvailable)):
+        return option
+
+    centre_pawn = _gejtos_centre(spec, ctx)
+    if isinstance(centre_pawn, (Choice, Refusal, NotAvailable)):
+        return centre_pawn
+
+    name = pawn_name(state, centre_pawn)
+    if is_hidden(state, centre_pawn):
+        return Plan((Fizzle(f"Shady: pionek {name} zniknął z mapy", centre_pawn),),
+                    f"{name}: poza mapą")
+    centre = pawn_index(state, centre_pawn)
+    if centre == CAMP_INDEX:
+        return Refusal(f"Pionek {name} jeszcze nie wystartował")
+
+    gather = option == "gather"
+    # The anchor's own field needs no question: the pawn is STANDING on it, so
+    # which half of a widened row it occupies is a fact rather than a choice.
+    # Only the neighbours are ambiguous.
+    anchor = state.board.pawn_tile(centre_pawn)
+    if anchor is None:
+        return Refusal(f"Pionek {name} stoi poza planszą")
+
+    operations: List[Operation] = []
+    moved: List[str] = []
+    for step, neighbour in enumerate(_neighbour_positions(state, centre)):
+        ahead = neighbour > centre
+        side = "przed" if ahead else "za"
+        source = _pick_half(
+            state, neighbour, ctx, f"from{step}",
+            f"Wybierz pole {side} pionkiem {name}",
+            "z którego pola ruszą pionki",
+        )
+        if isinstance(source, (Choice, Refusal, NotAvailable)):
+            return source
+        if source is None or not source.stack:
+            continue
+
+        if gather:
+            destination = anchor
+        else:
+            beyond = neighbour + (1 if ahead else -1)
+            if beyond < 0:
+                # "przed polem 1" — the start area.  The whole card is refused,
+                # not just this side of it: it is one effect and it either
+                # happens or does not.
+                return Refusal(
+                    "Kobieta zepchnęłaby pionki przed pole 1 — nie można zagrać")
+            if beyond > state.board.last_position:
+                # Off the far end is the finish, which every other movement
+                # rule clamps to.  Clamping here keeps Gejtos consistent with
+                # the rest of the game at the only edge the card does not name.
+                beyond = state.board.last_position
+            destination = _pick_half(
+                state, beyond, ctx, f"to{step}",
+                f"Wybierz pole, na które trafią pionki {side} {name}",
+                "dokąd zostaną odepchnięte",
+            )
+            if isinstance(destination, (Choice, Refusal, NotAvailable)):
+                return destination
+            if destination is None:
+                continue
+
+        if destination.index == source.index:
+            continue
+        operations.append(TransferStack(
+            from_tile=source.index, to_tile=destination.index,
+        ))
+        moved.extend(source.stack)
+
+    if not operations:
+        return Plan(
+            (Fizzle(f"Gejtos: {name} nie ma sąsiadów"),),
+            f"{name}: brak sąsiadów",
+        )
+    which = "Mężczyzna" if gather else "Kobieta"
+    return Plan(
+        tuple(operations),
+        f"Gejtos ({which}) — {name}: {len(moved)} "
+        f"{'pionek' if len(moved) == 1 else 'pionki'}",
+    )
+
+
+# ── Gamechanger ──────────────────────────────────────────────────────────────
+@effect("swap_identity")
+def _swap_identity(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Alter Ego: Piotrek gives up the colour he is hiding behind for a new one.
+
+    THIS HANDLER NEVER TOUCHES THE COLOUR, and cannot.  It runs on every
+    replica to build the plan, and every replica but the authority's and
+    Piotrek's own holds ``None`` for the secret all match (N72/N73) — so a
+    handler that read it would build a different plan on different machines and
+    desync the table on the one card that must not.
+
+    All it does is raise a flag that names nobody.  The authority answers it
+    through ``victory.review``, the same hook that decides an elimination, and
+    the answer comes back as an ordinary logged, broadcast command.
+
+    ONLY PIOTREK MAY PLAY IT.  The card is dealt from the Chest like any other
+    and a hunter can end up holding one, so the refusal is a real rule rather
+    than a formality — and it is a Refusal, not a Fizzle: the card stays in the
+    hand to be played by whoever it belongs to.
+    """
+    state = ctx.state
+    actor = state.player(ctx.actor)
+    if actor is None or not actor.is_piotrek:
+        return Refusal("Tylko Piotrek może zmienić tożsamość")
+    if state.piotrek_seat is None:
+        return Refusal("Przy tym stole nie ma Piotrka")
+    if state.identity_swap:
+        return Refusal("Zmiana tożsamości już trwa")
+    return Plan((RequestIdentitySwap(),), "Alter Ego — nowa tożsamość Piotrka")

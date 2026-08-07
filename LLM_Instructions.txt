@@ -1,8 +1,8 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 27 — a new Chest deck composition and the first four Chest
-              cards with real effects: Dzieckorolka, Rage Quit, Balbinka and
-              Gambit Patusa (see CHANGELOG_LLM.md)
+Last updated: stage 28 — the Chest finished: Gejtos, Alter Ego, and every Chest
+              card playable whether or not its rule exists yet
+              (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -88,14 +88,20 @@ WORKING:
   deliberately, so the supply guarantee no longer follows from every title
   having the same count and is asserted on its own.  These are DEFAULTS from
   cards.json and are therefore also what the lobby shows.
-- CHEST CARD EFFECTS (stage 27): FOUR of the eight Chest titles now change the
-  game.  Dzieckorolka moves a chosen pawn three forward and sweeps up the top
-  pawn of every field it walks through, asking which half of every widened row
-  to take; Rage Quit swaps every occupied Mod Patusa slot for a fresh draw;
-  Balbinka moves every pawn two forward or back with no tower rule and random
-  widened halves; Gambit Patusa reverses every movement card for the WHOLE OF
-  THE NEXT ROUND.  Nie masz Rosji, Shady, Gejtos and Gamechanger are still
-  inert.  See "HOW THE CHEST CARD EFFECTS WORK".
+- CHEST CARD EFFECTS (stages 27-28): the Chest is FINISHED.  Dzieckorolka moves
+  a chosen pawn three forward and sweeps up the top pawn of every field it walks
+  through; Rage Quit swaps every occupied Mod Patusa slot for a fresh draw;
+  Balbinka moves every pawn two forward or back with no tower rule; Gambit
+  Patusa reverses every movement card for the WHOLE OF THE NEXT ROUND; Gejtos
+  pulls both neighbouring fields onto a pawn or pushes them one further away;
+  Alter Ego hands Piotrek's hidden identity back to him mid-match.  See "HOW THE
+  CHEST CARD EFFECTS WORK".
+- EVERY CHEST CARD IS PLAYABLE (stage 28), including the ones whose rule is
+  still settled at the table (Nie masz Rosji, Shady, Kingmaker).  They declare
+  ``manual``, which resolves to nothing and says so.  A card with NO ``effect``
+  field is not playable at all — ``Card.is_playable`` reads exactly that — so
+  "undesigned" used to mean "unclickable", which at the chest limit meant a
+  player could hold two dead cards.  Never leave a card without an effect.
 - Procedurally generated horizontal board with guaranteed field spacing,
   rivers, bridges, villages, forest, rocks, a starting camp and a finish banner.
 - Board positions vs fields: a widened row is ONE position holding two fields
@@ -221,16 +227,22 @@ WORKING:
   stacking every pawn on one field and having his at the bottom. A wrong tower
   crosses that colour off every notepad at once. Two different endings, with a
   reveal, a way back to the poczekalnia and a way out.
-- 1044 automated tests.
+- 1084 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
   mod slot, but has no gameplay effect yet — its text still needs a ruling from
   the owner. The other seven all work (stages 24-25).
-- FOUR of the eight Chest titles: Nie masz Rosji, Shady (the chest one, not the
-  mod), Gejtos and Gamechanger.  They are inert — drawable and discardable, and
-  their text tells players what to do at the table.  Gamechanger additionally
-  has its role-reveal PRESENTATION and no gameplay effect (L4a).
+- THREE Chest RULES are still settled at the table: Nie masz Rosji, Shady (the
+  chest one, not the mod) and Kingmaker.  The CARDS are not inert — since stage
+  28 they are played, shown and discarded like any other, and their text reaches
+  the status bar.  What is missing is a mechanic, and for two of the three that
+  is a RULING the owner has to make rather than code somebody can write:
+    * "Nie masz Rosji" — blocking and burning an opponent's move has to say
+      WHICH move, chosen WHEN, and what happens if that player has none.
+    * Kingmaker — swapping roles mid-match touches the hidden identity.  Alter
+      Ego (stage 28) built most of the machinery it would need; read "ALTER EGO"
+      below before attempting it.
 - Turn enforcement: any player can act at any time (deliberate, for testing).
 - Sound and music.
 
@@ -1472,6 +1484,107 @@ shape.
 
 
 ================================================================================
+GEJTOS, ALTER EGO, AND CARDS WITHOUT RULES YET  (stage 28)
+================================================================================
+
+EVERY CARD NEEDS AN EFFECT, EVEN AN EMPTY ONE
+---------------------------------------------
+``Card.is_playable`` returns ``definition.effect is not None``.  A card with no
+``effect`` field CANNOT BE CLICKED — it sits in the hand refusing to be played
+or discarded, and at the chest limit that means a player holding two undesigned
+cards is holding two dead cards.
+
+So a card whose rule is still settled at the table declares ``manual``.  It
+shows, it resolves to nothing, it goes to the discard pile, and its printed text
+reaches the status bar so the table knows what to do about it.
+
+``manual`` returns a ``Fizzle``, NOT an ``Announce``.  ``_op_announce`` emits
+``ActionRejected``, and ``_play_card`` reads a rejection as "the play did not
+happen" and leaves the card in the hand — which is the exact bug ``manual``
+exists to fix.  ``Fizzle`` is the idiom for *played, did nothing, said so*
+(N99).  This was written the wrong way round first and a test caught it.
+
+
+GEJTOS
+------
+``gejtos`` → the ``TransferStack`` operation.  Mężczyzna pulls both
+neighbouring fields onto the chosen pawn; Kobieta pushes them one field further
+away.  Mirror images, so they share one handler.
+
+**THE OPTION IS ASKED FIRST.**  Kobieta needs a destination beyond each
+neighbour and Mężczyzna does not, so settling the option after the pawn would
+change what the widened-row questions mean halfway through a resubmission.
+
+``TransferStack`` is deliberately NOT built out of the movement system.  The
+pawns are not walking a route — a tower is picked up whole and put down — so
+there is no distance, no direction, no widened row to settle on the way and
+nothing for a Mod Patusa to shorten.  It reads ``Tile.stack`` into a list BEFORE
+placing anything, because that list is live and walking it while placing out of
+it skips every other pawn.
+
+**THE CHOSEN PAWN NEVER MOVES.**  It is the anchor the rule is measured from,
+and its own field is not a question: the pawn is STANDING on it, so which half
+of a widened row it occupies is a fact.  Only neighbours ask.
+
+**KOBIETA REFUSES RATHER THAN CLAMPING** when pawns would go before field one.
+Every other backward move in the game clamps, and that is right for a card that
+says "move back".  Here the card names the case, and a card that silently did
+three quarters of its rule would be worse than one that would not be played.
+Past the FAR end it does clamp, because the card does not name that edge and
+every other rule in the game clamps there.
+
+
+ALTER EGO, AND HOW TO TOUCH THE HIDDEN IDENTITY
+------------------------------------------------
+READ THIS BEFORE GOING NEAR THE SECRET.  It is the most delicate thing in the
+project and Kingmaker will want the same machinery.
+
+The hidden colour is the one fact the server has and the clients do not (N71,
+N73).  Alter Ego makes it change hands mid-match.
+
+**THE HANDLER NEVER TOUCHES THE COLOUR, AND CANNOT.**  It runs on every replica
+to build the plan, and every replica but the authority's and Piotrek's own holds
+``None`` for the secret all match.  A handler that read it would build a
+different plan on a machine that knows it than on one that does not, and the
+table would split on the one card that must not split it.
+
+The flow, and every step of it exists for a reason:
+
+  1. ``swap_identity`` → ``RequestIdentitySwap``, which raises a COLOURLESS
+     public flag (``identity_swap = "revealing"``) and stops the table.
+  2. The AUTHORITY answers through ``victory.review`` — the same hook that
+     decides an elimination, and for the same reason (N72) — returning
+     ``RevealIdentity``.  Carrying the colour there is safe because by the time
+     it is broadcast it is not a secret: Piotrek has given it up.
+  3. ``RevealIdentity`` wipes the notepad down to that one colour, clears the
+     secret, and moves the flag to ``"choosing"``.
+  4. The room re-sends ``identity_required`` to Piotrek's peer alone, minus the
+     colour he just gave up.  SAME MESSAGE, SAME OVERLAY — nothing new was
+     built on either side, which is what "reuse the existing UI" means here.
+  5. ``set_identity`` accepts the second choice and issues
+     ``FinishIdentitySwap``, so every replica leaves the pause on the same
+     command rather than each guessing that the answer arrived.
+
+**THE OLD CROSSINGS GO.**  They were evidence about an identity that no longer
+exists, and the rule turns on it: Piotrek may move to a colour the hunters had
+already ruled out, which is only possible because ruling it out is void.  What
+survives is the colour he just left.
+
+``eliminated_pawns[-1]`` IS the "which colour may he not pick" answer.  There is
+deliberately no second copy of it to fall out of step.
+
+**BETWEEN THE REVEAL AND THE CHOICE THERE IS NO HIDDEN IDENTITY AT ALL**,
+including on the authority.  ``victory.review`` reads exactly that and declines
+to judge, which is what stops a tower being checked against nobody mid-swap.
+The pause itself goes through ``_phase_refusal`` — the one gate the opening
+pause already used — rather than a second one.
+
+``identity_swap`` is in the snapshot because the table is STOPPED and every
+machine has to agree that it is.  It never names a colour, which is what lets a
+replica hold the same value as the authority.
+
+
+================================================================================
 THE SETTINGS PANEL  (stage 26)
 ================================================================================
 
@@ -2285,6 +2398,24 @@ KNOWN LIMITATIONS
   treats a mouse press during a rename as "confirm". See TEXT FIELDS for why
   this is a UI decision rather than a missing patch.
 
+L23. DECIDED, NOT SPECIFIED: Gejtos clamps at the FAR end of the board while
+    refusing at the near one.  The card names only the start area ("przed polem
+    1"), so the finish keeps the rule every other movement in the game uses.
+    Asymmetric on purpose; if the owner wants it symmetric it is one branch.
+
+L24. DECIDED, NOT SPECIFIED: Alter Ego may be played on any turn Piotrek holds
+    the card, including one where the hunters are about to check a tower — the
+    swap stops the table and voids a pending Squid Game check.  Nothing in the
+    text limits WHEN it may be played, and limiting it would be inventing a
+    rule.  Worth raising with the owner: it is the strongest defensive use of
+    the card and it is currently unrestricted.
+
+L25. DECIDED, NOT SPECIFIED: after a swap the hunters keep no record that the
+    OLD identity was ever ruled out beyond the single crossing Alter Ego leaves.
+    A hunter who eliminated four colours before the swap loses that work
+    entirely, which is what "the colour panel resets" says — but it is a large
+    swing and the owner may want the old crossings kept on a separate line.
+
 L20. DECIDED, NOT SPECIFIED: Dzieckorolka does NOT sweep the field it LANDS on,
     only the fields it walks through ("po drodze").  It makes no observable
     difference today — a collected destination pawn would be re-inserted exactly
@@ -2392,8 +2523,9 @@ L3c. A two-player game is playable end to end but not balanced, and its cadence
 L3a. (fixed in stage 8) The turn passes manually (any active player may hand it to anyone) — the
     cadence in turn_order.py is displayed but not enforced.
 L4. OUT OF DATE, kept for the history: those four movement cards were finished
-    in stage 19, the mods in stages 24-25 and half the Chest in stage 27. What
-    is still inert is AKO and four Chest cards.
+    in stage 19, the mods in stages 24-25 and the Chest in stages 27-28. Nothing
+    is INERT any more — every card is played and discarded normally; three Chest
+    rules and AKO are carried out by the players rather than the engine.
 L4a. Gamechanger, Alter Ego and Kingmaker are PRESENTATION ONLY — they have no
     gameplay effect yet, as the stage brief specified.
 L4b. PARTLY OUT OF DATE: SKIP_TURN has been enforced since stage 19. EXTRA_TURN
@@ -2402,9 +2534,10 @@ L4b. PARTLY OUT OF DATE: SKIP_TURN has been enforced since stage 19. EXTRA_TURN
 L5. OUT OF DATE: win detection landed in stage 17 (engine/victory.py) and the
     turn loop in stage 8. What is still missing is turn ENFORCEMENT as an
     optional rule switch, and scoring.
-L6. OUT OF DATE: seven of the eight mods work (stages 24-25) and FOUR of the
-    eight Chest cards work (stage 27). What is still text for humans is AKO,
-    plus Nie masz Rosji, Shady, Gejtos and Gamechanger.
+L6. OUT OF DATE: seven of the eight mods work (stages 24-25) and the Chest is
+    finished (stages 27-28). Every card in the game is PLAYABLE. Three Chest
+    rules are still settled at the table — Nie masz Rosji, chest-Shady and
+    Kingmaker — plus AKO outside it.
 L7. "hindmost" ties are broken by (position index, stack depth, pawn order).
     This is deterministic but arbitrary; the paper game would have players
     decide.
@@ -3309,6 +3442,39 @@ N124. Never assume a failing suite means the code is wrong. Stage 27 opened with
    half-applied `data/cards.json` naming handlers that did not exist. Diff the
    tree against the archive before debugging.
 
+N125. Never leave a card without an `effect` field. `Card.is_playable` reads
+   exactly that, so a card whose rule is undesigned becomes UNCLICKABLE rather
+   than merely ineffective — and at the chest limit a player can end up holding
+   two dead cards. Undesigned cards declare `manual`.
+
+N126. Never use `Announce` for a card that should still be discarded.
+   `_op_announce` emits `ActionRejected`, and `_play_card` reads a rejection as
+   "the play did not happen" and keeps the card in the hand. `Fizzle` is the
+   idiom for *played, did nothing, said so* (N99).
+
+N127. Never let a handler read the hidden colour. Handlers run on every replica
+   and most of them hold `None` for it all match, so a handler that read it
+   would build a different plan on different machines. A card that needs the
+   secret raises a COLOURLESS flag and lets `victory.review` answer it on the
+   authority — the road an elimination already takes (N72).
+
+N128. Never ask a question about a field a pawn is already standing on. Gejtos
+   asks which half of each widened NEIGHBOUR it means; the anchor's own half is
+   a fact, not a choice, and asking would be a prompt with one real answer.
+
+N129. Never build a "move several pawns as a block" card out of the movement
+   system. Gejtos lifts a tower whole: no distance, no direction, no widened row
+   on the way, and nothing for a Mod Patusa to shorten. `TransferStack` is that
+   operation, and it reads `Tile.stack` into a list BEFORE placing anything,
+   because that list is live and walking it while placing out of it skips every
+   other pawn.
+
+N130. Never index into a generated board in a multiplayer test. A room's seed is
+   not the test's to choose, so `doubled[0]` means a different position from run
+   to run: stage 27 shipped a test that passed when written, passed in
+   isolation, and only failed once the suite grew enough to shift the order.
+   Derive what the test needs from the board it was given.
+
 N104. Never add a rule to `_move_pawn` without asking whether `_move_pawns`
    needs it too. Plagiat! moves backwards through the second handler, so
    Speedrun, Masa solna and Halloween all had to be applied twice. A rule added
@@ -3371,26 +3537,25 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    (double_frequency, edit_mode).  Both normalised() and create_game() use
    dataclasses.replace now, and a test walks every field — keep it that way.
 
-1. THE REMAINING FOUR CHEST CARDS — Nie masz Rosji, Shady, Gejtos and
-   Gamechanger. Stage 27 did the other four and built most of what these will
-   want; read "HOW THE CHEST CARD EFFECTS WORK" first, then TURN INTERRUPTS,
-   FORCED PLAYS AND MULTI-SELECT, because "act when drawn", "take over a
-   turn", "look into another hand", "move several pawns in order" and
-   "steal a card" ALL ALREADY EXIST and are parameterised. Check whether an
-   existing effect type covers it before writing a handler.
-   Two of the four need a RULING from the owner rather than machinery:
-     * "Nie masz Rosji" — blocking and burning an opponent's move needs to say
+1. THE THREE REMAINING RULINGS — and they are RULINGS, not code. Every card in
+   the game is now playable; what is missing is three mechanics the owner has to
+   specify before anybody can write them:
+     * "Nie masz Rosji" — blocking and burning an opponent's move has to say
        WHICH move, chosen WHEN, and what happens if that player has none. The
        nearest existing mechanism is a TURN_INTERRUPT plus a forced discard.
-     * Gamechanger / Alter Ego / Kingmaker — swapping roles mid-match touches
-       the hidden identity, which is the one thing the server alone knows
-       (N71/N73). It is not a card effect so much as a change to how the secret
-       is held, and it should not be attempted casually.
-   Gejtos ("Mężczyzna" gathers neighbours onto a field, "Kobieta" pushes
-   them away) is the closest to ready: it is a tile choice plus an option, and
-   ``MoveBySteps`` already moves several pawns against a board each move leaves.
-2. Effects for the remaining chest cards. THE MOVEMENT DECK IS COMPLETE
-   (stage 19 finished Troll, Stańczyk, Spy and Plagiat!).
+     * Chest "Shady" — taking a special card off another player. `TransferCard`
+       already exists (Spy), so this is mostly a question of what "specjalną"
+       means and whether the victim chooses.
+     * Kingmaker — swapping roles mid-match. Alter Ego (stage 28) built most of
+       the machinery: a colourless flag, an authority-answered reveal and a
+       reopened colour question. Read "ALTER EGO, AND HOW TO TOUCH THE HIDDEN
+       IDENTITY" before attempting it, and N127 in particular.
+   Before writing ANY of them, read TURN INTERRUPTS, FORCED PLAYS AND
+   MULTI-SELECT: "act when drawn", "take over a turn", "look into another
+   hand", "move several pawns in order" and "steal a card" ALL ALREADY EXIST
+   and are parameterised.
+2. AKO is the last card outside the Chest without an effect. THE MOVEMENT DECK
+   IS OTHERWISE COMPLETE (stage 19 finished Troll, Stańczyk, Spy and Plagiat!).
 3. Server-side hidden-information filtering (L1). Transport, lobby and online
    play are DONE (stage 11).
 4. Chest and mod effects (they interact with movement, so do them after 1–2).
@@ -3407,7 +3572,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 1044 tests, ~165 s
+    python -m pytest -q                     # 1084 tests, ~175 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,

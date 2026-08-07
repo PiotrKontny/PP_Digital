@@ -201,6 +201,55 @@ class PawnsCollected(GameEvent):
 
 
 @dataclass
+class StackTransferred(GameEvent):
+    """A whole tower was picked up and put down elsewhere (Gejtos).
+
+    The pawns each get a ``TokenWalked`` so the animation is the ordinary one;
+    this says what the CARD did, which is one thing rather than four.
+    """
+
+    from_tile: int
+    to_tile: int
+    pawns: List[str] = field(default_factory=list)
+
+
+@dataclass
+class IdentitySwapStarted(GameEvent):
+    """Alter Ego was played: the table stops until Piotrek has a new colour.
+
+    Carries no colour — every machine sees this and only one of them knows the
+    answer.  The reveal is a separate, later event.
+    """
+
+    piotrek_seat: int
+
+
+@dataclass
+class IdentityRevealed(GameEvent):
+    """The colour Piotrek WAS hiding behind, now public and ruled out forever.
+
+    This is the one moment in the game where the secret becomes common
+    knowledge without the match ending.  It reaches every machine because by
+    the time it is sent it is no longer a secret: Piotrek has already given it
+    up in exchange for a new one.
+    """
+
+    pawn_id: str
+    cleared: List[str] = field(default_factory=list)
+
+
+@dataclass
+class IdentitySwapFinished(GameEvent):
+    """Piotrek has a new colour and play resumes.
+
+    Says nothing about WHICH colour, on purpose: that is the new secret and it
+    travels the same private path the first one did.
+    """
+
+    piotrek_seat: int
+
+
+@dataclass
 class ChoiceRequired(GameEvent):
     """An action is waiting for a decision: which pawn, which field, how far.
 

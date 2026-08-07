@@ -683,7 +683,7 @@ class GameScreen(Screen):
                     can_return=self.service is not None,
                 )
             return
-        if not state.phase.playable:
+        if not state.phase.playable or state.awaiting_identity:
             self.match_start.show(*self._identity_question())
         else:
             self.match_start.hide()
@@ -697,14 +697,26 @@ class GameScreen(Screen):
         one keyboard — so the same overlay is shown to whoever is sitting there
         and the choice is applied locally.  One flow, two sources of the
         question.
+
+        ALTER EGO REUSES BOTH, which is why the colour just revealed is filtered
+        out here rather than at the source: the online list arrives already
+        shortened by the server, the hot-seat list is built below, and this is
+        the one place both pass through.  Nothing shows as already-chosen during
+        a swap either — the old colour is gone and the new one is not picked.
         """
         state = self.state
+        forbidden = state.swap_forbidden_pawn()
         if self.service is not None:
-            return (list(getattr(self.service, "identity_request", []) or []),
-                    getattr(self.service, "identity_pawn", "") or "")
-        pawns = [{"id": p.id, "name": p.name, "color": list(p.color)}
-                 for p in state.library.pawns]
-        return pawns, state.piotrek_pawn or ""
+            pawns = list(getattr(self.service, "identity_request", []) or [])
+            chosen = getattr(self.service, "identity_pawn", "") or ""
+        else:
+            pawns = [{"id": p.id, "name": p.name, "color": list(p.color)}
+                     for p in state.library.pawns]
+            chosen = state.piotrek_pawn or ""
+        if forbidden:
+            pawns = [p for p in pawns if p.get("id") != forbidden]
+            chosen = "" if chosen == forbidden else chosen
+        return pawns, chosen
 
     def _handle_victory_event(self, event: pygame.event.Event,
                               mouse: Tuple[int, int]) -> None:
@@ -748,9 +760,13 @@ class GameScreen(Screen):
             self.match_start.show(self.match_start.pawns, pawn_id)
             return
         # Hot-seat: this machine is its own authority, so the colour is stored
-        # here and the match begins through the ordinary command path.
+        # here and the match begins — or RESUMES — through the ordinary command
+        # path.  Which of the two it is depends on whether a swap is running,
+        # because Alter Ego pauses a match that has already begun and
+        # ``BeginMatch`` would be refused by a phase that is already PLAYING.
+        swapping = self.state.awaiting_identity
         if self.state.set_piotrek_pawn(pawn_id):
-            self.submit(cmd.BeginMatch())
+            self.submit(cmd.FinishIdentitySwap() if swapping else cmd.BeginMatch())
 
     def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
         # 1. Renaming captures all input until confirmed or cancelled.

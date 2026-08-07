@@ -3315,3 +3315,156 @@ the half-applied `cards.json` described above and are gone.
   written against a route of exactly the printed length, and a card whose
   distance a skill could stretch would sweep a field its own text never
   promised. See L20.
+
+---
+
+## Stage 28 — The Chest finished
+**Date:** 2026-08-07
+
+### Goal
+The remaining Chest cards: Gejtos, Alter Ego (Kingmaker stays a placeholder),
+and — the smallest change here and the one a player notices first — every Chest
+card playable whether or not its rule exists yet.
+
+### 0. The tree this stage started from
+No new archive arrived; `/mnt/user-data/uploads/` still held the stage 26 zip.
+Built on the stage 27 output instead, after checking it byte-for-byte against
+the working tree and re-running the suite to re-establish the 1045 baseline.
+
+### 1. Every Chest card is playable
+`Card.is_playable` reads `definition.effect is not None`. A card waiting on a
+ruling had no `effect` block at all, so it **could not be clicked** — it sat in
+the hand, and a player holding two of them was holding two dead cards against
+the chest limit. That is the bug; the fix is one effect type.
+
+`manual` shows the card, resolves to NOTHING, discards it normally and puts the
+printed text in the status bar so the table can settle it by hand. Applied to
+Nie masz Rosji, chest-Shady, Kingmaker, and to the untransformed Gamechanger as
+a fallback.
+
+**It first used `Announce` and that was wrong.** `_op_announce` emits
+`ActionRejected`, and `_play_card` treats a rejection as "the play did not
+happen" — so the card stayed in the hand, which is the exact bug being fixed.
+`Fizzle` is the idiom for *played, did nothing, said so* (N99), and it is the
+one to reach for. The test caught this, not review.
+
+This is NOT a stub in the sense N10 forbids: nothing pretends the rule was
+applied, and replacing `manual` with a real handler later is a JSON edit plus a
+function.
+
+### 2. Gejtos
+One `gejtos` handler for both halves, because they are mirror images and only
+differ in where the neighbours end up.
+
+**The option is asked FIRST.** Kobieta needs a destination field beyond each
+neighbour and Mężczyzna does not, so settling the option after the pawn would
+change what the widened-row questions mean halfway through a resubmission.
+
+New `TransferStack` operation, deliberately NOT built out of the movement
+system: the pawns are not walking a route, they are picked up as a block and put
+down. No distance, no direction, no widened row on the way, nothing for a Mod
+Patusa to shorten. The tower keeps its order and lands on top of whatever is
+already there — the arriving block is simply several pawns deep.
+
+**Kobieta REFUSES rather than clamping** when pawns would be pushed before field
+one. Every other backward move in the game clamps, and that is right for a card
+that says "move back" — arriving at the start is a legal outcome. Here the card
+names the case, and a card that silently did three quarters of its rule would be
+worse than one that would not be played.
+
+The anchor's own field is not a question. The pawn is STANDING on it, so which
+half of a widened row it occupies is a fact. Only neighbours ask.
+
+### 3. Alter Ego — the most delicate thing in the project
+The hidden colour is the one fact the server has and the clients do not (N71,
+N73). This card makes it change hands mid-match.
+
+**The handler never touches the colour, and cannot.** It runs on every replica
+to build the plan, and every replica but the authority's and Piotrek's own holds
+`None` for the secret all match. A handler that read it would build a different
+plan on different machines and split the table on the one card that must not
+split it.
+
+So the flow is:
+
+1. `swap_identity` → `RequestIdentitySwap`, which raises a **colourless** public
+   flag (`identity_swap = "revealing"`) and stops the table.
+2. The AUTHORITY answers through `victory.review` — the same hook that decides
+   an elimination, and for the same reason (N72) — returning `RevealIdentity`.
+3. That command wipes the notepad down to the revealed colour, clears the
+   secret, and moves the flag to `"choosing"`.
+4. The room re-sends `identity_required` to Piotrek's peer alone, minus the
+   colour he just gave up. **Same message, same overlay** — nothing new was
+   built on either side.
+5. `set_identity` accepts the second choice and issues `FinishIdentitySwap`,
+   so every replica leaves the pause on the same command rather than guessing.
+
+**The old crossings go.** They were evidence about an identity that no longer
+exists, and the brief's example turns on it: Piotrek moves to a colour the
+hunters had already ruled out, which is only possible because ruling it out is
+void. What survives is the colour he just left.
+
+`eliminated_pawns[-1]` IS the "which colour may he not pick" answer — there is
+deliberately no second copy of it to fall out of step.
+
+**Between the reveal and the choice there is NO hidden identity at all**,
+including on the authority. `victory.review` reads exactly that and declines to
+judge, which is what stops a tower being checked against nobody mid-swap. The
+pause also goes through `_phase_refusal`, the one gate the opening pause already
+used, rather than a second one.
+
+Kingmaker keeps its presentation, title and description and does nothing. No
+mechanic was invented.
+
+### 4. What did NOT change
+Movement logic, Mod behaviour, turn order, victory conditions, the chest rota.
+Two new commands (`RevealIdentity`, `FinishIdentitySwap`), both AUTHORITY_ONLY;
+one new snapshot field (`identity_swap`), public and colourless.
+
+### Tests
+**1084 passing** (1045 before, +39), ~175 s, stable across two consecutive full
+runs.
+
+- `tests/test_final_chest_cards.py` (new, 27): every Chest card playable; an
+  undesigned card resolving, discarding and changing nothing; Kingmaker inert;
+  Gejtos asking the option first, both halves, a neighbouring tower moved whole
+  and in order, the refusal before field one, empty neighbours, widened-row
+  questions and taking only the half pointed at, and immunity to the movement
+  mods; Alter Ego refused to a hunter, naming no colour, the authority
+  publishing it, a replica deciding nothing, the notepad reset, nobody knowing
+  the colour mid-swap, the table stopped, the revealed colour unpickable,
+  victory and checking following the NEW colour, a second swap refused, the
+  snapshot flag, and a pending Squid Game check dropped.
+- `tests/test_final_chest_cards_sync.py` (new, 10): Gejtos identical everywhere
+  and needing no command of its own; and for Alter Ego — the colour in neither
+  the played command nor the log, the reveal reaching everybody as a command,
+  only Piotrek asked and the old colour not offered, the NEW colour never
+  travelling, the table resuming together, the pause holding against a client,
+  the fingerprint not moving, and a reconnecting player replaying the swap
+  without learning either secret.
+- `tests/test_ui.py`: two added for the reopened overlay.
+- Two existing tests UPDATED, neither weakened. `test_ui` and `test_card_effects`
+  both selected a card with `effect is None` to demonstrate "no implementation" —
+  a category that no longer exists, which was the GOAL. Both now select a
+  `manual` card; the behaviour asserted is unchanged.
+
+### 5. A latent bug in stage 27's own test suite
+The full run caught `test_the_branch_questions_travel_as_choices` failing while
+passing in isolation. It assumed the first doubled position had doubled rows
+along the next three fields — but the room's seed is not the test's to choose,
+so "happened to" varied between runs. It now SEARCHES for a start whose route
+crosses a widened row.
+
+Recorded because of how it hid: it passed when written, passed in isolation
+afterwards, and only failed once the suite grew enough to shift the order. **A
+multiplayer test that reads the generated board must derive what it needs from
+that board, never index into it.**
+
+### Verification
+- 1084 tests, twice; `--selftest` exits 0; `inspect_frame.py` **0 problems** at
+  1280×760, 1920×1200, 2560×1440 and 3840×2160.
+
+### Notes
+- Kingmaker is the last placeholder in the Chest. Its rule — swapping roles
+  mid-match — touches the hidden identity the way Alter Ego does, and the
+  machinery Alter Ego just built is most of what it would need.

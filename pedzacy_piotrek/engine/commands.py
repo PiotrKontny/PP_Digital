@@ -299,6 +299,36 @@ class DeclareVictory(Command):
     piotrek_name: str = ""
 
 
+@dataclass(frozen=True)
+class RevealIdentity(Command):
+    """Alter Ego: the colour Piotrek was hiding behind becomes public.
+
+    Sent by the AUTHORITY once Alter Ego has raised its flag, for the same
+    reason an elimination is: answering it needs the secret, and only the
+    authority has it (N72).  Carrying the colour is safe because by the time
+    this is broadcast it is not a secret any more — Piotrek has given it up.
+
+    Applying it WIPES the notepad and leaves this one colour crossed off.  The
+    old crossings were evidence about an identity that no longer exists; the
+    only thing still known is that Piotrek is not the colour he just left.
+    """
+
+    kind: ClassVar[str] = "reveal_identity"
+    pawn_id: str = ""
+
+
+@dataclass(frozen=True)
+class FinishIdentitySwap(Command):
+    """Alter Ego: Piotrek has picked a new colour, so play resumes.
+
+    Says nothing about which — the new secret travels the private path the
+    first one did, and this command exists purely so that every replica leaves
+    the pause on the same command rather than each on its own guess.
+    """
+
+    kind: ClassVar[str] = "finish_identity_swap"
+
+
 COMMAND_REGISTRY: Dict[str, Type[Command]] = {
     cls.kind: cls
     for cls in (
@@ -324,10 +354,13 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
         BeginMatch,
         EliminatePawn,
         DeclareVictory,
+        RevealIdentity,
+        FinishIdentitySwap,
     )
 }
 
 #: Commands only the authority may issue.  A client sending one is not making a
 #: mistake, it is cheating: these are how a match starts, how a colour is ruled
 #: out and how a winner is declared.
-AUTHORITY_ONLY = (BeginMatch, EliminatePawn, DeclareVictory)
+AUTHORITY_ONLY = (BeginMatch, EliminatePawn, DeclareVictory, RevealIdentity,
+                  FinishIdentitySwap)

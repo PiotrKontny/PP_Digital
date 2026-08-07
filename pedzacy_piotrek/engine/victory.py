@@ -201,6 +201,26 @@ def review(state) -> List[cmd.Command]:
     if not state.phase.playable:
         return []
     hidden = hidden_pawn(state)
+
+    # Alter Ego, before anything else.  The card raised a public flag that
+    # names no colour, because the machine that played it may not know one;
+    # answering it needs the secret, so it is answered HERE, on the authority,
+    # and comes back as a logged command like every other decision that needs
+    # the secret (N72).
+    swap = getattr(state, "identity_swap", "")
+    if swap == getattr(state, "SWAP_REVEALING", "revealing"):
+        if hidden is None:
+            # A replica, which must never decide anything — or an authority
+            # that has genuinely lost the colour, in which case guessing would
+            # be worse than waiting.
+            return []
+        return [cmd.RevealIdentity(pawn_id=hidden)]
+    if swap:
+        # Waiting for Piotrek to pick.  There is deliberately NO hidden colour
+        # during this window, so nothing below could judge anything anyway —
+        # but returning early says so rather than relying on that.
+        return []
+
     if hidden is None:
         # The authority does not know who Piotrek is (nobody has chosen yet, or
         # this is a replica that must never decide anything).  Judging on a

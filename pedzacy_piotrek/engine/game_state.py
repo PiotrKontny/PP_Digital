@@ -212,6 +212,12 @@ class GameState:
         #: out.  PUBLIC — this is the notepad, and it is the same on every
         #: machine because it arrives as a command like everything else.
         self.eliminated_pawns: List[str] = []
+        #: Where an Alter Ego swap has got to, or "" when none is running.
+        #: PUBLIC and in the snapshot — it stops the table, so every machine has
+        #: to agree that it is stopped — and it never names a colour, which is
+        #: what lets a replica that has never been told the secret hold exactly
+        #: the same value as the authority.
+        self.identity_swap: str = ""
         #: Set once, by ``DeclareVictory``.  Its presence *is* "the game is
         #: over", which is why nothing else needs a second flag.
         self.victory: Optional[Verdict] = None
@@ -626,17 +632,58 @@ class GameState:
         player = self.player(seat) if seat is not None else None
         return player.secret_pawn if player is not None else None
 
+    #: The two stages of an Alter Ego swap.  ``SWAP_REVEALING`` means the card
+    #: has been played and the authority has not yet published the old colour;
+    #: ``SWAP_CHOOSING`` means it has, and Piotrek is picking a new one.
+    SWAP_REVEALING = "revealing"
+    SWAP_CHOOSING = "choosing"
+
+    @property
+    def awaiting_identity(self) -> bool:
+        """True while the table is stopped for Piotrek to pick a colour.
+
+        Read alongside ``phase.playable`` everywhere a command is judged, so
+        that an Alter Ego pause refuses moves for the same reason and by the
+        same route the opening pause does.
+        """
+        return bool(self.identity_swap)
+
+    def swap_forbidden_pawn(self) -> Optional[str]:
+        """The colour Piotrek may NOT choose during a swap: the one he just left.
+
+        It is ``eliminated_pawns[-1]`` rather than something remembered
+        separately, because ``RevealIdentity`` wipes the notepad down to exactly
+        that one colour — so the list IS the answer, and there is no second
+        copy of it to fall out of step.
+        """
+        if self.identity_swap != self.SWAP_CHOOSING:
+            return None
+        return self.eliminated_pawns[-1] if self.eliminated_pawns else None
+
     def set_piotrek_pawn(self, pawn_id: str) -> bool:
-        """Record the chosen colour.  Refuses an unknown or a second choice.
+        """Record the chosen colour.  Refuses an unknown or an illegal choice.
 
         Never reached through a command, and that is the point: a command is
         logged and broadcast, and this must not be either.
+
+        A SECOND choice is refused as before, EXCEPT during an Alter Ego swap —
+        which is the one rule in the game that hands the question back.  The
+        colour just revealed is refused there, because the card trades one
+        identity for a different one and hunters have already been told that
+        colour is not Piotrek.
         """
         seat = self.piotrek_seat
         player = self.player(seat) if seat is not None else None
-        if player is None or player.secret_pawn:
+        if player is None:
             return False
         if self.library.pawn(pawn_id) is None:
+            return False
+        if self.identity_swap == self.SWAP_CHOOSING:
+            if pawn_id == self.swap_forbidden_pawn():
+                return False
+            player.secret_pawn = pawn_id
+            return True
+        if player.secret_pawn:
             return False
         player.secret_pawn = pawn_id
         return True
@@ -2046,6 +2093,61 @@ class GameState:
         events.extend(self._sync_mod_states())
         return events
 
+    def _op_transfer_stack(
+        self, op: effects.TransferStack, actor: int
+    ) -> List[ev.GameEvent]:
+        """Gejtos: pick a tower up whole and put it down on another field.
+
+        Bottom first, so the tower arrives in the order it left: each
+        ``place_pawn`` lands on top of the one before it, and the block ends up
+        sitting on whatever was already on the destination.
+
+        The pawns are read BEFORE anything moves.  ``Tile.stack`` is the live
+        list, so walking it while placing out of it would skip every other
+        pawn.
+        """
+        source = self.board.tile(op.from_tile)
+        destination = self.board.tile(op.to_tile)
+        if source is None or destination is None or not source.stack:
+            return []
+        travelling = list(source.stack)
+        for pawn_id in travelling:
+            self.board.place_pawn(pawn_id, op.to_tile, on_top=True)
+        self._sync_token_positions()
+
+        events: List[ev.GameEvent] = []
+        for pawn_id in travelling:
+            events.append(ev.TokenWalked(
+                pawn_id=pawn_id,
+                from_index=source.slot,
+                route=[destination.slot],
+                tiles=[op.to_tile],
+                waypoints=[destination.position],
+                backward=destination.slot < source.slot,
+            ))
+        events.append(ev.StackTransferred(
+            from_tile=op.from_tile, to_tile=op.to_tile, pawns=travelling,
+        ))
+        return events
+
+    def _op_request_identity_swap(
+        self, op: effects.RequestIdentitySwap, actor: int
+    ) -> List[ev.GameEvent]:
+        """Alter Ego: raise the public flag and stop the table.
+
+        Every replica runs this and reaches the same state, because there is
+        nothing here that depends on knowing the colour.  The authority alone
+        answers the question this poses, through ``victory.review`` — the same
+        hook that decides an elimination, and for the same reason (N72).
+        """
+        if self.identity_swap:
+            return []
+        if self.piotrek_seat is None:
+            return [ev.ActionRejected("Przy tym stole nie ma Piotrka",
+                                      "identity_swap")]
+        self.identity_swap = self.SWAP_REVEALING
+        return [ev.IdentitySwapStarted(self.piotrek_seat)]
+
     def _op_draw_cards(self, op: effects.DrawCards, actor: int) -> List[ev.GameEvent]:
         """Draw into a hand as part of an effect (Troll's replacement, Spy's)."""
         player = self.player(op.player_index)
@@ -2354,6 +2456,12 @@ class GameState:
             return "Gra jeszcze się nie zaczęła"
         if self.phase is MatchPhase.ENDED:
             return "Gra została zakończona"
+        if self.awaiting_identity:
+            # Alter Ego stops the table exactly the way the opening does, and
+            # through the same gate rather than a second one: for the length of
+            # the swap there is no hidden colour AT ALL, so a tower checked now
+            # would be checked against nobody.
+            return "Piotrek wybiera nową tożsamość"
         return None
 
     def _mod_selection_refusal(self, command: cmd.Command) -> Optional[str]:
@@ -2616,6 +2724,51 @@ class GameState:
         self.eliminated_pawns.append(command.pawn_id)
         return [ev.PawnEliminated(command.pawn_id)]
 
+    def _reveal_identity(self, command: cmd.RevealIdentity) -> List[ev.GameEvent]:
+        """Alter Ego: publish the old colour and wipe the notepad down to it.
+
+        THE OLD CROSSINGS GO.  They were evidence about an identity that no
+        longer exists — and the brief's own example turns on it: Piotrek moves
+        to a colour the hunters had already ruled out, which is only possible
+        because the ruling out is void. What survives is the colour he just
+        left, which the hunters now know for certain.
+
+        The secret itself is cleared here rather than overwritten later, so
+        that between this command and the next one NO machine believes it knows
+        who Piotrek is — including the authority.  ``victory.review`` reads
+        exactly that and declines to judge, which is what stops a check landing
+        in the middle of the swap.
+        """
+        if self.identity_swap != self.SWAP_REVEALING:
+            return []
+        if self.library.pawn(command.pawn_id) is None:
+            return [ev.ActionRejected("Nieznany kolor", command.kind)]
+        cleared = [p for p in self.eliminated_pawns if p != command.pawn_id]
+        self.eliminated_pawns = [command.pawn_id]
+        # An automatic check aimed at the old identity is void with it.
+        self.pending_lead_check = None
+        seat = self.piotrek_seat
+        player = self.player(seat) if seat is not None else None
+        if player is not None:
+            player.secret_pawn = None
+        self.identity_swap = self.SWAP_CHOOSING
+        return [ev.IdentityRevealed(command.pawn_id, cleared)]
+
+    def _finish_identity_swap(
+        self, command: cmd.FinishIdentitySwap
+    ) -> List[ev.GameEvent]:
+        """Piotrek has a new colour; everybody leaves the pause together.
+
+        A command rather than a local flag flip for the ordinary reason: the
+        authority knows the answer arrived and nobody else does, so the resume
+        has to be told rather than guessed.
+        """
+        if self.identity_swap != self.SWAP_CHOOSING:
+            return []
+        self.identity_swap = ""
+        seat = self.piotrek_seat
+        return [ev.IdentitySwapFinished(seat if seat is not None else -1)]
+
     def _declare_victory(self, command: cmd.DeclareVictory) -> List[ev.GameEvent]:
         verdict = Verdict.from_dict({
             "outcome": command.outcome, "pawn_id": command.pawn_id,
@@ -2674,6 +2827,10 @@ class GameState:
             # every client resyncing against it for ever.
             "phase": self.phase.value,
             "eliminated": list(self.eliminated_pawns),
+            # Public and colourless.  The table is stopped, so every machine
+            # must agree that it is — but nothing here says what it is stopped
+            # waiting for a decision ABOUT.
+            "identity_swap": self.identity_swap,
             "victory": self.victory.to_dict() if self.victory else None,
             "piotrek_name": self.piotrek_name,
             "hunter_names": list(self.hunter_names),
@@ -2706,6 +2863,8 @@ class GameState:
         effects.MovePawn: _op_move_pawn,
         effects.MoveBySteps: _op_move_by_steps,
         effects.MoveAndCollect: _op_move_and_collect,
+        effects.TransferStack: _op_transfer_stack,
+        effects.RequestIdentitySwap: _op_request_identity_swap,
         effects.ReplaceMods: _op_replace_mods,
         effects.DrawCards: _op_draw_cards,
         effects.TransferCard: _op_transfer_card,
@@ -2743,5 +2902,7 @@ class GameState:
         cmd.ToggleMark: _toggle_mark,
         cmd.BeginMatch: _begin_match,
         cmd.EliminatePawn: _eliminate_pawn,
+        cmd.RevealIdentity: _reveal_identity,
+        cmd.FinishIdentitySwap: _finish_identity_swap,
         cmd.DeclareVictory: _declare_victory,
     }

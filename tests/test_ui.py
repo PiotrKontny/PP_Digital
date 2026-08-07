@@ -242,17 +242,20 @@ def test_clicking_a_playable_card_plays_it(screen):
 
 
 def test_clicking_a_card_the_engine_cannot_resolve_still_discards_it(screen):
-    """A card with no effect keeps the prototype's behaviour: click discards.
+    """A card with no RULE YET keeps the prototype's behaviour: click discards.
 
-    Every movement card now has an effect or an on-draw effect, so the card
-    that demonstrates this is dealt from the chest deck — which is the honest
-    version of the test anyway, since "no implementation yet" is where the
-    chest cards are and no longer where the movement cards are.
+    Since stage 28 there is no card anywhere with no ``effect`` at all, and that
+    is deliberate — ``Card.is_playable`` reads exactly that field, so such a
+    card could not be clicked in the first place.  A Chest card whose rule is
+    still settled at the table declares ``manual`` instead, which resolves to
+    nothing.  That is the card this test wants: the engine CAN resolve it, and
+    resolving it to nothing must still discard it rather than leave it stuck.
     """
     state = screen.state
     deck = state.deck(settings.DECK_CHEST)
     card = next(c for c in deck.draw_pile
-                if c.effect is None and not c.locked)
+                if c.effect is not None and c.effect.type == "manual"
+                and not c.locked)
     deck.draw_pile.remove(card)
     state.active_player.add_card(card)
     settle(screen)
@@ -2423,3 +2426,58 @@ def test_the_automatic_check_is_reported_even_when_it_is_skipped(screen):
     screen.bus.emit(ev.LeadCheckAnnounced(pawn_id="", skipped=True))
     assert screen.status_bar.message
     settle(screen, frames=2)
+
+
+# ── Alter Ego reuses the opening overlay (stage 28) ──────────────────────────
+def _alter_ego_into(state, player):
+    """Deal Gamechanger through the real transformation path."""
+    deck = state.decks[settings.DECK_CHEST]
+    card = next(c for c in deck.draw_pile if c.title == "Gamechanger")
+    deck.draw_pile.remove(card)
+    state._after_draw(player, card)
+    player.add_card(card)
+    return card
+
+
+def test_alter_ego_reopens_the_colour_overlay(screen):
+    """The SAME overlay the match opens with, as the brief asked.
+
+    Nothing new was built for this: the screen already shows
+    ``match_start`` whenever the table is not playable, and an Alter Ego pause
+    is one more reason for that to be true.
+    """
+    state = screen.state
+    piotrek = state.player(state.piotrek_seat)
+    piotrek.secret_pawn = "czerwony"
+    state.eliminated_pawns = ["żółty", "różowy"]
+    card = _alter_ego_into(state, piotrek)
+
+    screen.submit(cmd.PlayCard(player_index=piotrek.index, card_uid=card.uid))
+    settle(screen)
+
+    assert screen.match_start.active, "the colour question is back on screen"
+    offered = {p["id"] for p in screen.match_start.pawns}
+    assert "czerwony" not in offered, "the colour just revealed is not offered"
+    assert "różowy" in offered, "and an old crossing no longer rules one out"
+    assert len(offered) == len(state.library.pawns) - 1
+
+
+def test_choosing_a_new_colour_resumes_the_table(screen):
+    """Hot-seat: the answer is applied locally and play carries on."""
+    state = screen.state
+    piotrek = state.player(state.piotrek_seat)
+    piotrek.secret_pawn = "czerwony"
+    card = _alter_ego_into(state, piotrek)
+    screen.submit(cmd.PlayCard(player_index=piotrek.index, card_uid=card.uid))
+    settle(screen)
+
+    index = next(i for i, p in enumerate(screen.match_start.pawns)
+                 if p["id"] != "czerwony")
+    target = screen.match_start.pawns[index]["id"]
+    click(screen, screen.match_start.rects[index].center)
+    settle(screen)
+
+    assert not screen.match_start.active
+    assert not state.awaiting_identity
+    assert piotrek.secret_pawn == target
+    assert state.eliminated_pawns == ["czerwony"]

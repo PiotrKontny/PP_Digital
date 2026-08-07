@@ -400,10 +400,13 @@ class Room:
         """
         if self.state is None:
             return [(peer_id, Message.error("Gra jeszcze się nie zaczęła"))]
-        if self.identity_settled:
+        swapping = self.state.identity_swap == self.state.SWAP_CHOOSING
+        if self.identity_settled and not swapping:
             return [(peer_id, Message.error("Kolor został już wybrany"))]
         if peer_id != self.identity_peer:
             return [(peer_id, Message.error("To nie ty wybierasz kolor"))]
+        if str(pawn_id) == self.state.swap_forbidden_pawn():
+            return [(peer_id, Message.error("Ten kolor został właśnie odkryty"))]
         if not self.state.set_piotrek_pawn(str(pawn_id)):
             return [(peer_id, Message.error("Nieznany kolor pionka"))]
         self.identity_settled = True
@@ -411,7 +414,14 @@ class Room:
         # which is exactly what keeps five replicas agreeing with a server
         # that knows something they do not.
         out: List[Outbound] = [(peer_id, Message.identity_accepted(str(pawn_id)))]
-        out.extend(self._authoritative(cmd.BeginMatch()))
+        if swapping:
+            # Alter Ego: the table is already playing and is merely paused, so
+            # it resumes rather than starting.  The resume is a COMMAND for the
+            # ordinary reason — every replica has to leave the pause on the same
+            # message rather than each guessing that the answer arrived.
+            out.extend(self._authoritative(cmd.FinishIdentitySwap()))
+        else:
+            out.extend(self._authoritative(cmd.BeginMatch()))
         return out
 
     # ── the command pipeline ─────────────────────────────────────────────────
@@ -475,7 +485,39 @@ class Room:
         out: List[Outbound] = []
         for followed in victory.review(self.state):
             out.extend(self._authoritative(followed))
+        out.extend(self.ask_for_new_identity())
         return out
+
+    def ask_for_new_identity(self) -> List[Outbound]:
+        """Alter Ego: hand the colour question back, minus the colour just left.
+
+        The SAME message the opening uses, so Piotrek's machine opens the same
+        overlay and nothing new had to be invented on either side — the only
+        difference is a shorter list of pawns.
+
+        Asked at most once per swap: ``identity_peer`` is cleared when the
+        answer arrives, so a swap that is already waiting does not re-ask on
+        every command the table would otherwise process (there are none, but a
+        reconnection still runs through here).
+        """
+        state = self.state
+        if state is None:
+            return []
+        if state.identity_swap != state.SWAP_CHOOSING:
+            return []
+        if self.identity_peer is not None and not self.identity_settled:
+            return []          # already asked, still waiting
+        seat = state.piotrek_seat
+        lobby_seat = next((s for s in self.lobby.seats if s.seat == seat), None)
+        if lobby_seat is None:
+            return []
+        self.identity_peer = lobby_seat.peer_id
+        self.identity_settled = False
+        forbidden = state.swap_forbidden_pawn()
+        pawns = [{"id": pawn.id, "name": pawn.name, "color": list(pawn.color)}
+                 for pawn in state.library.pawns if pawn.id != forbidden]
+        return [(self.identity_peer,
+                 Message.identity_required(pawns, room=self.code))]
 
     def _authoritative(self, command: cmd.Command) -> List[Outbound]:
         """Apply a command of the server's own, and log it like any other.

@@ -249,12 +249,17 @@ def test_troll_falls_back_to_a_movement_card(library):
 
 
 def test_a_forced_card_with_no_implementation_does_not_block_the_game(library):
-    """A card whose effect does not exist yet is played, discarded, and done.
+    """A card whose RULE does not exist yet is played, discarded, and done.
 
-    Four Chest cards gained effects in stage 27, so the card is now CHOSEN for
-    having none rather than taken off the top of the pile — the rule under test
-    is about an unimplemented effect, and picking one at random would quietly
-    stop testing it as the deck fills in.
+    The category this used to test — a card with no ``effect`` at all — no
+    longer exists, and its disappearance was the point of stage 28: a card with
+    no effect is not PLAYABLE, so a Chest card waiting on a ruling used to sit
+    in a hand refusing to be clicked.  Those cards now declare ``manual``, which
+    resolves to nothing and says so.
+
+    So the rule under test is unchanged and the card that demonstrates it moved:
+    a forced play of a card the engine carries out to no effect must still let
+    the turn loop continue.
     """
     state = make_game(library)
     troll = take(state, settings.DECK_MOVEMENT, "Troll")
@@ -263,7 +268,8 @@ def test_a_forced_card_with_no_implementation_does_not_block_the_game(library):
     player = state.player(seat)
     state.apply(cmd.DrawCard(player_index=seat, deck_id=settings.DECK_MOVEMENT))
     deck = state.decks[settings.DECK_CHEST]
-    chest = next(c for c in deck.draw_pile if c.effect is None)
+    chest = next(c for c in deck.draw_pile
+                 if c.effect is not None and c.effect.type == "manual")
     deck.draw_pile.remove(chest)
     player.hand.append(chest)
 

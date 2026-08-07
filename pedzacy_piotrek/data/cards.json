@@ -595,7 +595,10 @@
         {
           "title": "Nie masz Rosji",
           "text": "Zablokuj i spal dowolny ruch przeciwnika",
-          "count": 2
+          "count": 2,
+          "effect": {
+            "type": "manual"
+          }
         },
         {
           "title": "Gambit Patusa",
@@ -609,16 +612,26 @@
         {
           "title": "Shady",
           "text": "Odbierz innemu graczowi specjalną kartę",
-          "count": 2
+          "count": 2,
+          "effect": {
+            "type": "manual"
+          }
         },
         {
           "title": "Gejtos",
-          "text": "Wybierz pole: Mężczyzna - Przenieś pionki z sąsiadujących pól na to pole; Kobieta - Oddal pionki z sąsiadujących pól o jedno pole",
-          "count": 3
+          "text": "Wybierz opcję: Mężczyzna - przenieś pionki z sąsiadujących pól na to pole; Kobieta - oddal pionki z sąsiadujących pól o jedno pole.",
+          "count": 3,
+          "effect": {
+            "type": "gejtos",
+            "asks": true
+          }
         },
         {
           "title": "Gamechanger",
           "text": "Kingmaker - Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta; Alter Ego - Piotrek odkrywa swoją tożsamość i zmienia pionka",
+          "effect": {
+            "type": "manual"
+          },
           "presentation": {
             "type": "role_reveal",
             "delay": 1.0,
@@ -626,11 +639,17 @@
             "variants": {
               "piotrek": {
                 "title": "Alter Ego",
-                "text": "Piotrek odkrywa swoją tożsamość i zmienia pionka"
+                "text": "Piotrek odkrywa swoją tożsamość i zmienia pionka",
+                "effect": {
+                  "type": "swap_identity"
+                }
               },
               "hunter": {
                 "title": "Kingmaker",
-                "text": "Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta"
+                "text": "Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta",
+                "effect": {
+                  "type": "manual"
+                }
               }
             }
           },

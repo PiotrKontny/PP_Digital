@@ -210,13 +210,20 @@ def test_the_branch_questions_travel_as_choices(library):
     parties = [host, *clients]
     room = table.room(host.room_code)
 
-    doubled = [i for i in range(room.state.board.position_count)
-               if room.state.board.position(i).is_doubled]
-    if not doubled:
-        pytest.skip("this seed produced a board with no widened rows")
+    board = room.state.board
+    doubled = {i for i in range(board.position_count)
+               if board.position(i).is_doubled}
+    # A start whose ROUTE crosses a widened row.  Picking the first doubled
+    # position and hoping the next three are doubled too made this depend on
+    # where the generator happened to put them — and the room's seed is not the
+    # test's to choose, so "happened to" varied between runs.
+    start = next((i for i in range(board.last_position - 3)
+                  if doubled & {i + 1, i + 2, i + 3}), None)
+    if start is None:
+        pytest.skip("this board has no widened row along any three-field route")
 
     mover = "zielony"
-    pose(room, parties, [(mover, doubled[0])])
+    pose(room, parties, [(mover, start)])
     seat = room.state.active_player_index
     uid = deal_chest(room, parties, seat, "Dzieckorolka")
     actor = table.by_seat(host, clients)[seat]
@@ -240,11 +247,11 @@ def test_the_branch_questions_travel_as_choices(library):
         answers[pending.key] = str(pending.tiles[0])
         asked += 1
 
-    assert asked >= 1, "a board of widened rows must have asked at least once"
+    assert asked >= 1, "a route across a widened row must have asked at least once"
     assert [entry["kind"] for entry in room.command_log[before:]] == ["play_card"]
-    assert room.state.board.position_of_pawn(mover) == doubled[0] + 3
+    assert room.state.board.position_of_pawn(mover) == start + 3
     for service in parties:
-        assert service.state.board.position_of_pawn(mover) == doubled[0] + 3
+        assert service.state.board.position_of_pawn(mover) == start + 3
     assert all_agree(host, *clients)
     table.close()
 
