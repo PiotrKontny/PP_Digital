@@ -1,8 +1,8 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 26 — four settings tabs, chest opens on round 6, bigger
-              cards and type, and two pieces of feedback made visible
-              (see CHANGELOG_LLM.md)
+Last updated: stage 27 — a new Chest deck composition and the first four Chest
+              cards with real effects: Dzieckorolka, Rage Quit, Balbinka and
+              Gambit Patusa (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -79,8 +79,23 @@ WORKING:
 - CHEST RECIPIENTS (stage 23): a dealing round feeds TWO seats — Piotrek every
   time, plus the hunter the rota has reached.  Piotrek had never been dealt one
   by the engine despite the ribbon marking him since the chest existed.  The
-  chest deck is SIXTEEN cards (eight titles, two of each) because two cards a
+  chest deck was SIXTEEN cards (eight titles, two of each) because two cards a
   round need more supply than eight could give a full table.
+- CHEST DECK COMPOSITION (stage 27): SEVENTEEN cards, and no longer uniform —
+  Dzieckorolka 2, Rage Quit 2, Balbinka 2, Nie masz Rosji 2, Gambit Patusa 3,
+  Shady 2, Gejtos 3, Gamechanger 1.  Stage 23's doubling was uniform ON PURPOSE
+  so that fixing the supply did not move the odds; this composition moves them
+  deliberately, so the supply guarantee no longer follows from every title
+  having the same count and is asserted on its own.  These are DEFAULTS from
+  cards.json and are therefore also what the lobby shows.
+- CHEST CARD EFFECTS (stage 27): FOUR of the eight Chest titles now change the
+  game.  Dzieckorolka moves a chosen pawn three forward and sweeps up the top
+  pawn of every field it walks through, asking which half of every widened row
+  to take; Rage Quit swaps every occupied Mod Patusa slot for a fresh draw;
+  Balbinka moves every pawn two forward or back with no tower rule and random
+  widened halves; Gambit Patusa reverses every movement card for the WHOLE OF
+  THE NEXT ROUND.  Nie masz Rosji, Shady, Gejtos and Gamechanger are still
+  inert.  See "HOW THE CHEST CARD EFFECTS WORK".
 - Procedurally generated horizontal board with guaranteed field spacing,
   rivers, bridges, villages, forest, rocks, a starting camp and a finish banner.
 - Board positions vs fields: a widened row is ONE position holding two fields
@@ -206,15 +221,16 @@ WORKING:
   stacking every pawn on one field and having his at the bottom. A wrong tower
   crosses that colour off every notepad at once. Two different endings, with a
   reveal, a way back to the poczekalnia and a way out.
-- 647 automated tests.
+- 1044 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
   mod slot, but has no gameplay effect yet — its text still needs a ruling from
   the owner. The other seven all work (stages 24-25).
-- Cards whose effect requires a player decision (14 of 69 movement cards, all
-  chest cards). They are inert: they can be drawn and discarded, and their text
-  tells players what to do manually.
+- FOUR of the eight Chest titles: Nie masz Rosji, Shady (the chest one, not the
+  mod), Gejtos and Gamechanger.  They are inert — drawable and discardable, and
+  their text tells players what to do at the table.  Gamechanger additionally
+  has its role-reveal PRESENTATION and no gameplay effect (L4a).
 - Turn enforcement: any player can act at any time (deliberate, for testing).
 - Sound and music.
 
@@ -1288,6 +1304,174 @@ literal fives and fours.
 
 
 ================================================================================
+HOW THE CHEST CARD EFFECTS WORK  (stage 27)
+================================================================================
+
+Four of the eight Karty Skrzyni do something now.  READ THIS BEFORE ADDING THE
+OTHER FOUR — most of the machinery they will want is already here, and two of
+the four below exist only because a Chest card needed something the movement
+deck never did.
+
+A CHEST CARD IS NOT A MOVEMENT CARD, and that is load-bearing rather than
+incidental.  Masa solna, Halloween and Gambit Patusa are all gated on
+``ctx.from_movement_card`` (N103), so none of them touches anything below by
+construction.  A mod that shortens the movement deck must not silently shorten
+the Chest as well, and there is a test for it.
+
+None of the four added a command, a message type or a snapshot field.  They are
+ordinary ``PlayCard``s whose decisions ride in ``choices``, which is why none of
+them can desync and why reconnection needed nothing.
+
+
+DZIECKOROLKA — THE CARD THAT MADE WIDENED ROWS A DECISION
+---------------------------------------------------------
+``move_and_collect`` → the ``MoveAndCollect`` operation.  Three fields forward,
+taking the TOP pawn off every field walked THROUGH.
+
+**Every widened position on the route is a question.**  This is the one place
+D8a's shortcut does not apply.  Everywhere else an intermediate 12a/12b is
+settled by taking the nearer half, because nothing depends on where a pawn
+merely passed; here WHICH HALF IS WALKED DECIDES WHICH PAWN IS SWEPT, so each
+one is asked separately.  The keys are ``branch0``, ``branch1``, ``branch2``,
+numbered by STEP along the route rather than by position, so they are stable
+across resubmissions and no answer can overwrite another.  The destination is
+asked the same way rather than through the usual ``tile`` key — from the
+player's side it is the same question.
+
+**THE ORDER OF THE FINISHED TOWER IS THE RULE.**  A tile's ``stack`` is stored
+BOTTOM FIRST, and the tower read DOWNWARDS from the mover has to be the journey
+in order.  So, onto whoever was already standing on the destination:
+
+    1. the collected pawns in REVERSE travel order, last met lowest;
+    2. the mover;
+    3. anything that was riding on the mover when it set off.
+
+``MoveAndCollect.collected`` is in TRAVEL order and the executor reverses it.
+That single reversal is the whole subtlety.  The brief's example — green
+through blue-with-pink-on-top, then red, landing on yellow — is
+``[yellow, red, pink, green]`` bottom-first.
+
+This is not cosmetic.  **THE HUNTERS WIN BY CHECKING THE PAWN AT THE BOTTOM OF A
+TOWER**, so two machines with the same pawns in a different order disagree about
+who wins the match.  The multiplayer test asserts the whole board, not the
+positions.
+
+Collected pawns go UNDERNEATH the mover; riders stay ABOVE it.  Two different
+relationships to the same pawn, and getting them the same way round puts a
+passenger below the pawn carrying it.
+
+Taking the top can never break a tower — nothing is standing on it.  A field
+whose top pawn is FROZEN therefore yields NOTHING rather than the sweep reaching
+past it: "always take the top pawn" is the rule and digging underneath one would
+take a tower apart.
+
+Each collected pawn gets its OWN ``TokenWalked`` over the TAIL of the route,
+because it joins part way along.  Putting it in the leader's ``carried`` would
+send it backwards to the start of the route first — riders share every waypoint.
+
+
+RAGE QUIT
+---------
+``replace_mods`` → the ``ReplaceMods`` operation.  Thunderfuck's neighbour, and
+deliberately NOT Thunderfuck's operation: that one PUSHES a card in from the
+left and lets the rack shift, which is right for "draw a new mod" and wrong for
+"replace the ones in play".  Each occupied slot is written IN PLACE, the way
+``_settle_mod_side`` does, because the two factions own one slot each for the
+rest of the game (N85).
+
+**THE DRAWS HAPPEN BEFORE THE DISCARDS.**  A deck whose draw pile has run dry
+reshuffles its discard pile, so returning the outgoing mods first lets the card
+hand back the very cards it was played to be rid of.
+
+An EMPTY RACK does nothing at all and says so (N86, N99): the card exchanges
+what is ACTIVE, and before the first selection there is nothing to exchange.  An
+empty SLOT stays empty for the same reason — the rack must never be seeded with
+a mod nobody chose.
+
+``_sync_mod_states`` afterwards is not optional (N106/N107).  Two mods leave and
+two arrive in one command.
+
+
+BALBINKA
+--------
+``move_all_pawns``, built out of ``MoveBySteps`` with two new flags.
+
+**NOBODY IS CARRIED** (``carry_riders=False``, defaulting True so Plagiat! is
+untouched).  The tower rule would move a rider twice — once inside its tower and
+once in its own right — and the card says two fields, not four.
+
+That makes the ORDER load-bearing:
+
+  * going FORWARD the furthest pawn moves first, going BACKWARD the rearmost
+    does, so a pawn never lands on a field whose occupant has not yet left;
+  * within one field the BOTTOM pawn moves first, so a tower arrives in the
+    order it left.
+
+Only pawns already sharing a field can converge — two pawns a field apart stay a
+field apart when both move the same distance — so those two rules are the whole
+of it, except at the finish and the start where movement clamps and the pawn
+behind ends up on top.  That is ordinary stacking doing what it always does.
+
+**THE RANDOM HALF IS ROLLED BY THE EXECUTOR**, never the handler (N78):
+``MoveBySteps.random_branch`` → ``GameState._random_half``, from ``state.rng``.
+A die rolled in a handler would be re-rolled by every preview frame while the
+card was being dragged.  Only the DESTINATION is randomised; intermediate halves
+keep the nearer-half rule and consume no randomness at all, which is also what
+keeps the RNG in step across a table where nobody is crossing a widened row.
+
+
+GAMBIT PATUSA, AND WHY A ROUND IS NOT A NUMBER OF TURNS
+-------------------------------------------------------
+``reverse_movement`` → ``StatusKind.MOVEMENT_REVERSED``, on the TABLE.
+
+Piotrek takes every third slot, so ROUNDS DIFFER IN LENGTH and
+``Status.expires_after_turn`` — which is measured in turns — cannot express
+"next round, for one round".  The status therefore carries a round NUMBER in its
+payload and ``StatusTracker.movement_reversed_in(round)`` compares it.
+``_begin_round`` retires the ones already behind through
+``_expire_round_statuses``, and ``_set_round`` walks every round it crosses, so
+a jump cannot skip the retirement either.
+
+Granted with ``stack=True``.  Replacing would let a Gambit played DURING a
+reversed round cancel the reversal it was played under — they are separate
+promises about separate rounds.
+
+Applied in ``_move_pawn`` AND ``_move_pawns`` (N104).
+
+**SPEEDRUN ASKS ABOUT THE EFFECTIVE DIRECTION.**  A backward card under a Gambit
+is already travelling forwards, so offering to turn it round would be offering
+to undo the Gambit while describing it as undoing the card.  The order of the
+questions is now:
+
+    1. Gambit Patusa            (silent — a fact about the round)
+    2. Speedrun's direction     (only when the EFFECTIVE direction is backward)
+    3. which pawn
+    4. which half of a widened row
+
+and the sign is settled as: distance → Masa solna's cap → Gambit's flip →
+Speedrun's ``abs()``.  ``direction: "either"`` still never asks Speedrun.
+
+
+A DEPARTURE IS ABOUT THE CARD THAT LEFT
+---------------------------------------
+Stage 27 found this through Rage Quit and it is worth keeping.
+``_sync_mod_states`` used to ask *"does anything still hide?"* rather than *"did
+THIS mod leave?"*.  Rage Quit can replace a Shady with a Shady — there are two
+in the deck — and when it did, the first pawn stayed off the map FOR THE REST OF
+THE MATCH while the new arrival took a second one.  A stranded pawn cannot be
+moved, checked or won with.
+
+The ``HIDDEN`` status now records ``mod_uid`` and ``_restore_pawns_hidden_by``
+returns the pawns of departed mods BEFORE the arming loop, so a replacement
+picks its target from a complete board.  The blanket restore stays as the
+catch-all for a status recorded before the mod was noted on it.
+
+The bug was PRE-EXISTING — Thunderfuck could reach it too — and it is N107 with
+the wrong question asked.  The next mod that holds something will have the same
+shape.
+
+
+================================================================================
 THE SETTINGS PANEL  (stage 26)
 ================================================================================
 
@@ -2101,6 +2285,29 @@ KNOWN LIMITATIONS
   treats a mouse press during a rename as "confirm". See TEXT FIELDS for why
   this is a UI decision rather than a missing patch.
 
+L20. DECIDED, NOT SPECIFIED: Dzieckorolka does NOT sweep the field it LANDS on,
+    only the fields it walks through ("po drodze").  It makes no observable
+    difference today — a collected destination pawn would be re-inserted exactly
+    where it already was, since the collected group goes underneath the mover
+    and on top of whoever was there — so this is the reading that stays true if
+    the insertion rule ever changes rather than a behaviour the owner has to
+    confirm.  Worth knowing before anybody "fixes" it.
+
+L21. DECIDED, NOT SPECIFIED: Dzieckorolka does not consume ChatGPT's movement
+    bonus, and a frozen TOP pawn makes its field yield nothing rather than the
+    sweep reaching to the pawn beneath.  The first because the collection is
+    written against a route of exactly the printed length and a card whose
+    distance a skill could stretch would sweep a field its own text never
+    promised; the second because "always take the TOP pawn" is the rule and
+    digging underneath one takes a tower apart.  Both are one-line changes.
+
+L22. DECIDED, NOT SPECIFIED: Gambit Patusa reverses a ``direction: "either"``
+    card too, which is very nearly a no-op — the player simply picks the other
+    way at the prompt and gets what they wanted.  No card in the movement deck
+    declares ``either`` today, so nothing exercises it; if one ever does, the
+    question is whether the reversal should be described in the prompt or
+    skipped for cards that already let the player choose.
+
 L17. DECIDED, NOT SPECIFIED: Shady removes ONE pawn, and anything riding it
     stays where it was and settles onto the field. The brief says to remove
     "the BOTTOM pawn of that stack" and its own example removes one pawn (pink
@@ -2185,8 +2392,8 @@ L3c. A two-player game is playable end to end but not balanced, and its cadence
 L3a. (fixed in stage 8) The turn passes manually (any active player may hand it to anyone) — the
     cadence in turn_order.py is displayed but not enforced.
 L4. OUT OF DATE, kept for the history: those four movement cards were finished
-    in stage 19 and the mods in stages 24-25. What is still inert is AKO and
-    every CHEST card.
+    in stage 19, the mods in stages 24-25 and half the Chest in stage 27. What
+    is still inert is AKO and four Chest cards.
 L4a. Gamechanger, Alter Ego and Kingmaker are PRESENTATION ONLY — they have no
     gameplay effect yet, as the stage brief specified.
 L4b. PARTLY OUT OF DATE: SKIP_TURN has been enforced since stage 19. EXTRA_TURN
@@ -2195,8 +2402,9 @@ L4b. PARTLY OUT OF DATE: SKIP_TURN has been enforced since stage 19. EXTRA_TURN
 L5. OUT OF DATE: win detection landed in stage 17 (engine/victory.py) and the
     turn loop in stage 8. What is still missing is turn ENFORCEMENT as an
     optional rule switch, and scoring.
-L6. OUT OF DATE: seven of the eight mods work (stages 24-25). CHEST cards are
-    still text for humans, and that is the largest block of content left.
+L6. OUT OF DATE: seven of the eight mods work (stages 24-25) and FOUR of the
+    eight Chest cards work (stage 27). What is still text for humans is AKO,
+    plus Nie masz Rosji, Shady, Gejtos and Gamechanger.
 L7. "hindmost" ties are broken by (position index, stack depth, pawn order).
     This is deterministic but arbitrary; the paper game would have players
     decide.
@@ -3057,6 +3265,50 @@ N111. Never remove a pawn from play without asking what still counts it.
    fifth and the hunters can never check again, because they are being asked to
    gather a pawn that is not on the board.
 
+N118. Never let Dzieckorolka pick a widened half by itself. It is the ONE card
+   where D8a does not apply: which half it walks through decides which pawn it
+   sweeps up, so every doubled position on the route is a real question. The
+   keys are numbered by STEP (`branch0`, `branch1`), not by position, so two
+   questions cannot overwrite each other's answer.
+
+N119. Never reverse the collected list twice, and never store it bottom-first.
+   `MoveAndCollect.collected` is in TRAVEL order and the executor reverses it
+   once on the way into the stack, because a stack is stored bottom-first and
+   the rule is written downwards from the mover. Getting it the other way round
+   is invisible with one collected pawn and wrong with two — and it decides who
+   is at the BOTTOM of a tower, which is how the hunters win.
+
+N120. Never carry riders on a card that moves EVERY pawn. Balbinka moves each
+   pawn its own two fields, so a rider carried along AND moved in its own right
+   travels four. `MoveBySteps.carry_riders` is False there, and the move ORDER
+   (furthest first going forward, rearmost first going backward, bottom of a
+   tower before what stands on it) is what stops a pawn landing on a field its
+   occupant has not left yet.
+
+N121. Never express "for one round" as a turn expiry. A round is a VARIABLE
+   number of turns — Piotrek holds every third slot — so Gambit Patusa carries a
+   round NUMBER in its payload and `_begin_round` retires the spent ones. A
+   status that named a number of turns instead would end in the middle of the
+   round it was supposed to cover, and by a different amount at every table
+   size.
+
+N122. Never stack-vs-replace a round-scoped status by habit. Gambit Patusa uses
+   `stack=True` because a second one played DURING a reversed round is a promise
+   about a DIFFERENT round; replacing would let it cancel the reversal it was
+   played under. The default replace is still right for anything that refreshes
+   (a freeze), which is the distinction to check.
+
+N123. Never ask whether a RULE is still in the rack when what you mean is
+   whether a CARD left. `_sync_mod_states` asked "does anything still hide?" and
+   so a Rage Quit replacing a Shady with a Shady stranded the first pawn off the
+   map for the whole match. A departure is about the card that left: the HIDDEN
+   status records `mod_uid` and the restore matches on it.
+
+N124. Never assume a failing suite means the code is wrong. Stage 27 opened with
+   five failures on a tree nobody had touched, because the archive shipped a
+   half-applied `data/cards.json` naming handlers that did not exist. Diff the
+   tree against the archive before debugging.
+
 N104. Never add a rule to `_move_pawn` without asking whether `_move_pawns`
    needs it too. Plagiat! moves backwards through the second handler, so
    Speedrun, Masa solna and Halloween all had to be applied twice. A rule added
@@ -3119,18 +3371,26 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    (double_frequency, edit_mode).  Both normalised() and create_game() use
    dataclasses.replace now, and a test walks every field — keep it that way.
 
-1. CHEST CARD EFFECTS — the largest block of content left, and now the
-   clearest next stage. (This entry used to read "THE CHECKING MECHANIC";
-   that shipped in stage 17 and the note was seven stages stale — see N105.
-   Glockboy and Ice Block are waiting on a DECISION about how they interact
-   with checking, not on checking itself.)
-2. Effects for the remaining chest cards. THE MOVEMENT DECK IS NOW
-   COMPLETE (stage 19 finished Troll, Stańczyk, Spy and Plagiat!). Most of
-   what remains is a JSON entry plus at most one handler — and before writing
-   the handler, read TURN INTERRUPTS, FORCED PLAYS AND MULTI-SELECT, because
-   "act when drawn", "take over a turn", "look into another hand", "move
-   several pawns in order" and "steal a card" ALL ALREADY EXIST and are
-   parameterised. Check whether an existing effect type covers it first.
+1. THE REMAINING FOUR CHEST CARDS — Nie masz Rosji, Shady, Gejtos and
+   Gamechanger. Stage 27 did the other four and built most of what these will
+   want; read "HOW THE CHEST CARD EFFECTS WORK" first, then TURN INTERRUPTS,
+   FORCED PLAYS AND MULTI-SELECT, because "act when drawn", "take over a
+   turn", "look into another hand", "move several pawns in order" and
+   "steal a card" ALL ALREADY EXIST and are parameterised. Check whether an
+   existing effect type covers it before writing a handler.
+   Two of the four need a RULING from the owner rather than machinery:
+     * "Nie masz Rosji" — blocking and burning an opponent's move needs to say
+       WHICH move, chosen WHEN, and what happens if that player has none. The
+       nearest existing mechanism is a TURN_INTERRUPT plus a forced discard.
+     * Gamechanger / Alter Ego / Kingmaker — swapping roles mid-match touches
+       the hidden identity, which is the one thing the server alone knows
+       (N71/N73). It is not a card effect so much as a change to how the secret
+       is held, and it should not be attempted casually.
+   Gejtos ("Mężczyzna" gathers neighbours onto a field, "Kobieta" pushes
+   them away) is the closest to ready: it is a tile choice plus an option, and
+   ``MoveBySteps`` already moves several pawns against a board each move leaves.
+2. Effects for the remaining chest cards. THE MOVEMENT DECK IS COMPLETE
+   (stage 19 finished Troll, Stańczyk, Spy and Plagiat!).
 3. Server-side hidden-information filtering (L1). Transport, lobby and online
    play are DONE (stage 11).
 4. Chest and mod effects (they interact with movement, so do them after 1–2).
@@ -3147,7 +3407,7 @@ by name, so a new card or effect needs no networking work at all.
 HOW TO VERIFY A CHANGE
 ================================================================================
 
-    python -m pytest -q                     # 995 tests, ~150 s
+    python -m pytest -q                     # 1044 tests, ~165 s
       tests/test_visual_style.py     — palette, panel bevels, button states,
                                        and (stage 12) that no highlight is a
                                        disc, that a bloom stays near its edge,
@@ -3188,6 +3448,29 @@ HOW TO VERIFY A CHANGE
                                    elimination mark, and the heading-collision
                                    regression (which RENDERS and reads back
                                    what was drawn — see N114)
+      tests/test_chest_effects.py — the stage 27 Chest cards: the deck
+                                   composition against the data file and the
+                                   lobby defaults, that every title is still
+                                   reachable (Gamechanger is down to ONE copy),
+                                   Dzieckorolka's tower order against the
+                                   brief's own example, one pawn per field and
+                                   only the top one, a question per widened row
+                                   with distinct keys, riders above and
+                                   collected below, Rage Quit replacing both
+                                   slots without handing back what it discarded
+                                   and doing nothing to an empty rack, Balbinka
+                                   moving a tower two without moving a rider
+                                   four, and Gambit Patusa firing a round late,
+                                   lapsing by itself, sparing chest cards and
+                                   reaching BOTH movement handlers
+      tests/test_chest_effects_sync.py — the same four across a real server:
+                                   identical towers on every replica (the
+                                   BOTTOM of a tower is how the hunters win, so
+                                   this asserts the whole board), the branch
+                                   questions travelling as ``choices``, the
+                                   random halves coming out the same everywhere,
+                                   and that not one of the four needed a command
+                                   of its own
       tests/test_mod_effects.py  — Paczka, Squid Game and Shady: the rules
                                    coming from the JSON, Paczka's list and its
                                    empty case, Squid Game arming a round late

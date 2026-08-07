@@ -147,6 +147,57 @@ class MoveBySteps(Operation):
     steps: int
     chosen_tile: Optional[int] = None
     preview_tiles: Tuple[int, ...] = ()
+    #: Whether the pawns riding on this one travel with it.  True is the tower
+    #: rule and the default.  Balbinka moves EVERY pawn its own two fields, so
+    #: it turns this off: a rider carried along AND moved in its own right would
+    #: travel four, and the card says two.
+    carry_riders: bool = True
+    #: Let the executor pick the half of a widened destination at random rather
+    #: than asking (Balbinka: "no player input").  It has to be the executor
+    #: because randomness may never be consumed by a handler (N78) — the
+    #: interface resolves handlers to draw previews while a card is dragged.
+    random_branch: bool = False
+
+
+@dataclass(frozen=True)
+class MoveAndCollect(Operation):
+    """Walk a pawn, sweeping up one pawn from every field it passes through.
+
+    Dzieckorolka.  :class:`MovePawn` cannot express it, and not only because it
+    moves other pawns: the ORDER of the resulting tower is the rule.  The pawns
+    picked up hang below the mover in the order they were met, so the finished
+    stack reads as a record of the journey — first collected nearest the top.
+
+    ``collected`` is in TRAVEL ORDER.  The executor reverses it on the way into
+    the stack, because a stack is stored bottom-first and the travel order is
+    read downwards from the mover.
+    """
+
+    pawn_id: str
+    from_index: int
+    route: Tuple[int, ...]
+    tiles: Tuple[int, ...] = ()
+    carried: Tuple[str, ...] = ()
+    #: Pawns swept up along the way, in the order the mover met them.
+    collected: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReplaceMods(Operation):
+    """Swap every occupied Mod Patusa slot for a fresh draw (Rage Quit).
+
+    Thunderfuck's neighbour, and deliberately NOT Thunderfuck's operation: that
+    one PUSHES a single card in from the left and lets the rack shift, which is
+    right for "draw a new mod" and wrong for "replace the ones in play".  This
+    writes each occupied slot in place, the way the faction selection does, so
+    Piotrek's slot stays Piotrek's and the hunters' stays theirs.
+
+    An EMPTY slot is left empty.  The card exchanges what is ACTIVE, and
+    seeding the rack with a mod nobody chose is exactly what N86 exists to
+    prevent.
+    """
+
+    deck_id: str = "mods"
 
 
 @dataclass(frozen=True)
@@ -506,7 +557,7 @@ def preview_tiles(state, result: Resolution) -> Tuple[int, ...]:
     if isinstance(result, Plan):
         tiles: List[int] = []
         for op in result.operations:
-            if isinstance(op, MovePawn):
+            if isinstance(op, (MovePawn, MoveAndCollect)):
                 tiles.extend(op.tiles)
             elif isinstance(op, MoveBySteps):
                 tiles.extend(op.preview_tiles)
@@ -790,23 +841,44 @@ def _capped_steps(ctx: EffectContext, steps: int) -> int:
     return cap if steps > 0 else -cap
 
 
+def direction_is_flipped(ctx: EffectContext) -> bool:
+    """Whether Gambit Patusa is turning every movement card around this round.
+
+    A CHEST card's rule about MOVEMENT CARDS, so it is gated on
+    :attr:`EffectContext.from_movement_card` exactly as Masa solna and
+    Halloween are (N103) — a character ability that happens to move a pawn is
+    not a movement card, and neither is Dzieckorolka.
+    """
+    return ctx.from_movement_card and ctx.state.movement_reversed
+
+
 def _speedrun_reversal(spec: EffectSpec, ctx: EffectContext,
-                       key: str = "speedrun") -> Resolution:
+                       key: str = "speedrun", flipped: bool = False) -> Resolution:
     """Ask whether a backward card should be turned around (Speedrun).
 
     Returns ``True`` when the player chose to go forward, ``False`` to keep the
     printed direction, or a :class:`Choice` when nobody has been asked yet.
 
-    ONLY cards that naturally move backwards ask.  ``direction: "either"`` does
-    not count as backward: those cards already let the player pick the way, and
-    a second question about the same decision would be asked and answered
-    twice.  A forward card never asks at all.
+    ONLY cards that move backwards ask.  ``direction: "either"`` does not
+    count: those cards already let the player pick the way, and a second
+    question about the same decision would be asked and answered twice.  A
+    forward card never asks at all.
+
+    ``flipped`` is Gambit Patusa, and it is the EFFECTIVE direction that
+    decides whether Speedrun speaks — not the printed one.  A backward card
+    under a Gambit is already travelling forwards, so offering to turn it round
+    would be offering to undo the Gambit while describing it as undoing the
+    card.  The two rules compose the other way instead: Speedrun asks about
+    what the card is actually about to do.
 
     Callers must resolve this BEFORE the pawn question — the order of the
     prompts is part of the rules: direction, then pawn, then which half of a
     widened row.
     """
-    if not spec.is_backward or not ctx.state.reverses_backward_moves:
+    if spec.direction == "either":
+        return False
+    backward = spec.is_backward != flipped
+    if not backward or not ctx.state.reverses_backward_moves:
         return False
     if not ctx.can_ask:
         # Nobody to ask (a card played by another card).  Speedrun only ever
@@ -816,6 +888,9 @@ def _speedrun_reversal(spec: EffectSpec, ctx: EffectContext,
     answer = ctx.choice(key)
     if answer in ("forward", "backward"):
         return answer == "forward"
+    because = ("Gambit Patusa cofa tę kartę, ale Speedrun pozwala ją odwrócić"
+               if flipped else
+               "ta karta cofa pionki, ale Speedrun pozwala ją odwrócić")
     return Choice(
         key=key, kind="option",
         prompt="Speedrun — wybierz kierunek",
@@ -823,7 +898,7 @@ def _speedrun_reversal(spec: EffectSpec, ctx: EffectContext,
             ChoiceOption(id="backward", label="Do tyłu"),
             ChoiceOption(id="forward", label="Do przodu"),
         ),
-        description="ta karta cofa pionki, ale Speedrun pozwala ją odwrócić",
+        description=because,
     )
 
 
@@ -900,8 +975,12 @@ def _move_pawn(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     """
     state = ctx.state
 
+    # 0) Gambit Patusa, which asks nothing: it is a fact about the round, and
+    #    it is settled first because Speedrun's question depends on it.
+    flipped = direction_is_flipped(ctx)
+
     # 1) Speedrun — before the pawn question.
-    reversed_direction = _speedrun_reversal(spec, ctx)
+    reversed_direction = _speedrun_reversal(spec, ctx, flipped=flipped)
     if isinstance(reversed_direction, (Choice, Refusal, NotAvailable)):
         return reversed_direction
 
@@ -918,9 +997,13 @@ def _move_pawn(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     if isinstance(steps, (Choice, Refusal, NotAvailable)):
         return steps
 
-    # Masa solna shortens the card, Speedrun may turn it around.  Distance
-    # first, then direction, so the two never fight over the sign.
+    # Masa solna shortens the card; Gambit Patusa then turns it around, and
+    # Speedrun may turn it back.  Distance first, then direction, so the three
+    # never fight over the sign — and the DISTANCE is untouched by both
+    # reversals, which is what "kierunek" means on either card.
     steps = _capped_steps(ctx, steps)
+    if flipped:
+        steps = -steps
     if reversed_direction:
         steps = abs(steps)
 
@@ -1507,15 +1590,19 @@ def _move_pawns(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     wanted = max(1, int(spec.get("count", 2)))
     key = str(spec.get("choice_key", "pawns"))
 
-    # Speedrun first, exactly as for a single-pawn card: the direction question
-    # comes before the pawn question.  Plagiat! moves backwards, so it is a
-    # card Speedrun turns around — it reaching a different handler is an
-    # implementation detail and must not make it behave differently.
-    reversed_direction = _speedrun_reversal(spec, ctx)
+    # Gambit Patusa and Speedrun, in that order and for the same reasons as in
+    # ``_move_pawn``.  Plagiat! moves backwards through THIS handler, so every
+    # rule about direction has to be written here as well or the two paths
+    # drift apart and the difference only shows on the one card that takes this
+    # route (N104).
+    flipped = direction_is_flipped(ctx)
+    reversed_direction = _speedrun_reversal(spec, ctx, flipped=flipped)
     if isinstance(reversed_direction, (Choice, Refusal, NotAvailable)):
         return reversed_direction
 
     steps = _capped_steps(ctx, spec.signed_steps)
+    if flipped:
+        steps = -steps
     if reversed_direction:
         steps = abs(steps)
 
@@ -1622,4 +1709,304 @@ def _move_pawns(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     return Plan(
         tuple(operations),
         f"{' → '.join(names)}: {abs(steps)} {fields_word(abs(steps))} {way}",
+    )
+
+
+# ── the Karty Skrzyni ────────────────────────────────────────────────────────
+# A chest card is NOT a movement card.  Everything below therefore escapes Masa
+# solna, Halloween and Gambit Patusa by construction, because all three are
+# gated on ``ctx.from_movement_card`` (N103) and ``deck_id`` here is "chest".
+# That is a rule, not an oversight: a mod that shortens the movement deck must
+# not silently shorten the Chest as well.
+def _branch_key(step: int) -> str:
+    """Where the answer to "which half of this widened row?" is stored.
+
+    Keyed by the STEP along the route rather than by the position index, so the
+    keys are 0, 1, 2 whatever part of the board the pawn is on — and stable
+    across the resubmissions, because the route is fixed once the pawn is
+    known.  A card that asks twice must not be able to overwrite its own first
+    answer, which is the same reasoning ``_move_pawns`` uses for ``pawns_tile0``.
+    """
+    return f"branch{step}"
+
+
+def _walk_with_branches(
+    state, pawn_id: str, route: Sequence[int], ctx: EffectContext,
+) -> Resolution:
+    """Choose the concrete field for every position along a route, asking.
+
+    The ordinary rule (D8a) picks the nearer half of an intermediate widened
+    row by itself, because nothing depends on where a pawn merely passed
+    through.  Dzieckorolka is the card that makes it depend: which half it
+    walks through decides WHICH PAWN it sweeps up, so every widened position on
+    the route is a real decision and each one is asked separately.
+
+    Returns the tuple of field indices, or the first unanswered
+    :class:`Choice`.
+    """
+    board = state.board
+    current = board.pawn_tile(pawn_id)
+    previous = current.position if current is not None else board.camp_position(0)
+
+    tiles: List[int] = []
+    for step, position_index in enumerate(route):
+        position = board.position(position_index)
+        if position is None or not position.tiles:
+            continue
+        if not position.is_doubled:
+            tile = position.tiles[0]
+        else:
+            key = _branch_key(step)
+            answer = ctx.choice(key)
+            valid = {t.index: t for t in position.tiles}
+            if answer is not None and int(answer) in valid:
+                tile = valid[int(answer)]
+            else:
+                halves = " albo ".join(t.label for t in position.tiles)
+                return Choice(
+                    key=key, kind="tile",
+                    prompt=f"Wybierz drogę: {halves}",
+                    options=tuple(
+                        ChoiceOption(id=str(t.index), label=t.label, tile=t.index)
+                        for t in position.tiles
+                    ),
+                    description=f"krok {step + 1} z {len(route)} — "
+                                f"zabierzesz pionka z wybranego pola",
+                )
+        tiles.append(tile.index)
+        previous = tile.position
+    return tuple(tiles)
+
+
+@effect("move_and_collect")
+def _move_and_collect(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Dzieckorolka: move a pawn forward, sweeping up one pawn per field.
+
+    Three rules, and the third is the one worth reading twice:
+
+    1. ONE pawn per field, and it is the TOP one.  Taking the top can never
+       disturb a tower, because by definition nothing is standing on it.
+    2. Fields the pawn walks THROUGH are swept; the field it lands on is an
+       ordinary landing.  The two are indistinguishable in the finished stack —
+       a collected destination pawn would be inserted exactly where it already
+       was — so this is the reading that matches "po drodze" without changing
+       any outcome.
+    3. THE ORDER OF THE FINISHED TOWER IS THE PATH.  Reading downwards from the
+       mover: first collected, then second, then whoever was already standing
+       on the destination.  ``collected`` is therefore in travel order and the
+       executor reverses it into the stack.
+
+    The card is a Chest card, so no Mod Patusa touches it, and it does not
+    consume ChatGPT's movement bonus either: the collection is written against
+    a route of exactly the printed length, and a card whose distance a skill
+    could stretch would sweep a field its own text never promised.
+    """
+    state = ctx.state
+    steps = abs(int(spec.get("steps", 3)))
+
+    pawn_id = _movement_target(spec, ctx)
+    if isinstance(pawn_id, (Choice, Refusal, NotAvailable)):
+        return pawn_id
+    if pawn_id is None:
+        return Refusal("Nie ma pionka, który mógłby się poruszyć")
+    if state.library.pawn(pawn_id) is None:
+        raise EffectError(f"Efekt wskazuje nieznany pionek: {pawn_id!r}")
+
+    name = pawn_name(state, pawn_id)
+    if is_hidden(state, pawn_id):
+        return Plan(
+            (Fizzle(f"Shady: pionek {name} zniknął z mapy", pawn_id),),
+            f"{name}: poza mapą",
+        )
+    if state.statuses.pawn_has(StatusKind.FROZEN, pawn_id):
+        return Refusal(f"Pionek {name} jest zamrożony")
+
+    start = pawn_index(state, pawn_id)
+    route = route_between(state, start, steps)
+    if not route:
+        return Refusal(f"Pionek {name} jest już na mecie")
+
+    allowed = state.statuses.movement_range()
+    if allowed is not None and not (allowed[0] <= route[-1] <= allowed[1]):
+        return Refusal(f"Ruch ograniczony do pól {allowed[0] + 1}–{allowed[1] + 1}")
+
+    tiles = _walk_with_branches(state, pawn_id, route, ctx)
+    if isinstance(tiles, (Choice, Refusal, NotAvailable)):
+        return tiles
+
+    riders = travellers(state, pawn_id)
+    collected: List[str] = []
+    passed_over: List[str] = []
+    for tile_index in tiles[:-1]:
+        tile = state.board.tile(tile_index)
+        if tile is None or not tile.stack:
+            continue
+        top = tile.stack[-1]
+        if top == pawn_id or top in riders:
+            continue
+        # A frozen pawn may not move, and being swept up IS being moved.  The
+        # field simply yields nothing rather than the sweep reaching past the
+        # top pawn, because "always take the TOP pawn" is the rule and digging
+        # underneath one would take a tower apart.
+        if state.statuses.pawn_has(StatusKind.FROZEN, top):
+            passed_over.append(f"{pawn_name(state, top)} (zamrożony)")
+            continue
+        collected.append(top)
+
+    description = f"{name}: {len(route)} {fields_word(len(route))} do przodu"
+    if collected:
+        description += (" — zabiera: "
+                        + ", ".join(pawn_name(state, p) for p in collected))
+    if passed_over:
+        description += f" (pomija: {', '.join(passed_over)})"
+
+    return Plan(
+        (MoveAndCollect(
+            pawn_id=pawn_id,
+            from_index=start,
+            route=route,
+            tiles=tuple(tiles),
+            carried=riders,
+            collected=tuple(collected),
+        ),),
+        description,
+    )
+
+
+@effect("move_all_pawns")
+def _move_all_pawns(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Balbinka: every pawn moves the same distance, the player picks the way.
+
+    NOBODY IS CARRIED.  The tower rule would move a rider twice — once inside
+    its tower and once in its own right — and the card says two fields, not
+    four.  Each pawn therefore travels alone, which is also why the ORDER
+    matters and is not arbitrary:
+
+    * going FORWARD the furthest pawn moves first, going BACKWARD the rearmost
+      does, so a pawn never lands on a field whose occupant has not yet left.
+      Get this wrong and the occupant, moving later, walks out from underneath
+      a tower it acquired in between;
+    * within one field the bottom pawn moves first, so a tower arrives in the
+      order it left.
+
+    Only pawns already sharing a field can converge (two pawns a field apart
+    stay a field apart when both move the same distance), so those two rules
+    are the whole of it — except at the finish and the start, where movement
+    clamps and the pawn behind ends up on top of the pawn in front.  That is
+    the ordinary stacking rule doing what it always does.
+
+    The widened rows are decided by the executor, at random and with no
+    prompt: a card that moved six pawns would otherwise ask six questions
+    nobody has an interesting answer to.
+    """
+    state = ctx.state
+    distance = max(1, abs(int(spec.get("steps", 2))))
+
+    if spec.direction == "either":
+        answer = ctx.choice("direction")
+        if answer not in ("forward", "backward"):
+            return Choice(
+                key="direction", kind="option",
+                prompt="Balbinka — wybierz kierunek",
+                options=(
+                    ChoiceOption(id="forward", label="Do przodu"),
+                    ChoiceOption(id="backward", label="Do tyłu"),
+                ),
+                description=f"wszystkie pionki ruszą o {distance} "
+                            f"{fields_word(distance)}",
+            )
+        steps = distance if answer == "forward" else -distance
+    else:
+        steps = -distance if spec.is_backward else distance
+
+    random_branch = bool(spec.get("random_branch", True))
+    forward = steps > 0
+
+    movers: List[Tuple[int, int, int, str]] = []
+    for order, pawn in enumerate(live_pawns(state)):
+        index = pawn_index(state, pawn.id)
+        depth = state.board.stack_depth(pawn.id) if index != CAMP_INDEX else 0
+        # Furthest first going forward, rearmost first going backward; bottom
+        # of a tower before the pawns standing on it, either way.
+        rank = -index if forward else index
+        movers.append((rank, depth, order, pawn.id))
+    movers.sort()
+
+    operations: List[Operation] = []
+    moved: List[str] = []
+    blocked: List[str] = []
+    for _, _, _, pawn_id in movers:
+        name = pawn_name(state, pawn_id)
+        if state.statuses.pawn_has(StatusKind.FROZEN, pawn_id):
+            blocked.append(f"{name} (zamrożony)")
+            continue
+        if not route_between(state, pawn_index(state, pawn_id), steps):
+            continue
+        operations.append(MoveBySteps(
+            pawn_id=pawn_id, steps=steps,
+            carry_riders=False, random_branch=random_branch,
+        ))
+        moved.append(name)
+
+    way = "do przodu" if forward else "do tyłu"
+    if not operations:
+        return Plan(
+            (Fizzle("Żaden pionek nie może się ruszyć"),),
+            f"Balbinka: bez ruchu {way}",
+        )
+    description = (f"Wszystkie pionki: {distance} {fields_word(distance)} {way}"
+                   f" ({len(moved)})")
+    if blocked:
+        operations.append(Fizzle(f"Bez ruchu: {', '.join(blocked)}"))
+    return Plan(tuple(operations), description)
+
+
+@effect("replace_mods")
+def _replace_mods(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Rage Quit: both active Mods Patusa are thrown away and redrawn.
+
+    Thunderfuck's rule for an EMPTY rack applies here for the same reason: this
+    card exchanges what is in PLAY, and before the first selection there is
+    nothing in play to exchange.  Seeding the rack with a mod nobody chose is
+    what N86 exists to prevent, so an empty rack resolves the card, discards it
+    and says why (N99).
+    """
+    if not ctx.state.active_mods:
+        return Plan(
+            (Fizzle("Rage Quit: żaden Mod Patusa nie jest aktywny"),),
+            "bez efektu",
+        )
+    return Plan(
+        (ReplaceMods(deck_id=str(spec.get("deck", "mods"))),),
+        "Wymiana Modów Patusa",
+    )
+
+
+@effect("reverse_movement")
+def _reverse_movement(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Gambit Patusa: next round, every movement card runs the other way.
+
+    NOT immediately — ``delay_rounds`` is 1 — and for exactly one round, after
+    which it lapses on its own.  Both facts live in the payload as a round
+    NUMBER rather than in an expiry, because statuses expire by TURN and a
+    round is a variable number of turns: Piotrek takes every third slot, so
+    rounds differ in length and "one round" is not a number of turns at all.
+
+    Granted with ``stack=True``.  Replacing would let a second Gambit, played
+    DURING the round the first one reversed, cancel the reversal it is being
+    played under — the two are separate promises about two separate rounds.
+    """
+    state = ctx.state
+    delay = max(0, int(spec.get("delay_rounds", 1)))
+    target = state.round_number + delay
+    return Plan(
+        (GrantStatus(
+            Status.for_table(
+                StatusKind.MOVEMENT_REVERSED,
+                data={"round": target},
+                source=ctx.source,
+            ),
+            stack=True,
+        ),),
+        f"Runda {target}: karty ruchu działają odwrotnie",
     )

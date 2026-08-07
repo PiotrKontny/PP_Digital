@@ -397,6 +397,19 @@ class GameState:
         """True while a mod takes the leading pawn off the map (Shady)."""
         return bool(self.mod_rule("hide_leader", False))
 
+    # ── the Chest card that changes a whole round (Gambit Patusa) ────────────
+    @property
+    def movement_reversed(self) -> bool:
+        """True while every movement card travels the opposite way.
+
+        Deliberately NOT a ``mod_rule``: Gambit Patusa is a Chest card, not a
+        Mod Patusa, so its rule is not something the rack can answer.  It is a
+        promise made in one round about the NEXT one, which is why it lives in
+        a status carrying a round number — and why it needs no bookkeeping to
+        end, since a status naming round 7 simply stops matching in round 8.
+        """
+        return self.statuses.movement_reversed_in(self.round_number)
+
     # ── pawns that are not on the map (Shady) ────────────────────────────────
     def pawn_is_hidden(self, pawn_id: str) -> bool:
         """Whether this pawn has been taken off the map for a round.
@@ -1047,6 +1060,11 @@ class GameState:
         self.round_number = max(1, round_number)
         self.turn_slot = 0
         events: List[ev.GameEvent] = [ev.RoundChanged(self.round_number)]
+        # A Gambit Patusa that named a round now behind us is spent.  Round
+        # scope cannot ride on ``expires_after_turn`` — a round is a variable
+        # number of turns — so the round loop retires them itself.  ``_set_round``
+        # walks every round it crosses, so a jump cannot skip this either.
+        events.extend(self._expire_round_statuses())
         events.extend(self._restore_hidden_pawns(before_round=self.round_number))
         events.extend(self._arm_lead_check())
         events.extend(self._open_mod_selection())
@@ -1285,7 +1303,8 @@ class GameState:
         events: List[ev.GameEvent] = []
         present = {card.uid: card for card in self.active_mods}
 
-        for uid in [uid for uid in self.armed_mods if uid not in present]:
+        departed = [uid for uid in self.armed_mods if uid not in present]
+        for uid in departed:
             del self.armed_mods[uid]
 
         # A departure can remove the rule that a pending check depends on.  The
@@ -1293,9 +1312,16 @@ class GameState:
         # mod is gone.
         if not self.lead_check_only and self.pending_lead_check is not None:
             self.pending_lead_check = None
-        # Nothing on the table may keep a pawn off the map, so anybody Shady is
-        # still holding comes back at once.  Without this, replacing Shady mid
-        # round would strand a pawn nowhere for the rest of the match.
+        # A pawn is held off the map by ONE PARTICULAR mod, so it comes back
+        # when THAT mod leaves — even when another card with the same rule is
+        # still in the rack.  Rage Quit can replace a Shady with a Shady, and
+        # asking only whether the rack still hides SOMEBODY would leave the
+        # first pawn off the board for the rest of the match while the new
+        # arrival took a second one.
+        events.extend(self._restore_pawns_hidden_by(departed))
+        # Nothing on the table may keep a pawn off the map, so anybody still
+        # held when no mod hides at all comes back too.  This also covers a
+        # status recorded before the mod was noted on it.
         if not self.hides_leader:
             events.extend(self._restore_hidden_pawns())
 
@@ -1304,6 +1330,26 @@ class GameState:
                 continue
             self.armed_mods[uid] = self.round_number
             events.extend(self._arm_mod(card))
+        return events
+
+    def _restore_pawns_hidden_by(self, mod_uids: Sequence[int]
+                                 ) -> List[ev.GameEvent]:
+        """Put back every pawn taken off the map by one of these mods.
+
+        Runs BEFORE the arming loop, so a replacement Shady chooses its own
+        target from a complete board rather than from one the outgoing card was
+        still holding a hole in.
+        """
+        if not mod_uids:
+            return []
+        wanted = {int(uid) for uid in mod_uids}
+        events: List[ev.GameEvent] = []
+        for status in list(self.statuses.of_kind(StatusKind.HIDDEN)):
+            owner = status.data.get("mod_uid")
+            if owner is None or int(owner) not in wanted:
+                continue
+            self.statuses.discard(status)
+            events.extend(self._return_pawn_to_rear(status.subject_id, status))
         return events
 
     def _arm_mod(self, card: Card) -> List[ev.GameEvent]:
@@ -1317,7 +1363,7 @@ class GameState:
         if card.passive.get("reveal_chest"):
             events.append(self._chest_reveal_event())
         if card.passive.get("hide_leader"):
-            events.extend(self._hide_leading_pawn())
+            events.extend(self._hide_leading_pawn(card.uid))
         return events
 
     # ── Paczka: every Chest card is face up ──────────────────────────────────
@@ -1372,7 +1418,8 @@ class GameState:
             return None
         return next(pawn for pawn in best_tile.stack if pawn in visible)
 
-    def _hide_leading_pawn(self) -> List[ev.GameEvent]:
+    def _hide_leading_pawn(self, mod_uid: Optional[int] = None
+                           ) -> List[ev.GameEvent]:
         """Take the leading pawn off the map, remembering how to put it back.
 
         Only the ONE pawn leaves.  Anything riding on it stays exactly where it
@@ -1397,7 +1444,11 @@ class GameState:
         self.statuses.add(Status.for_pawn(
             StatusKind.HIDDEN, pawn_id,
             data={"riders": riders, "round": self.round_number,
-                  "tile": None if tile is None else tile.index},
+                  "tile": None if tile is None else tile.index,
+                  # WHICH mod is holding this pawn.  Without it a departing
+                  # Shady can only be recognised by "does anything still hide?",
+                  # which is the wrong question when one Shady replaces another.
+                  "mod_uid": mod_uid},
             source="Shady",
         ))
         return [ev.PawnHidden(pawn_id=pawn_id, riders=riders,
@@ -1827,16 +1878,173 @@ class GameState:
         route = effects.route_between(self, start, op.steps)
         if not route:
             return []
+        chosen = op.chosen_tile
+        if chosen is None and op.random_branch:
+            chosen = self._random_half(route[-1])
         return self._op_move_pawn(
             effects.MovePawn(
                 pawn_id=op.pawn_id,
                 from_index=start,
                 route=route,
-                tiles=effects.tile_route(self, op.pawn_id, route, op.chosen_tile),
-                carried=effects.travellers(self, op.pawn_id),
+                tiles=effects.tile_route(self, op.pawn_id, route, chosen),
+                carried=(effects.travellers(self, op.pawn_id)
+                         if op.carry_riders else ()),
             ),
             actor,
         )
+
+    def _random_half(self, position_index: int) -> Optional[int]:
+        """Pick a half of a widened destination with the seeded RNG (Balbinka).
+
+        Here rather than in the handler because a handler may never consume
+        randomness (N78): the interface resolves handlers to preview a card
+        while it is being dragged, and a die rolled there would change what the
+        card does every frame.  Every replica applies the same commands in the
+        same order against the same board, so every replica draws the same
+        halves in the same sequence.
+
+        Only the DESTINATION is randomised.  Which half a pawn merely passed
+        through decides nothing (D8a), so the intermediate steps keep the
+        ordinary nearer-half rule and consume no randomness at all — a rule
+        that also keeps the RNG in step with a table where nobody is moving
+        across a widened row.
+        """
+        position = self.board.position(position_index)
+        if position is None or not position.is_doubled:
+            return None
+        return self.rng.choice([tile.index for tile in position.tiles])
+
+    def _op_move_and_collect(
+        self, op: effects.MoveAndCollect, actor: int
+    ) -> List[ev.GameEvent]:
+        """Dzieckorolka: walk a pawn and stack what it swept up underneath it.
+
+        THE ORDER IS THE RULE, so it is worth spelling out.  A tile's ``stack``
+        is stored BOTTOM FIRST, and the finished tower read downwards from the
+        mover has to be the journey in order.  So, onto whoever was already
+        standing on the destination:
+
+            1. the collected pawns in REVERSE travel order, last met lowest;
+            2. the mover;
+            3. anything that was riding on the mover when it set off.
+
+        Reversing in step 1 is what turns "read the path downwards from the
+        mover" into a bottom-first list, and it is the only subtle line here.
+
+        Every collected pawn is the TOP of its field, so lifting it can never
+        break a tower — there is nothing standing on it to drop.
+        """
+        tiles = list(op.tiles)
+        if not tiles:
+            return []
+        destination = tiles[-1]
+
+        # Where each collected pawn is standing NOW, so its walk can start from
+        # its own field rather than from the mover's.
+        pickups = {pawn_id: self.board.pawn_tiles.get(pawn_id)
+                   for pawn_id in op.collected}
+
+        for pawn_id in reversed(op.collected):
+            self.board.place_pawn(pawn_id, destination, on_top=True)
+        self.board.place_pawn(op.pawn_id, destination, on_top=True)
+        for rider in op.carried:
+            self.board.place_pawn(rider, destination, on_top=True)
+        self._sync_token_positions()
+
+        waypoints: List[Tuple[float, float]] = []
+        for index in tiles:
+            tile = self.board.tile(index)
+            if tile is not None:
+                waypoints.append(tile.position)
+
+        events: List[ev.GameEvent] = [
+            ev.TokenWalked(
+                pawn_id=op.pawn_id,
+                from_index=op.from_index,
+                route=list(op.route),
+                tiles=tiles,
+                waypoints=waypoints,
+                carried=list(op.carried),
+                backward=False,
+            )
+        ]
+        # A collected pawn joins the walk part way along, so it gets its own
+        # TokenWalked over the TAIL of the route.  Giving it to the leader's
+        # ``carried`` instead would send it backwards to the start of the route
+        # first, because riders share every waypoint.
+        for pawn_id in op.collected:
+            picked_up = pickups.get(pawn_id)
+            if picked_up is None or picked_up not in tiles:
+                continue
+            step = tiles.index(picked_up)
+            events.append(ev.TokenWalked(
+                pawn_id=pawn_id,
+                from_index=op.route[step] if step < len(op.route) else op.from_index,
+                route=list(op.route[step:]),
+                tiles=tiles[step:],
+                waypoints=waypoints[step:],
+                backward=False,
+            ))
+        events.append(ev.PawnsCollected(
+            pawn_id=op.pawn_id, collected=list(op.collected),
+            tile_index=destination,
+        ))
+        return events
+
+    def _op_replace_mods(
+        self, op: effects.ReplaceMods, actor: int
+    ) -> List[ev.GameEvent]:
+        """Rage Quit: swap every occupied mod slot for a fresh draw.
+
+        THE DRAWS HAPPEN BEFORE THE DISCARDS, and that is not tidiness.  A deck
+        whose draw pile has run dry reshuffles its discard pile, so returning
+        the outgoing mods first would let the card hand back the very cards it
+        was played to get rid of.
+
+        Each slot is written IN PLACE rather than pushed, because the two
+        factions own one slot each for the rest of the game (N85): pushing
+        would slide Piotrek's replacement into the hunters' slot and discard
+        one of the two new cards on the way past.
+
+        ``_sync_mod_states`` afterwards is not optional (N106/N107): two mods
+        leave and two arrive in one command, so a departing Shady has to give
+        its pawn back and a departing Squid Game has to drop its pending check,
+        while the arrivals get their one-off effects.
+        """
+        deck = self.decks.get(op.deck_id)
+        if deck is None:
+            return [ev.ActionRejected("Nieznana talia", "replace_mods")]
+        occupied = [i for i, card in enumerate(self.mod_slots) if card is not None]
+        if not occupied:
+            return []
+
+        events: List[ev.GameEvent] = []
+        drawn: List[Card] = []
+        for _ in occupied:
+            needed_reshuffle = not deck.draw_pile and bool(deck.discard_pile)
+            card = deck.take_card()
+            if card is None:
+                break
+            if needed_reshuffle:
+                events.append(ev.DeckReshuffled(deck.id))
+            drawn.append(card)
+        if not drawn:
+            return [ev.ActionRejected(f"Talia „{deck.name}” jest pusta",
+                                      "replace_mods")]
+
+        for slot, card in zip(occupied, drawn):
+            outgoing = self.mod_slots[slot]
+            self.mod_slots[slot] = card
+            if outgoing is not None:
+                self.decks[outgoing.deck_id].return_card(outgoing)
+                events.append(ev.ModDiscarded(slot, outgoing.uid))
+            events.append(ev.CardDrawn(actor, deck.id, card.uid))
+            events.append(ev.ModPlaced(
+                actor, slot, card.uid,
+                outgoing.uid if outgoing is not None else None,
+            ))
+        events.extend(self._sync_mod_states())
+        return events
 
     def _op_draw_cards(self, op: effects.DrawCards, actor: int) -> List[ev.GameEvent]:
         """Draw into a hand as part of an effect (Troll's replacement, Spy's)."""
@@ -2286,6 +2494,15 @@ class GameState:
             for status in self.statuses.expire(self.turn_counter)
         ]
 
+    def _expire_round_statuses(self) -> List[ev.GameEvent]:
+        """Drop statuses scoped to a round that has already gone by."""
+        return [
+            ev.StatusEnded(status.kind.value, status.subject.value,
+                           status.subject_id,
+                           STATUS_LABELS.get(status.kind, status.kind.value))
+            for status in self.statuses.expire_round_statuses(self.round_number)
+        ]
+
     # ── chest hand limit ─────────────────────────────────────────────────────
     @property
     def pending_chest_choice(self) -> Optional[Tuple[int, List[int]]]:
@@ -2488,6 +2705,8 @@ class GameState:
     _OPERATIONS = {
         effects.MovePawn: _op_move_pawn,
         effects.MoveBySteps: _op_move_by_steps,
+        effects.MoveAndCollect: _op_move_and_collect,
+        effects.ReplaceMods: _op_replace_mods,
         effects.DrawCards: _op_draw_cards,
         effects.TransferCard: _op_transfer_card,
         effects.HighlightHeldCard: _op_highlight_card,

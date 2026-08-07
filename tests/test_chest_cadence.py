@@ -285,7 +285,7 @@ def test_no_card_leaks_out_of_the_chest_deck(library):
         award_log(game, 3, 16)
         held = sum(len(game.chest_cards(p)) for p in game.players)
         assert held + deck.draw_count + deck.discard_count == total, players
-        assert total == 16, "the chest deck ships as eight titles, two of each"
+        assert total == 17, "the chest deck ships with the counts in cards.json"
 
 
 def test_two_overflows_in_one_round_are_both_asked(library):

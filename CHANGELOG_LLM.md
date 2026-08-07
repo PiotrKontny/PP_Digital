@@ -3096,3 +3096,222 @@ should be.
   interface. If any future screen looks cramped at one resolution and fine at
   another, that constant is the first place to look and the last place to
   special-case.
+
+---
+
+## Stage 27 — The Chest starts doing things
+**Date:** 2026-08-07
+
+### Goal
+A new Chest deck composition and the first four Chest cards with real effects:
+Dzieckorolka, Rage Quit, Balbinka and Gambit Patusa. No change to victory
+conditions, to checking, or to any movement card's own rules — the movement
+system is REUSED throughout rather than extended.
+
+### 0. A note on the tree this stage started from
+The archive handed over for this stage extracted with a `data/cards.json` that
+already contained most of this brief — the new texts, the new counts and four
+`effect` blocks naming handlers that did not exist. The suite was therefore
+**990 passing and 5 failing** before a line was written, and all five failures
+were "this effect type has no handler".
+
+That file was set aside, the tree was re-extracted and checked byte-identical to
+the archive, and every change below was made from the pristine copy. Worth
+recording because the failures looked like a broken baseline and were not: they
+were a half-applied change. **If a suite fails on a tree nobody has touched yet,
+diff the tree against the archive before debugging the code.**
+
+### 1. The deck composition
+Dzieckorolka 2, Rage Quit 2, Balbinka 2, Nie masz Rosji 2, Gambit Patusa 3,
+Shady 2, Gejtos 3, Gamechanger 1 — **seventeen cards**, up from sixteen.
+
+The change is not only the total. Stage 23 reached 16 by DOUBLING EVERY TITLE
+UNIFORMLY, specifically so that fixing the supply did not move the odds (N97).
+This composition is deliberately uneven, so the odds are now a balance decision
+in their own right and the supply guarantee no longer follows from every title
+having the same count. Both halves are asserted separately:
+`test_the_new_counts_do_not_shrink_the_working_deck` for the size stage 23
+measured, and `test_every_chest_title_can_still_be_dealt` for the thing an
+uneven deck actually risks — **Gamechanger is down to one copy**, and a title
+that cannot reach the table looks exactly like a title that is merely rare.
+
+These are also the LOBBY defaults, and that needed no code: the settings panel
+seeds every tab from `card.count` in the loaded data. There is a test asserting
+the chest tab shows these eight numbers, which is what would fail the first time
+somebody writes a list of chest titles into a screen.
+
+### 2. Dzieckorolka — the card that made widened rows a decision
+`move_and_collect` + the `MoveAndCollect` operation.
+
+Three fields forward, sweeping the TOP pawn off every field walked through. Two
+things are worth reading twice.
+
+**Every widened position on the route is a question.** Every other card in the
+game settles an intermediate 12a/12b by taking the nearer half, because nothing
+depends on where a pawn merely passed (D8a). Here everything depends on it —
+which half is walked decides which pawn is swept — so each one is asked
+separately, keyed `branch0`, `branch1`, `branch2` by STEP rather than by
+position, so no answer can overwrite another. The destination is asked the same
+way as the intermediates rather than through the usual `tile` key, because from
+the player's side they are the same question.
+
+**The order of the finished tower is the rule.** A tile's `stack` is stored
+bottom-first, and the tower read DOWNWARDS from the mover has to be the journey
+in order. So, onto whoever was already on the destination: the collected pawns
+in REVERSE travel order, then the mover, then its own riders. The brief's
+example — green through blue-with-pink-on-top, then red, landing on yellow —
+comes out `[yellow, red, pink, green]` bottom-first, and there is a test that
+spells exactly that.
+
+This is not decoration. **The hunters win by checking the pawn at the BOTTOM of
+a tower**, so two machines with the same pawns in a different order disagree
+about who wins the game, which is why the multiplayer test asserts the whole
+board and not just the positions.
+
+Collected pawns go UNDERNEATH the mover; riders stay above it. Two different
+relationships to the same pawn, and getting them the same way round would put a
+passenger below the pawn carrying it.
+
+A field whose top pawn is FROZEN yields nothing rather than the sweep reaching
+past it: "always take the top pawn" is the rule, and digging underneath one
+would take a tower apart.
+
+### 3. Rage Quit
+`replace_mods` + the `ReplaceMods` operation. Thunderfuck's neighbour and
+deliberately not Thunderfuck's operation: that one PUSHES from the left and lets
+the rack shift, which is right for "draw a new mod" and wrong for "replace the
+ones in play". Each occupied slot is written IN PLACE, the way the faction
+selection does (N85), so Piotrek's slot stays Piotrek's.
+
+**The draws happen before the discards.** A deck whose draw pile has run dry
+reshuffles its discard pile, so returning the outgoing mods first lets the card
+hand back the very cards it was played to get rid of. There is a test that
+empties the mods deck to nothing and checks the rack is left alone rather than
+refilled with the outgoing pair.
+
+An empty rack does nothing at all and says so (N86, N99): the card exchanges
+what is ACTIVE, and seeding the rack with a mod nobody chose is what N86 exists
+to prevent. An empty SLOT stays empty for the same reason.
+
+### 4. Balbinka
+`move_all_pawns`, built out of `MoveBySteps` with two new flags.
+
+**Nobody is carried.** The tower rule would move a rider twice — once inside its
+tower and once in its own right — and the card says two fields, not four. So
+`MoveBySteps.carry_riders` exists, defaulting to True so Plagiat! is untouched.
+
+That makes the ORDER load-bearing, and it is not arbitrary: going forward the
+furthest pawn moves first, going backward the rearmost does, so a pawn never
+lands on a field whose occupant has not yet left. Within one field the bottom
+moves first, so a tower arrives in the order it left. Only pawns already sharing
+a field can converge — two pawns a field apart stay a field apart when both move
+the same distance — so those two rules are the whole of it, except at the finish
+and the start where movement clamps and the pawn behind ends up on top.
+
+**The random half is rolled by the executor**, never the handler (N78):
+`MoveBySteps.random_branch` → `GameState._random_half`, from `state.rng`. A die
+rolled in a handler would be re-rolled by every preview frame while the card was
+being dragged. Only the DESTINATION is randomised; intermediate halves keep the
+nearer-half rule and consume no randomness at all, which also keeps the RNG in
+step across a table where nobody is crossing a widened row.
+
+### 5. Gambit Patusa
+`reverse_movement` + `StatusKind.MOVEMENT_REVERSED`.
+
+**A round is not a number of turns.** Piotrek takes every third slot, so rounds
+differ in length, and `Status.expires_after_turn` cannot express "next round,
+for one round". The status therefore carries a round NUMBER in its payload and
+`StatusTracker.movement_reversed_in(round)` compares it. `_begin_round` retires
+the ones already behind, and `_set_round` walks every round it crosses, so a
+jump cannot skip the retirement either.
+
+Granted with `stack=True`. Replacing would let a Gambit played DURING a reversed
+round cancel the reversal it was played under — they are separate promises about
+separate rounds.
+
+Applied in `_move_pawn` AND `_move_pawns` (N104), gated on
+`ctx.from_movement_card` (N103) so it leaves abilities and the Chest alone —
+including Dzieckorolka, which is tested.
+
+**Speedrun now asks about the EFFECTIVE direction.** A backward card under a
+Gambit is already travelling forwards, so offering to turn it round would be
+offering to undo the Gambit while describing it as undoing the card. The order
+is: Gambit (silent), then Speedrun's question, then the pawn, then the widened
+row. The sign is settled as distance → cap → flip → Speedrun's `abs()`.
+
+### 6. A bug the multiplayer tests found: one Shady replacing another
+`_sync_mod_states` asked *"does anything still hide?"* rather than *"did THIS
+mod leave?"*. Rage Quit can replace a Shady with a Shady — there are two in the
+deck — and when it did, the first pawn stayed off the map **for the rest of the
+match** while the new arrival took a second one. A stranded pawn cannot be
+moved, checked or won with.
+
+The `HIDDEN` status now records `mod_uid`, and `_restore_pawns_hidden_by`
+returns the pawns of departed mods BEFORE the arming loop, so a replacement
+Shady picks its target from a complete board. The old blanket restore stays as
+the catch-all.
+
+**Pre-existing, not introduced here** — Thunderfuck could reach it too — and it
+is N107 with the wrong question asked. Recorded because the next mod that holds
+something will have the same shape: *a departure is about the card that left,
+not about whether anything like it remains.*
+
+### 7. What did NOT change
+No new commands, no new message types, no new snapshot fields. All four cards
+are ordinary `PlayCard`s whose decisions ride in `choices`, which is why none of
+them can desync and why reconnection needed nothing: the reversal is a Status
+and was already in the snapshot and already restored.
+
+Victory conditions, checking, the turn cadence, the chest rota and the mod
+selection are untouched.
+
+### Tests
+**1044 passing** (990 before, +54), ~165 s. The five pre-existing failures were
+the half-applied `cards.json` described above and are gone.
+
+- `tests/test_chest_effects.py` (new, 39): the composition against the data
+  file; the lobby defaults; the deck still supplying a table and every title
+  still reachable; Dzieckorolka's pawn question, the brief's own tower example,
+  one-per-field and top-only, the destination left alone, riders above and
+  collected below, a question per widened row with distinct keys, collecting
+  only from the half it was sent down, the frozen top pawn, and immunity to Masa
+  solna and Halloween; Rage Quit replacing both slots, never handing back what
+  it discarded, doing nothing to an empty rack, leaving an empty slot empty, and
+  running both the departure and arrival halves; Balbinka's direction question,
+  every pawn moving two either way, a tower moving two and keeping its order,
+  never landing on a pawn that has not moved yet, the silent random half, two
+  machines agreeing from one seed, and a frozen pawn skipped; Gambit not firing
+  in its own round, firing in the next, lapsing by itself, keeping the distance,
+  sparing chest cards, reaching `_move_pawns`, stacking rather than cancelling,
+  both Speedrun interactions, and being in the snapshot.
+- `tests/test_chest_effects_sync.py` (new, 10): every machine building the same
+  tower; no command of its own; an unanswered question logged nowhere (N40); the
+  branch questions travelling as `choices` with one resubmission each; the
+  random halves identical everywhere; Balbinka moving the whole table on every
+  replica; both racks holding the same two mods after Rage Quit; Shady's pawn
+  coming back everywhere; and the reversal replicating and naming the same round
+  on every machine.
+- `tests/test_settings_panel.py`: one test added for the chest tab's numbers.
+- Two existing tests EDITED, neither weakened. `test_engine`'s deck-size mirror
+  and `test_chest_cadence`'s leak accounting moved 16 → 17 (they mirror the data
+  by design). `test_card_effects`'s forced-play test took the top chest card and
+  asserted it had no effect; it now SELECTS a card with no effect, because the
+  rule under test is about an unimplemented effect and picking one off the pile
+  quietly stops testing it as the deck fills in (N94 in miniature).
+
+### Verification
+- 1044 tests; `--selftest` exits 0; `inspect_frame.py` **0 problems** at
+  1280×760, 1920×1200, 2560×1440 and 3840×2160.
+- The Chest tab of the settings panel rendered at all four sizes: eight rows,
+  no scrolling needed, total 17, every stepper and both buttons inside the
+  panel.
+
+### Notes
+- The destination field of a Dzieckorolka move is NOT swept, and it makes no
+  observable difference: a collected destination pawn would be re-inserted
+  exactly where it already was. The reading that matches "po drodze" was taken
+  because it is the one that stays true if the insertion rule ever changes.
+- Dzieckorolka does not consume ChatGPT's movement bonus. The collection is
+  written against a route of exactly the printed length, and a card whose
+  distance a skill could stretch would sweep a field its own text never
+  promised. See L20.

@@ -86,6 +86,27 @@ def test_the_deck_tabs_are_seeded_from_the_data_file(library):
         assert panel.values_of(deck_id) == printed
 
 
+def test_the_chest_tab_shows_the_stage_27_counts(library):
+    """Part of the stage 27 brief: the new counts are the LOBBY defaults too.
+
+    They arrive here for free because the tab is seeded from ``card.count``,
+    which is the whole reason the composition lives in cards.json — but "for
+    free" is exactly the kind of claim that stops being true the first time
+    somebody writes a list of titles into a screen.
+    """
+    screen, _ = menu(library)
+    assert screen.settings_panel.values_of(settings.DECK_CHEST) == {
+        "Dzieckorolka": 2,
+        "Rage Quit": 2,
+        "Balbinka": 2,
+        "Nie masz Rosji": 2,
+        "Gambit Patusa": 3,
+        "Shady": 2,
+        "Gejtos": 3,
+        "Gamechanger": 1,
+    }
+
+
 def test_the_ability_tab_offers_charges_and_not_copies(library):
     screen, _ = menu(library)
     uses = screen.settings_panel.ability_uses

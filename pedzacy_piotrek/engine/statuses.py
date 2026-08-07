@@ -41,6 +41,7 @@ class StatusKind(str, Enum):
     CHECK_REFUSAL = "check_refusal"      # a check may be declined (Ice Block)
     TURN_INTERRUPT = "turn_interrupt"    # a card takes the player's next turn over
     HIDDEN = "hidden"                    # a pawn is off the map entirely (Shady)
+    MOVEMENT_REVERSED = "movement_reversed"   # movement cards run the other way
 
 
 class Subject(str, Enum):
@@ -238,6 +239,40 @@ class StatusTracker:
             return 0, None
         return int(status.data.get("amount", 1)), status
 
+    def movement_reversed_in(self, round_number: int) -> bool:
+        """Whether a Gambit Patusa turns every movement card around this round.
+
+        Round-scoped rather than turn-scoped, and that is the whole reason it
+        cannot use :attr:`Status.expires_after_turn`: the card names a ROUND,
+        and a round is a variable number of turns (Piotrek holds every third
+        slot, so rounds differ in length).  The round the reversal belongs to
+        is therefore carried in the payload and compared here.
+
+        Several Gambits may be in flight at once — they are granted with
+        ``stack=True`` — so this asks whether ANY of them names this round.
+        Replacing instead of stacking would let a Gambit played DURING a
+        reversed round cancel the reversal it was played under.
+        """
+        return any(int(status.data.get("round", -1)) == round_number
+                   for status in self.of_kind(StatusKind.MOVEMENT_REVERSED))
+
+    def expire_round_statuses(self, round_number: int) -> List[Status]:
+        """Drop round-scoped statuses whose round is already behind us.
+
+        Turn expiry cannot do this (see :meth:`movement_reversed_in`), so the
+        round loop clears them instead.  Anything naming the CURRENT round
+        survives: a reversal is granted in round N for round N+1, and
+        ``_begin_round(N+1)`` must not throw it away before it has been read.
+        """
+        gone = [
+            status for status in self._statuses
+            if status.kind is StatusKind.MOVEMENT_REVERSED
+            and int(status.data.get("round", -1)) < round_number
+        ]
+        for status in gone:
+            self.discard(status)
+        return gone
+
     def movement_range(self) -> Optional[Tuple[int, int]]:
         """Span of board positions movement is confined to, if any."""
         status = self.find(StatusKind.RESTRICTED_MOVEMENT, Subject.TABLE)
@@ -276,4 +311,5 @@ STATUS_LABELS: Dict[StatusKind, str] = {
     StatusKind.CHECK_REFUSAL: "Odmowa sprawdzenia",
     StatusKind.TURN_INTERRUPT: "Tura przejęta",
     StatusKind.HIDDEN: "Poza mapą",
+    StatusKind.MOVEMENT_REVERSED: "Odwrócony ruch",
 }

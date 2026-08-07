@@ -249,15 +249,22 @@ def test_troll_falls_back_to_a_movement_card(library):
 
 
 def test_a_forced_card_with_no_implementation_does_not_block_the_game(library):
-    """Chest cards have no effects yet.  Played, discarded, nothing else."""
+    """A card whose effect does not exist yet is played, discarded, and done.
+
+    Four Chest cards gained effects in stage 27, so the card is now CHOSEN for
+    having none rather than taken off the top of the pile — the rule under test
+    is about an unimplemented effect, and picking one at random would quietly
+    stop testing it as the deck fills in.
+    """
     state = make_game(library)
     troll = take(state, settings.DECK_MOVEMENT, "Troll")
     stack_on_top(state, troll)
     seat = state.active_player_index
     player = state.player(seat)
     state.apply(cmd.DrawCard(player_index=seat, deck_id=settings.DECK_MOVEMENT))
-    chest = state.decks[settings.DECK_CHEST].take_card()
-    assert chest.effect is None, "this test is about a card with no effect"
+    deck = state.decks[settings.DECK_CHEST]
+    chest = next(c for c in deck.draw_pile if c.effect is None)
+    deck.draw_pile.remove(chest)
     player.hand.append(chest)
 
     seen = turns_until(state, lambda evs: of_type(evs, ev.CardSpotlighted))

@@ -561,18 +561,36 @@
       "cards": [
         {
           "title": "Dzieckorolka",
-          "text": "Porusz pionka o trzy do przodu. Pionki stojące po drodze są zabierane (1 na pole)",
-          "count": 2
+          "text": "Porusz wybranego pionka o trzy do przodu. Pionki stojące po drodze są zabierane (1 na pole).",
+          "count": 2,
+          "effect": {
+            "type": "move_and_collect",
+            "target": "choice",
+            "steps": 3,
+            "direction": "forward",
+            "asks": true
+          }
         },
         {
           "title": "Rage Quit",
-          "text": "Wymień wszystkie aktywne Mody Patusa na losowe z talii",
-          "count": 2
+          "text": "Wymień wszystkie aktywne Mody Patusa na losowe z talii.",
+          "count": 2,
+          "effect": {
+            "type": "replace_mods",
+            "deck": "mods"
+          }
         },
         {
           "title": "Balbinka",
-          "text": "Porusz wszystkie pionki o dwa pola do przodu lub do tyłu",
-          "count": 2
+          "text": "Porusz wszystkie pionki o dwa pola do przodu lub do tyłu.",
+          "count": 2,
+          "effect": {
+            "type": "move_all_pawns",
+            "steps": 2,
+            "direction": "either",
+            "random_branch": true,
+            "asks": true
+          }
         },
         {
           "title": "Nie masz Rosji",
@@ -581,8 +599,12 @@
         },
         {
           "title": "Gambit Patusa",
-          "text": "Odwróć kierunek wszystkich kart ruchu na pełną rundę",
-          "count": 2
+          "text": "Odwróć kierunek wszystkich kart ruchu w kolejnej rundzie.",
+          "count": 3,
+          "effect": {
+            "type": "reverse_movement",
+            "delay_rounds": 1
+          }
         },
         {
           "title": "Shady",
@@ -592,7 +614,7 @@
         {
           "title": "Gejtos",
           "text": "Wybierz pole: Mężczyzna - Przenieś pionki z sąsiadujących pól na to pole; Kobieta - Oddal pionki z sąsiadujących pól o jedno pole",
-          "count": 2
+          "count": 3
         },
         {
           "title": "Gamechanger",
@@ -612,7 +634,7 @@
               }
             }
           },
-          "count": 2
+          "count": 1
         }
       ]
     }

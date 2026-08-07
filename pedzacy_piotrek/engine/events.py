@@ -183,6 +183,24 @@ class MoveFizzled(GameEvent):
 
 
 @dataclass
+class PawnsCollected(GameEvent):
+    """A pawn swept others up along its route (Dzieckorolka).
+
+    The walks themselves are ordinary ``TokenWalked`` events, so this carries
+    no movement — it exists because "your pawn picked up two others" is the
+    part of the card a player has to be told about, and reading it off three
+    overlapping animations is not the same as being told.
+
+    Pawn colours are public: they are on the board in front of everybody.  This
+    is not the kind of event N81 is about.
+    """
+
+    pawn_id: str
+    collected: List[str] = field(default_factory=list)
+    tile_index: int = -1
+
+
+@dataclass
 class ChoiceRequired(GameEvent):
     """An action is waiting for a decision: which pawn, which field, how far.
 

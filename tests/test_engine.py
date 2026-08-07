@@ -61,11 +61,15 @@ def test_deck_sizes_match_the_data_file(library):
     # composition lives in cards.json rather than in Rules.
     assert len(library.deck(settings.DECK_MODS).build_cards()) == 13
     # One blank placeholder card was dropped from the data file.
-    # 16 since stage 23: every chest title went to two copies.  Eight could not
-    # supply a six-player table once two cards go out per dealing round —
-    # Piotrek plus the rota — because seven sit in hands at the limit.
-    # Doubled uniformly, so every title stays equally likely.
-    assert len(library.deck(settings.DECK_CHEST).build_cards()) == 16
+    # 17 since stage 27.  Stage 23 had doubled every title uniformly to reach
+    # 16, because eight could not supply a six-player table once two cards go
+    # out per dealing round — Piotrek plus the rota — with seven sitting in
+    # hands at the limit.  The composition is no longer uniform: the owner set
+    # it per title (Gambit Patusa 3, Gejtos 3, Gamechanger 1, the rest 2), so
+    # the ODDS are now a balance decision rather than a side effect of the
+    # supply fix.  The supply itself is unchanged — 17 is above 16 — and
+    # test_the_deck_can_supply_a_full_table_indefinitely still proves it.
+    assert len(library.deck(settings.DECK_CHEST).build_cards()) == 17
     assert len(library.deck(settings.DECK_CHARACTERS).build_cards()) == 10
     assert len(library.deck(settings.DECK_SKILLS).build_cards()) == 3
     assert len(library.pawns) == 6
