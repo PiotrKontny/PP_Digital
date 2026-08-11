@@ -124,6 +124,7 @@ pedzacy_piotrek/
 ├── server/      hub.py, room.py, registry.py  ← autorytatywna logika, bez I/O
 │                app.py, embedded.py           ← warstwa asyncio/WebSocket
 └── assets/      obrazki, dźwięki, czcionki (opcjonalne — patrz assets/README.md)
+    └── card_art/   grafiki kart (Signature Cards) — patrz assets/card_art/README.md
 ```
 
 Zasada, na której to stoi: **`engine/` nie wie, że istnieje pygame**, a
@@ -219,7 +220,7 @@ odrzuca każdą komendę wydaną za kogoś innego. Zasada siedzi w silniku
 
 Interfejs jest zbudowany według dostarczonej koncepcji: prawie czarny stół z
 lekko chłodnym rozmyciem, panele z ciemnego łupku obrzeżone przetartym mosiądzem
-z narożnymi okuciami, pergaminowe karty w podwójnej ramce, wersaliki z rozstrzelonymi
+z narożnymi okuciami, pergaminowe karty w pojedynczej ramce, wersaliki z rozstrzelonymi
 literami na nagłówkach i jeden zielony akcent na to, co „twoje" i „teraz".
 
 Wszystkie kolory siedzą w `config/theme.py` — poza nim nie ma ani jednej wartości
@@ -227,6 +228,46 @@ RGB (pilnuje tego test). Kolejna skórka to drugi obiekt `Theme`, nie przeszukiw
 kodu. Wspólne elementy (`premium_panel`, `inset_well`, `section_heading`,
 `spaced_text`, `circle_button`) są w rendererze, więc każdy panel w grze wygląda
 jak z tej samej aplikacji.
+
+## Karty z grafiką (Signature Cards)
+
+Karta może mieć własną grafikę, ale **nie musi** — i to jest sedno tego
+systemu. Karty da się ilustrować pojedynczo, przez kolejne miesiące, a wszystkie
+pozostałe wyglądają dokładnie tak jak wyglądały.
+
+Cały sposób użycia to jeden krok: **wrzucasz plik do `assets/card_art/`
+i nazywasz go tak jak kartę.**
+
+```
+assets/card_art/Troll.png        →  karta „Troll" dostaje grafikę
+```
+
+Nie trzeba nic dopisywać w JSON-ie ani ruszać kodu rysującego. Nazwa pliku
+i tytuł karty są porównywane po uproszczeniu, więc wielkość liter, spacje,
+myślniki i polskie znaki nie mają znaczenia (`Stanczyk.png` trafi na
+„Stańczyk", `rage-quit.jpg` na „Rage Quit").
+
+Karta z grafiką ma dwa stany:
+
+* **spoczynek** — grafika na całej karcie, tytuł nisko przy dolnej krawędzi,
+  bez opisu i bez ikon;
+* **najechanie kursorem** — grafika przyciemnia się, od dołu narasta ciemny
+  gradient, tytuł płynnie jedzie w górę, a pod nim pojawia się opis.
+
+Przejście jest animowane i jedzie po tej samej krzywej co unoszenie karty
+w wachlarzu, więc nie „przeskakuje".
+
+Na karcie nie jest rysowane **nic**, czego nie widać na obrazku: od etapu 31
+nie ma już ani cienkiej wewnętrznej ramki, ani kolorowych kropek stanu przy
+górnej krawędzi. Grafika jest zasłaniana wyłącznie przez to, co karta ma
+pokazać — tytuł i opis.
+
+Brakujący, uszkodzony albo źle nazwany plik **nie psuje niczego** — karta po
+prostu wygląda jak zwykła pergaminowa karta. Folder z grafikami z założenia
+bywa niekompletny.
+
+Formaty: PNG, JPG, JPEG, WEBP, BMP. Szczegóły, konwencje nazw, kolizje tytułów
+między taliami i sposób podmiany czcionki tytułów: `assets/card_art/README.md`.
 
 ## Ostrość i skalowanie
 
@@ -284,7 +325,8 @@ rozmiaru okna, a nie od tego, czy plansza ma 20 czy 200 pól.
 ## Dodawanie treści bez dotykania kodu
 
 Nowa karta to jeden wpis w `data/cards.json` (tytuł, tekst, liczba kopii,
-opcjonalna ścieżka do obrazka, opcjonalna odznaka). Nowa postać — wpis w
+opcjonalna ścieżka do obrazka, opcjonalna odznaka). Grafika na całą kartę nie
+wymaga nawet tego — wystarczy plik w `assets/card_art/` nazwany jak karta. Nowa postać — wpis w
 `data/characters.json`. Nowy motyw planszy — wpis w `data/board.json`.
 Szczegóły i format obrazków: `assets/README.md`.
 

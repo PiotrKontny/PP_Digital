@@ -30,6 +30,7 @@ from ..cards.base_card import Badge, Card
 from ..cards.loader import ContentLibrary
 from ..config import settings
 from ..config.theme import darken, lighten, mix
+from .card_art import CardArtLibrary
 from .renderer import Renderer
 
 Color = Tuple[int, int, int]
@@ -55,17 +56,57 @@ CARD_TYPE_ANCHOR = 1.44
 TITLE_FRACTION = 0.068
 TITLE_MIN_STEP = 0.75
 
+# ── Signature Cards ──────────────────────────────────────────────────────────
+#: Every number below is a fraction of the CARD, never of the interface scale,
+#: for the reason ``_font`` explains at length: a card of a given pixel size
+#: has to render identically on every monitor.
+#:
+#: The title is larger than a standard card's — it is the only text on the
+#: face when nothing is hovered, and it is competing with a photograph.
+SIGNATURE_TITLE_FRACTION = 0.086
+SIGNATURE_TEXT_FRACTION = 0.052
+#: How small the description may get before it stops being worth showing.
+SIGNATURE_TEXT_MIN = 0.60
+#: Share of the card the description may occupy once revealed.
+SIGNATURE_TEXT_ROOM = 0.46
+#: The scrim that fades up from the bottom edge: how far up it reaches and how
+#: opaque it gets at the very bottom, resting -> revealed.
+SIGNATURE_SCRIM_RISE = (0.30, 0.72)
+SIGNATURE_SCRIM_ALPHA = (188, 240)
+#: The veil over the WHOLE picture when revealed, so the eye moves from the
+#: illustration to the words.
+SIGNATURE_VEIL_ALPHA = 86
+#: Reveal is quantised to this many steps before it reaches the face cache.
+#: A continuous 0..1 would paint a new face every frame of the hover — which
+#: is exactly the mistake ``SIZE_STEP`` exists to prevent one axis over.
+REVEAL_STEPS = 8
+
 _CACHE_LIMIT = 320
 
 
+def _lerp(low: float, high: float, t: float) -> float:
+    """Straight-line interpolation, used for every reveal-driven number.
+
+    One helper rather than the same arithmetic written out six times: the
+    resting value and the revealed value then sit side by side at the call
+    site, which is the form ``Layout._lerp`` settled on in stage 29 for the
+    same reason.
+    """
+    return low + (high - low) * t
+
+
 class CardRenderer:
-    def __init__(self, renderer: Renderer, library: ContentLibrary) -> None:
+    def __init__(self, renderer: Renderer, library: ContentLibrary,
+                 art: Optional[CardArtLibrary] = None) -> None:
         self.r = renderer
         self.library = library
         self.theme = renderer.theme
         self._images: Dict[str, Optional[pygame.Surface]] = {}
         self._faces: Dict[tuple, pygame.Surface] = {}
         self._rainbow = library.pawn_colors()
+        #: Which cards have full-card artwork.  Injectable so a test can point
+        #: at a folder of its own without touching the shipped one.
+        self.art = art if art is not None else CardArtLibrary()
 
     def clear_cache(self) -> None:
         """Drop cached faces — called when the window resizes."""
@@ -95,7 +136,8 @@ class CardRenderer:
         self._faces[key] = surface
         return surface
 
-    def _font(self, size: Size, fraction: float, bold: bool = False):
+    def _font(self, size: Size, fraction: float, bold: bool = False,
+              display: bool = False):
         """Type on a card is a fraction of the CARD, not of the interface.
 
         It used to be both, and that was the whole of the "cards are unreadable
@@ -120,9 +162,11 @@ class CardRenderer:
         # ``base * CARD_TYPE_ANCHOR`` on every display.  Rounding here as well
         # left small cards a pixel or two under, which is visible precisely
         # where it matters least — and unmeasurable where it matters most.
-        return self.r.fonts.get(base * CARD_TYPE_ANCHOR / scale, bold=bold)
+        return self.r.fonts.get(base * CARD_TYPE_ANCHOR / scale, bold=bold,
+                                display=display)
 
-    def _title_font(self, size: Size, text: str, max_width: int):
+    def _title_font(self, size: Size, text: str, max_width: int,
+                    fraction: float = TITLE_FRACTION, display: bool = False):
         """The title font, shrunk until the longest WORD fits on a line.
 
         ``Renderer.wrap_lines`` breaks mid-word when a word cannot fit, which
@@ -137,14 +181,15 @@ class CardRenderer:
         """
         words = text.split()
         if not words:
-            return self._font(size, TITLE_FRACTION, bold=True)
+            return self._font(size, fraction, bold=True, display=display)
         step = 1.0
         while step >= TITLE_MIN_STEP:
-            font = self._font(size, TITLE_FRACTION * step, bold=True)
+            font = self._font(size, fraction * step, bold=True, display=display)
             if all(font.size(word)[0] <= max_width for word in words):
                 return font
             step -= 0.04
-        return self._font(size, TITLE_FRACTION * TITLE_MIN_STEP, bold=True)
+        return self._font(size, fraction * TITLE_MIN_STEP, bold=True,
+                          display=display)
 
     # ── faces ────────────────────────────────────────────────────────────────
     def face(
@@ -155,8 +200,30 @@ class CardRenderer:
         highlighted: bool = False,
         border_color: Optional[Color] = None,
         dim: bool = False,
+        reveal: Optional[float] = None,
     ) -> pygame.Surface:
-        """The painted front of a card, cached."""
+        """The painted front of a card, cached.
+
+        ``reveal`` (0..1) only means anything to a SIGNATURE card — one with
+        artwork in ``assets/card_art`` — where it drives the hover state: 0 is
+        the picture with its title along the bottom, 1 is the picture darkened
+        with the title lifted and the description under it.  ``None`` derives
+        it from ``highlighted``, so every caller that already knew about hover
+        gets the reveal for free and only the hand fan, which has a smooth
+        hover value of its own, needs to pass anything.
+
+        A card with no artwork ignores it entirely and is painted exactly as it
+        was before this existed.
+        """
+        artwork = self.art.surface(card.definition)
+        if artwork is not None:
+            if reveal is None:
+                reveal = 1.0 if highlighted else 0.0
+            return self._signature_face(
+                card, artwork, size, highlighted=highlighted,
+                border_color=border_color, dim=dim, reveal=reveal,
+            )
+
         # The badge is part of the key because it is part of the picture.  It
         # used to be left out on the assumption that a title implies a badge,
         # which stopped being true the moment a badge could carry a pawn COUNT:
@@ -195,14 +262,16 @@ class CardRenderer:
         else:
             border = theme.card_border_hover if highlighted else theme.card_border
 
-        # Outer border, then an inset brass rule — the double frame the concept
-        # puts on every card.
+        # ONE border, not two.  The concept's double frame — an outer edge plus
+        # an inset brass rule — was dropped in stage 31: it read as a stray line
+        # across an illustration once cards could carry full-card artwork, and
+        # on a parchment card it was never carrying information either.  The
+        # outer edge stays, because it is the card's silhouette AND the channel
+        # the drag preview colours green/red/prompt through ``border_color``.
         pygame.draw.rect(surface, border, pygame.Rect(0, 0, w, h),
                          max(2, int(h * 0.014)), border_radius=radius)
+        # Kept as the text margin it always doubled as; nothing is drawn on it.
         inset = max(3, int(h * 0.028))
-        pygame.draw.rect(surface, theme.card_frame,
-                         pygame.Rect(inset, inset, w - 2 * inset, h - 2 * inset),
-                         1, border_radius=max(3, radius - 2))
 
         pawn_color = self._pawn_color(card.badge)
         title_color = darken(pawn_color, 0.55) if pawn_color else theme.card_title
@@ -244,6 +313,218 @@ class CardRenderer:
 
         if card.badge is not None:
             self._draw_badge(surface, size, card.badge)
+        return self._store(key, surface)
+
+    # ── signature faces ──────────────────────────────────────────────────────
+    def _cover(self, art: pygame.Surface, size: Size) -> pygame.Surface:
+        """The artwork scaled to FILL ``size``, centred, overflow cropped.
+
+        Cover, not fit: a picture letterboxed inside a card would show the
+        parchment it was supposed to replace, and a picture stretched to the
+        card would distort — the brief forbids both.  Scaling by the LARGER of
+        the two ratios keeps the aspect exactly and spends the difference on a
+        crop, which for a centred subject costs nothing.
+        """
+        w, h = size
+        aw, ah = art.get_size()
+        if aw <= 0 or ah <= 0:  # pragma: no cover - defensive
+            return pygame.Surface(size, pygame.SRCALPHA)
+        factor = max(w / aw, h / ah)
+        scaled = pygame.transform.smoothscale(
+            art, (max(1, int(math.ceil(aw * factor))),
+                  max(1, int(math.ceil(ah * factor)))),
+        )
+        layer = pygame.Surface(size, pygame.SRCALPHA)
+        layer.blit(scaled, ((w - scaled.get_width()) // 2,
+                            (h - scaled.get_height()) // 2))
+        return layer
+
+    def _scrim(self, size: Size, band: int, alpha: int) -> pygame.Surface:
+        """A bottom-up gradient from transparent to ``alpha``.
+
+        Drawn on its own surface and blitted rather than drawn straight onto
+        the artwork: pygame's draw functions REPLACE the destination pixel
+        including its alpha, so a gradient drawn in place would punch holes in
+        the picture instead of shading it.
+        """
+        w = size[0]
+        scrim = pygame.Surface((w, max(1, band)), pygame.SRCALPHA)
+        colour = self.theme.card_art_scrim
+        for row in range(band):
+            # Squared falloff: linear reads as a grey wedge with a visible top
+            # edge, which is the one thing a scrim must not have.
+            t = (row / max(1, band - 1)) ** 2
+            pygame.draw.line(scrim, (*colour, int(alpha * t)),
+                             (0, row), (w, row))
+        return scrim
+
+    def _outlined(self, surface: pygame.Surface, text: str, font,
+                  midtop: Tuple[int, int], thickness: int) -> None:
+        """Title type with a hard outline, because the backdrop is a photograph.
+
+        A drop shadow is enough over parchment and not over an arbitrary
+        picture: the Troll artwork alone runs from near-white sneaker to black
+        smoke behind where the title sits.  An outline is the only thing that
+        holds at both ends.
+        """
+        theme = self.theme
+        ring = self.r.text_surface(text, font, theme.card_art_title_outline)
+        rect = ring.get_rect(midtop=midtop)
+        for dx in (-thickness, 0, thickness):
+            for dy in (-thickness, 0, thickness):
+                if dx or dy:
+                    surface.blit(ring, (rect.x + dx, rect.y + dy))
+        self.r.text(text, font, theme.card_art_title, surface, midtop=midtop)
+
+    def _description_font(self, size: Size, text: str, room: Tuple[int, int]):
+        """The largest description type whose wrapped lines fit ``room``.
+
+        Quoted as a fraction of the CARD and shrunk from there, so it obeys the
+        stage-29 invariant (a card of a given pixel size renders identically on
+        every monitor) while still guaranteeing that a long Polish card text
+        cannot overflow a small card.
+        """
+        room_w, room_h = room
+        step = 1.0
+        font = self._font(size, SIGNATURE_TEXT_FRACTION)
+        lines = self.r.wrap_lines(text, font, room_w) if text else []
+        while step > SIGNATURE_TEXT_MIN:
+            if not lines or len(lines) * (font.get_height() + 2) <= room_h:
+                break
+            step -= 0.05
+            font = self._font(size, SIGNATURE_TEXT_FRACTION * step)
+            lines = self.r.wrap_lines(text, font, room_w)
+        # Below ``SIGNATURE_TEXT_MIN`` — and on a card so small that the font
+        # floor in ``_font`` has taken over — shrinking has stopped helping, so
+        # the overflow is CUT rather than allowed to run off the card.  This is
+        # what ``Renderer.draw_wrapped`` already does to a standard card's body
+        # on a thumbnail; a Signature card must not be the one place where long
+        # Polish rules text escapes its frame.
+        fits = max(1, room_h // (font.get_height() + 2))
+        return font, lines[:fits]
+
+    def _signature_face(
+        self,
+        card: Card,
+        art: pygame.Surface,
+        size: Size,
+        *,
+        highlighted: bool,
+        border_color: Optional[Color],
+        dim: bool,
+        reveal: float,
+    ) -> pygame.Surface:
+        """A card whose artwork IS the face.
+
+        Two states out of one layout.  The title and description are laid out
+        as one block anchored to the bottom margin, and the title's resting
+        position is that same block with the description removed.  The reveal
+        interpolates between the two, so the title rises by EXACTLY the height
+        of the description that is appearing under it — at any card size, for
+        any length of text, with no tuned offsets to go wrong on a monitor
+        nobody tested on.
+        """
+        step = max(0.0, min(1.0, reveal))
+        step = round(step * REVEAL_STEPS) / REVEAL_STEPS
+        key = (
+            "signature", self.art.key(card.definition), card.title, card.text,
+            size, highlighted, border_color, dim, step,
+            round(float(self.r.fonts.scale), 3),
+        )
+        cached = self._faces.get(key)
+        if cached is not None:
+            return cached
+
+        w, h = size
+        theme = self.theme
+        radius = max(5, int(h * 0.05))
+        surface = self._cover(art, size)
+
+        # 1. The picture darkens as a whole, so the words win the foreground.
+        veil = int(SIGNATURE_VEIL_ALPHA * step) + (60 if dim else 0)
+        if veil:
+            wash = pygame.Surface(size, pygame.SRCALPHA)
+            wash.fill((*theme.card_art_veil, min(255, veil)))
+            surface.blit(wash, (0, 0))
+
+        # 2. The lower portion takes a scrim, present even at rest because the
+        #    title has to be readable there too.
+        band = int(h * _lerp(*SIGNATURE_SCRIM_RISE, step))
+        surface.blit(self._scrim(size, band, int(_lerp(*SIGNATURE_SCRIM_ALPHA, step))),
+                     (0, h - band))
+
+        # 3. Round the corners.  A rectangular picture inside the rounded cards
+        #    the rest of the game draws would read as a bug.
+        mask = pygame.Surface(size, pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), pygame.Rect(0, 0, w, h),
+                         border_radius=radius)
+        surface.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+
+        # 4. The same single border every other card has, so a Signature card
+        #    still belongs to this game and hover/selection borders still read.
+        #    NOTHING else is drawn over the picture: the artwork is the face,
+        #    and a rule laid across it is a scratch on the illustration rather
+        #    than a frame around it.  See stage 31.
+        if border_color is not None:
+            border = lighten(border_color, 0.32) if highlighted else darken(border_color, 0.8)
+        else:
+            border = theme.card_border_hover if highlighted else theme.card_border
+        pygame.draw.rect(surface, border, pygame.Rect(0, 0, w, h),
+                         max(2, int(h * 0.014)), border_radius=radius)
+        # Kept as the text margin it always doubled as; nothing is drawn on it.
+        inset = max(3, int(h * 0.028))
+
+        # 5. Type.
+        pad = inset + max(4, int(w * 0.055))
+        room_w = max(16, w - 2 * pad)
+        gap = max(2, int(h * 0.016))
+        bottom_pad = max(4, int(h * 0.05))
+
+        title_font = self._title_font(size, card.title, room_w,
+                                      SIGNATURE_TITLE_FRACTION, display=True)
+        title_lines = self.r.wrap_lines(card.title, title_font, room_w)[:2]
+        title_row = title_font.get_height() + 1
+        title_h = len(title_lines) * title_row
+
+        desc_font, desc_lines = self._description_font(
+            size, card.text, (room_w, int(h * SIGNATURE_TEXT_ROOM)))
+        desc_row = desc_font.get_height() + 2
+        desc_h = len(desc_lines) * desc_row
+
+        resting_top = h - bottom_pad - title_h
+        # The block, bottom-anchored — never let it climb off the card.
+        opened_top = max(inset + gap,
+                         h - bottom_pad - desc_h - 2 * gap - title_h)
+        title_top = int(round(_lerp(resting_top, opened_top, step)))
+
+        outline = max(1, int(round(h * 0.007)))
+        for index, line in enumerate(title_lines):
+            self._outlined(surface, line, title_font,
+                           (w // 2, title_top + index * title_row), outline)
+
+        # The divider and the description fade in together, on one layer, so
+        # ``set_alpha`` is applied to a surface this method owns.  Setting it
+        # on a cached ``text_surface`` would dim that string everywhere else on
+        # screen for the rest of the frame.
+        if step > 0.0 and desc_lines:
+            divider_y = title_top + title_h + gap
+            block_h = max(1, (h - divider_y))
+            block = pygame.Surface((w, block_h), pygame.SRCALPHA)
+            pygame.draw.line(block, theme.card_art_divider,
+                             (pad, 1), (w - pad, 1), 1)
+            if w > 70:
+                self.r.diamond((w // 2, 1), max(2, int(h * 0.011)),
+                               theme.card_art_divider, block)
+            top = gap + 1
+            for index, line in enumerate(desc_lines):
+                y = top + index * desc_row
+                if y + desc_row > block_h:
+                    break
+                self.r.text(line, desc_font, theme.card_art_text, block,
+                            midtop=(w // 2, y), shadow=True)
+            block.set_alpha(int(255 * step))
+            surface.blit(block, (0, divider_y))
+
         return self._store(key, surface)
 
     def back(
@@ -341,6 +622,7 @@ class CardRenderer:
         lift: int = 0,
         dim: bool = False,
         shadow: bool = True,
+        reveal: Optional[float] = None,
     ) -> pygame.Rect:
         target = self.r.target(surface)
         y -= lift
@@ -351,7 +633,7 @@ class CardRenderer:
                                surface=target)
         target.blit(
             self.face(card, size, highlighted=highlighted,
-                      border_color=border_color, dim=dim),
+                      border_color=border_color, dim=dim, reveal=reveal),
             rect.topleft,
         )
         return rect
@@ -410,6 +692,7 @@ class CardRenderer:
         highlighted: bool = False,
         border_color: Optional[Color] = None,
         shadow: int = 8,
+        reveal: Optional[float] = None,
     ) -> pygame.Rect:
         """Draw a card rotated about its centre — the hand fan and drag ghost.
 
@@ -425,7 +708,7 @@ class CardRenderer:
         target = self.r.target(surface)
         paint_size = self.quantised(size, scale) if abs(scale - 1.0) > 0.005 else size
         face = self.face(card, paint_size, highlighted=highlighted,
-                         border_color=border_color)
+                         border_color=border_color, reveal=reveal)
         if abs(angle) < 0.05:
             rotated = face
         else:

@@ -114,7 +114,11 @@ class Theme:
     card_bg_highlight: Color = (252, 242, 214)
     card_border: Color = (96, 70, 40)
     card_border_hover: Color = (226, 186, 112)
-    card_frame: Color = (198, 166, 116)
+    # ``card_frame`` lived here until stage 31.  It coloured the inset rule of
+    # the old double frame, which was removed from the card face, the Signature
+    # face and the reveal overlay at once; nothing draws it any more, so the
+    # colour went with it rather than sitting here inviting somebody to put the
+    # line back.  ``card_divider`` is the surviving hairline (title/body rule).
     card_shadow: Color = (0, 0, 0)
     card_title: Color = (54, 34, 18)
     card_text: Color = (78, 62, 46)
@@ -123,6 +127,21 @@ class Theme:
     card_back_deco: Color = (188, 154, 96)
     card_empty_bg: Color = (14, 19, 28)
     card_empty_line: Color = (52, 46, 36)
+
+    # ── Signature Cards (full-card artwork) ──────────────────────────────────
+    #: A card with artwork in ``assets/card_art`` replaces the parchment face
+    #: with the picture, and the game draws the title and description over it.
+    #: The picture is the variable here, so the type has to carry its own
+    #: contrast: near-white on a near-black scrim, with an outline.
+    #: The veil laid over the WHOLE picture on hover, so the eye moves from the
+    #: illustration to the words.
+    card_art_veil: Color = (6, 8, 12)
+    #: The scrim that fades up from the bottom edge and holds the text.
+    card_art_scrim: Color = (5, 6, 10)
+    card_art_title: Color = (250, 246, 236)
+    card_art_title_outline: Color = (12, 10, 8)
+    card_art_text: Color = (234, 228, 214)
+    card_art_divider: Color = (206, 172, 112)
 
     # ── mod panel ────────────────────────────────────────────────────────────
     mod_bg: Color = (16, 22, 33)
@@ -201,13 +220,20 @@ class FontBook:
 
     _PREFERRED_FILES = ("Inter.ttf", "NotoSans-Regular.ttf", "DejaVuSans.ttf")
     _PREFERRED_BOLD = ("Inter-Bold.ttf", "NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf")
+    #: The DECORATIVE face, used for Signature Card titles and nothing else.
+    #: Empty by default — drop a legally usable serif/blackletter-ish TTF in
+    #: ``assets/fonts`` under one of these names and every artwork card picks
+    #: it up with no code change.  When none is present the request falls back
+    #: to the bold UI face, so a clean checkout still renders a readable title.
+    #: See ``assets/card_art/README.md``.
+    _PREFERRED_DISPLAY = ("Display-Bold.ttf", "Display.ttf", "Title-Bold.ttf")
     _SYSTEM_NAMES = ("DejaVu Sans", "FreeSans", "Ubuntu", "Verdana", "Arial")
 
     def __init__(self, font_dir=None) -> None:
         from .settings import FONT_DIR
 
         self.font_dir = font_dir or FONT_DIR
-        self._cache: Dict[Tuple[int, bool], "object"] = {}
+        self._cache: Dict[Tuple[int, bool, bool], "object"] = {}
         #: Every requested size is multiplied by this before the font is built.
         #: Sizes are quoted for a 1080-tall window; a 1440 display gets bigger
         #: glyphs *rendered at that size*, which is what keeps text crisp rather
@@ -227,22 +253,34 @@ class FontBook:
         # sizes on screen.
         self._cache.clear()
 
-    def get(self, size: int, bold: bool = False):
+    def get(self, size: int, bold: bool = False, display: bool = False):
         import pygame
 
         size = max(8, int(round(size * self._scale)))
-        key = (size, bold)
+        key = (size, bold, display)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
 
         font = None
-        names = self._PREFERRED_BOLD if bold else self._PREFERRED_FILES
-        for filename in names:
-            path = self.font_dir / filename
-            if path.exists():
-                font = pygame.font.Font(str(path), size)
-                break
+        if display:
+            # A decorative face is an OVERRIDE, never a requirement: the game
+            # ships without one, and asking for it when the file is absent must
+            # give the bold UI face rather than a box-glyph fallback.
+            for filename in self._PREFERRED_DISPLAY:
+                path = self.font_dir / filename
+                if path.exists():
+                    font = pygame.font.Font(str(path), size)
+                    break
+            if font is None:
+                font = self.get(size / max(0.01, self._scale), bold=True)
+        if font is None:
+            names = self._PREFERRED_BOLD if bold else self._PREFERRED_FILES
+            for filename in names:
+                path = self.font_dir / filename
+                if path.exists():
+                    font = pygame.font.Font(str(path), size)
+                    break
         if font is None:
             for name in self._SYSTEM_NAMES:
                 candidate = pygame.font.SysFont(name, size, bold=bold)

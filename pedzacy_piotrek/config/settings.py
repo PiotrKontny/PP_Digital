@@ -20,6 +20,13 @@ ASSETS_DIR = PACKAGE_ROOT / "assets"
 FONT_DIR = ASSETS_DIR / "fonts"
 IMAGE_DIR = ASSETS_DIR / "images"
 SOUND_DIR = ASSETS_DIR / "sounds"
+#: Full-card artwork for Signature Cards.  Separate from ``IMAGE_DIR`` on
+#: purpose: ``images/cards/`` holds the small illustration a STANDARD card
+#: shows inside its parchment body, while a file here REPLACES the card face
+#: entirely.  One folder, one meaning — see ``render/card_art.py``.
+CARD_ART_DIR = ASSETS_DIR / "card_art"
+#: Extensions the card-art scanner accepts.  Lower case; the scan folds case.
+CARD_ART_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
 CARDS_FILE = DATA_DIR / "cards.json"
 CHARACTERS_FILE = DATA_DIR / "characters.json"

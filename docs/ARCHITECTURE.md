@@ -142,6 +142,36 @@ Odznaki na kartach (kolorowy pionek, strzałka, znak +/−) też są danymi.
 Prototyp wnioskował je z tytułu karty przez dopasowywanie tekstu — działało,
 dopóki ktoś nie nazwał karty inaczej.
 
+### 6a. Grafiki kart, czyli warstwa opcjonalna
+
+Karta z własną grafiką (`assets/card_art/Troll.png`) rysuje się jako
+**Signature Card**: obraz zajmuje całą kartę, tytuł jest nakładany na dole, a
+najechanie kursorem przyciemnia obraz i odsłania opis. Karta bez grafiki
+wygląda dokładnie tak jak dotąd.
+
+Trzy decyzje projektowe stoją za tym, że to jedna gałąź, a nie drugi system
+kart:
+
+* **Rozgałęzienie jest w jednym miejscu.** `CardRenderer.face()` to jedyne
+  wejście do rysowania karty — przechodzą przez nie panele, nakładki, wachlarz
+  i podgląd „Ostatnio zagrane". Wystarczyło rozgałęzić je na wejściu; żaden
+  z tych kodów nic o grafikach nie wie.
+* **Stan najechania już tamtędy płynął.** `face()` dostawało `highlighted`, więc
+  nowy parametr `reveal` domyślnie wyprowadza się właśnie z niego. Każde
+  istniejące wywołanie dostało dwa stany karty za darmo, a tylko wachlarz —
+  który i tak animuje najechanie liczbą 0..1 — podaje wartość pośrednią.
+* **Powiązanie pliku z kartą to nie jest reguła gry.** Nazwa pliku i tytuł karty
+  są porównywane po uproszczeniu (`Stanczyk.png` → „Stańczyk"). To wygląda jak
+  wnioskowanie z tytułu, którego §6 wyżej zabrania — ale zakaz dotyczy
+  *zachowania* karty, a nie tego, skąd wziąć obrazek. Najgorsze, co może zrobić
+  zmiana tytułu, to odpiąć grafikę, a karta bez grafiki to karta pergaminowa,
+  czyli dokładnie to samo, co przy brakującym pliku. Kto chce przypiąć na stałe,
+  wpisuje `"art"` w JSON-ie.
+
+Brakujący albo uszkodzony plik nigdy nie zatrzymuje gry — to nie jest
+uprzejmość, tylko warunek konieczny: folder z grafikami zapełnia się ręcznie
+przez miesiące i z definicji bywa niekompletny.
+
 ## 7. Czego celowo nie ma
 
 * **Automatycznego wykonywania efektów kart.** Karty opisują, co robią; ruch

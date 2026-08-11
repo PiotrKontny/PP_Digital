@@ -30,7 +30,6 @@ import pygame
 
 from ..cards.base_card import Card
 from ..config import settings
-from ..config.theme import lighten
 from ..engine import commands as cmd
 from ..engine import effects
 from ..engine.animation import approach, approach_point
@@ -402,7 +401,6 @@ class HandFan:
             if slot is None:
                 continue
             colour = theme.deck_colors.get(slot.card.deck_id)
-            playable = slot.card.is_playable
             highlighted = uid in (self.hovered, self.dragging)
             border = colour
             if uid == self.dragging:
@@ -434,45 +432,41 @@ class HandFan:
                 size=card_size, scale=slot.scale,
                 highlighted=highlighted, border_color=border,
                 shadow=16 if highlighted else 7,
+                # The fan already animates hover as a float, so a Signature
+                # card reveals its text on the same curve as the lift rather
+                # than snapping at a threshold.  A card without artwork
+                # ignores this entirely.
+                reveal=slot.hover,
             )
-            if slot.card.locked:
-                self._locked_marker(surface, slot, card_size)
-            elif playable and uid != self.dragging:
-                self._playable_marker(surface, slot, card_size)
+            # Nothing is drawn ON TOP of a card here.  Two status pips used to
+            # be — a green one for "the engine can resolve this" and a pale one
+            # for "locked, you do not control it" — both pinned to the top edge
+            # of the card.  They were removed in stage 31: once cards could
+            # carry full-card artwork the pip landed in the middle of the
+            # illustration, and on Troll it sat exactly on the gem the artwork
+            # draws there.  Neither was load-bearing (see the note below).
 
         if self.dragging is not None:
             self._draw_drag_hint(surface)
 
-    def _playable_marker(self, surface: pygame.Surface, slot: FanSlot,
-                         card_size: Tuple[int, int]) -> None:
-        """A small green pip on cards the engine can actually resolve."""
-        radians = math.radians(slot.angle)
-        offset = card_size[1] * slot.scale * 0.5 - 10
-        centre = (
-            slot.position[0] + math.sin(radians) * offset,
-            slot.position[1] - math.cos(radians) * offset,
-        )
-        self.r.aa_circle(centre, 5, self.r.theme.valid,
-                         lighten(self.r.theme.valid, 0.6), 1, surface)
-
-    def _locked_marker(self, surface: pygame.Surface, slot: FanSlot,
-                       card_size: Tuple[int, int]) -> None:
-        """A warning pip on a card the player does not control.
-
-        Same geometry as the playable pip and a different colour, because the
-        two answer the same question — "can I click this?" — and putting them
-        anywhere near each other in different places would make both harder to
-        read.
-        """
-        radians = math.radians(slot.angle)
-        offset = card_size[1] * slot.scale * 0.5 - 10
-        centre = (
-            slot.position[0] + math.sin(radians) * offset,
-            slot.position[1] - math.cos(radians) * offset,
-        )
-        theme = self.r.theme
-        self.r.aa_circle(centre, 5, theme.prompt, lighten(theme.prompt, 0.6), 1,
-                         surface)
+    # ── where the status pips went (stage 31) ────────────────────────────────
+    # ``_playable_marker`` and ``_locked_marker`` drew two small circles at the
+    # top edge of every hand card.  They were DISPLAY ONLY: nothing hit-tested
+    # them, no gesture consulted them, and no rule read them.  Both questions
+    # they answered are still answered, and still by the engine rather than by
+    # the interface:
+    #
+    #   * "may I play this?"  — ``Card.is_playable`` still gates ``_activate``,
+    #     an unplayable card is still discarded instead of played, and a drag
+    #     still colours the card's own border green / prompt / red from
+    #     ``effects.preview``;
+    #   * "is this locked?"   — ``GameState`` still refuses PlayCard and
+    #     DiscardCard for a locked card, and clicking one still says so in the
+    #     status bar ("… zadziała sama na początku twojej tury").
+    #
+    # So removing the pips removed a redundant hint, not a mechanic.  If the
+    # anticipatory cue is ever wanted back, put it somewhere that is not the
+    # card face — the shelf under the fan, or the card's own border.
 
     def _draw_drag_hint(self, surface: pygame.Surface) -> None:
         preview = self.drag_preview

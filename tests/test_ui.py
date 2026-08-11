@@ -2280,13 +2280,19 @@ def _give(state, player, title):
 
 
 def _badge_card(screen, badge):
-    """A throwaway card carrying nothing but the badge under test."""
+    """A throwaway card carrying nothing but the badge under test.
+
+    ``art=""`` is the opt-out, not merely "unset": the first movement
+    definition is Troll, which HAS artwork, and a Signature card draws no
+    badge strip at all.  Leaving it unset would let the definition this is
+    built from decide whether there is a badge to measure.
+    """
     from dataclasses import replace as dataclass_replace
 
     from pedzacy_piotrek.cards.base_card import Card
 
     definition = screen.state.deck(settings.DECK_MOVEMENT).definition.cards[0]
-    return Card(dataclass_replace(definition, badge=badge, image=None))
+    return Card(dataclass_replace(definition, badge=badge, image=None, art=""))
 
 
 def _badge_width(surface):

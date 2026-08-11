@@ -410,9 +410,11 @@ class RevealOverlay:
         r.drop_shadow(rect, radius=16, spread=26, alpha=170, offset=(0, 10),
                       surface=surface)
         r.rounded_gradient(surface, rect, theme.card_bg, theme.card_bg_shade, 16)
+        # One border here too (stage 31).  This overlay paints its own card
+        # rather than calling ``CardRenderer.face``, so it carried a second
+        # copy of the old inset rule; leaving it would have made the reveal the
+        # only place in the game where the double frame survived.
         pygame.draw.rect(surface, colour, rect, 4, border_radius=16)
-        pygame.draw.rect(surface, theme.card_frame, rect.inflate(-14, -14), 1,
-                         border_radius=12)
 
         if squeeze > 0.45:
             pad = int(card_w * 0.09)

@@ -64,7 +64,7 @@
         {
           "title": "Big D Randy",
           "skill": "Granny Costume",
-          "text": "Freezuje wybrany pionek na pełną turę. Pionek musi stać samotnie. 1x",
+          "text": "Freezuje wybrany pionek na pełną turę. Pionek musi stać samotnie",
           "uses": 1,
           "ability": {
             "type": "freeze_pawn",
@@ -76,7 +76,7 @@
         {
           "title": "Lubin",
           "skill": "Jazdy",
-          "text": "Freezuje Piotrka na jedną turę. 1x",
+          "text": "Freezuje Piotrka na jedną turę",
           "uses": 1,
           "ability": {
             "type": "freeze_player",
@@ -87,7 +87,7 @@
         {
           "title": "Mitoman",
           "skill": "PAA",
-          "text": "Przenosi pionka najbardziej do przodu do pionka najbardziej do tyłu. 1x",
+          "text": "Przenosi pionka najbardziej do przodu do pionka najbardziej do tyłu",
           "uses": 1,
           "ability": {
             "type": "stack_pawn",
@@ -98,7 +98,7 @@
         {
           "title": "Glockboy",
           "skill": "Where are you Marcus?",
-          "text": "Sprawdza dowolnego pionka. Jeżeli nie trafi, odpada z gry. Co najmniej 3 pionki muszą być sprawdzone. 1x",
+          "text": "Sprawdza dowolnego pionka. Jeżeli nie trafi, odpada z gry. Co najmniej 3 pionki muszą być sprawdzone",
           "uses": 1,
           "ability": {
             "type": "check_pawn",
@@ -109,7 +109,7 @@
         {
           "title": "Norbur",
           "skill": "Plac",
-          "text": "Pionki mogą poruszać się tylko pomiędzy najdalszym i najbliższym pionkiem na jedną turę. Minimum 3 pola różnicy. 1x",
+          "text": "Pionki mogą poruszać się tylko pomiędzy najdalszym i najbliższym pionkiem na jedną turę. Minimum 3 pola różnicy",
           "uses": 1,
           "ability": {
             "type": "restrict_movement",
@@ -120,7 +120,7 @@
         {
           "title": "Dziad",
           "skill": "Skrypt",
-          "text": "Przesuwa wybranego pionka o dwa lub jedno pole, do przodu lub do tyłu. 2x",
+          "text": "Przesuwa wybranego pionka o dwa lub jedno pole, do przodu lub do tyłu",
           "uses": 2,
           "ability": {
             "type": "move_pawn",
@@ -135,7 +135,7 @@
         {
           "title": "Ondrej",
           "skill": "Radar",
-          "text": "Skleja 2 pionki ze sobą na pełną turę. Przy checku oba pionki są sprawdzane. 1x",
+          "text": "Skleja 2 pionki ze sobą na pełną turę. Przy checku oba pionki są sprawdzane",
           "uses": 1,
           "ability": {
             "type": "link_pawns",
@@ -146,7 +146,7 @@
         {
           "title": "Dziubdziuch",
           "skill": "Przerwanie Systemowe",
-          "text": "Blokuje ruch Piotrka w dowolnym momencie rozgrywki, spala użytą kartę. 1x",
+          "text": "Blokuje ruch Piotrka w dowolnym momencie rozgrywki, spala użytą kartę",
           "uses": 1,
           "ability": {
             "type": "freeze_player",
@@ -158,7 +158,7 @@
         {
           "title": "Atencjusz",
           "skill": "Liskowy Konkurs",
-          "text": "Przyznaje sobie ruch po zakończeniu ruchu dowolnej osoby, w tym samego siebie. 1x",
+          "text": "Przyznaje sobie ruch po zakończeniu ruchu dowolnej osoby, w tym samego siebie",
           "uses": 1,
           "ability": {
             "type": "grant_extra_turn",
@@ -179,7 +179,7 @@
       "cards": [
         {
           "title": "ChatGPT",
-          "text": "Może zwiększyć zasięg każdej karty ruchu o jedno pole. Posiada dwie karty ruchu mniej. 5x",
+          "text": "Może zwiększyć zasięg każdej karty ruchu o jedno pole. Posiada dwie karty ruchu mniej",
           "uses": 5,
           "ability": {
             "type": "movement_bonus",
@@ -193,7 +193,7 @@
         },
         {
           "title": "Ice Block",
-          "text": "Może odmówić sprawdzenia. Pionki muszą być rozdzielone przed kolejnym sprawdzeniem. 1x",
+          "text": "Może odmówić sprawdzenia. Pionki muszą być rozdzielone przed kolejnym sprawdzeniem",
           "uses": 1,
           "ability": {
             "type": "refuse_check"
@@ -201,7 +201,7 @@
         },
         {
           "title": "Dług u Tomasza",
-          "text": "Wybiera dwa pionki, które nie mogą ze sobą sąsiadować przez pełną turę. 1x",
+          "text": "Wybiera dwa pionki, które nie mogą ze sobą sąsiadować przez pełną turę",
           "uses": 1,
           "ability": {
             "type": "forbid_adjacency",

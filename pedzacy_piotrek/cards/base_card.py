@@ -206,6 +206,18 @@ class CardDef:
     #: card is a one-line change in the JSON; the renderer falls back to the
     #: drawn card face whenever the file is missing.
     image: Optional[str] = None
+    #: SIGNATURE CARD artwork identifier — a NAME, not a path, resolved against
+    #: ``assets/card_art`` by ``render/card_art.py``.  Leave it out and the name
+    #: is derived from the title, so dropping ``Troll.png`` into that folder is
+    #: the whole of "give Troll artwork".  Set it when the file cannot be named
+    #: after the card: a shared picture, or a title that two decks both use
+    #: (``"art": "chest/shady"``).
+    #:
+    #: This is NOT ``image``.  ``image`` is a small illustration drawn INSIDE
+    #: the parchment body of a standard card; ``art`` REPLACES the face.  A
+    #: card may declare either, neither, or — pointlessly but harmlessly —
+    #: both, in which case the Signature face wins and ``image`` is unused.
+    art: Optional[str] = None
     count: int = 1
 
     @property
@@ -250,6 +262,10 @@ class CardDef:
             in_opening_hand=bool(raw.get("in_opening_hand", True)),
             role=raw.get("role"),
             image=raw.get("image"),
+            # ``"art": false`` reads more naturally in JSON than ``"art": ""``
+            # and means the same thing: never look for a picture for this card.
+            art=("" if raw.get("art") is False
+                 else (str(raw["art"]) if raw.get("art") is not None else None)),
             count=int(raw.get("count", 1)),
         )
 
@@ -315,6 +331,16 @@ class Card:
     @property
     def badge(self) -> Optional[Badge]:
         return self.definition.badge
+
+    @property
+    def art(self) -> Optional[str]:
+        """The Signature Card artwork identifier, if the JSON names one.
+
+        Read through the DEFINITION rather than cached, so a transformed card
+        (Gamechanger becoming Alter Ego) shows the artwork of what it has
+        become rather than of what it was printed as.
+        """
+        return self.definition.art
 
     @property
     def effect(self) -> Optional["EffectSpec"]:

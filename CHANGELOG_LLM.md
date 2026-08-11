@@ -3676,3 +3676,288 @@ guarantee is untouched.
   any pixel number is which of the three scales it belongs to.
 - `CARD_TYPE_ANCHOR` (render) and `TYPE_ANCHOR` (ui) must stay equal. They live
   in packages that must not import each other, so a test asserts it.
+
+---
+
+## Stage 30 — Signature Cards: optional full-card artwork
+**Date:** 2026-08-11
+
+### Starting point
+The request, from the project owner:
+
+> I want to introduce a second type of card presentation: cards with custom
+> artwork. The important part is that this must be OPTIONAL. I want to
+> gradually add artwork to individual cards over time. I do NOT want to
+> redesign every card immediately.
+
+Plus a workflow: put a file in a folder, and that card starts using it — no
+rendering-code changes, ever. Two reference images of a Troll card were
+supplied, one resting and one hovered.
+
+### The shape of it
+The whole feature is one branch on the first line of `CardRenderer.face`:
+
+    Card ──> art.surface(definition)
+               │
+               ├── None ──────> the parchment face, unchanged since stage 29
+               └── a Surface ─> _signature_face()
+
+`face()` is where this belongs because it is the ONE entry point every card in
+the game already goes through — the hand fan via `draw_transformed`, panels via
+`draw_in`, the overlays, the RecentlyPlayed preview. Branching there meant
+nothing else had to learn that artwork exists. **No file in `ui/` mentions it**
+except one keyword argument in the fan.
+
+### 1. The link is the filename
+`render/card_art.py` scans `assets/card_art` once and folds both filenames and
+card titles to the same key:
+
+| File | Key | Card |
+|---|---|---|
+| `Troll.png` | `troll` | Troll |
+| `rage-quit.PNG` | `rage_quit` | Rage Quit |
+| `Stanczyk.png` | `stanczyk` | Stańczyk |
+
+Case, spaces, punctuation and Polish diacritics all fold. `ł` is handled
+explicitly — it is the one Polish letter Unicode will not decompose, and a
+`unicodedata`-only implementation silently drops it.
+
+**Titles are not unique across decks.** "Shady" is both a Mod Patusa and a
+Chest card and they want different pictures; the brief did not anticipate this.
+A file in a subfolder named after a deck (`mods/Shady.png`) is scoped to it and
+tried first, and a bare name that two subfolders both claim is treated as
+ambiguous and dropped rather than guessed at — first-match-wins would resolve
+differently on different filesystems.
+
+`CardDef.art` overrides the derived name. It has three states, and the third is
+one this stage discovered it needed:
+
+    None   derive from the title   (the default)
+    "x"    use exactly that name
+    ""     no artwork, do not look (the opt-out)
+
+### 2. Why matching on the title is not N7
+N7 forbids inferring card BEHAVIOUR from titles, because the prototype's badges
+and effects broke the moment a card was renamed. Nothing here touches
+behaviour: the worst a rename can do is un-match a picture, and an un-matched
+card is a standard card — the same fallback a missing file gets. `"art"` pins
+it where that matters. **This reasoning does not extend to anything the engine
+reads.**
+
+### 3. The reveal defaults from `highlighted`
+`face(..., reveal=None)` → `1.0 if highlighted else 0.0`.
+
+That default is doing real work. Every panel and overlay in the game already
+passes `highlighted`, so all of them got both card states without a single
+edit. Only `hand_fan`, which owns a smooth `slot.hover`, passes a float — which
+is what makes the transition glide instead of snapping at a threshold. Reveal
+is quantised to `REVEAL_STEPS` before it reaches the cache key, for the reason
+`SIZE_STEP` exists one axis over.
+
+### 4. The two states are one layout
+The title, divider and description are laid out as ONE block anchored to the
+bottom margin, and the resting title position is that same block with the
+description removed:
+
+    resting_top = h - bottom_pad - title_h
+    opened_top  = h - bottom_pad - desc_h - 2*gap - title_h
+    title_top   = lerp(resting_top, opened_top, reveal)
+
+So the title rises by **exactly** the height of the description appearing under
+it — at any card size, for any length of text, with no tuned offsets to be
+wrong on a monitor nobody tested on. Same reasoning as stage 29's
+`_lerp(roomy, tight)`.
+
+### 5. Responsive: stage 29's invariant now covers the new face
+Every number on a Signature face is a fraction of the CARD — title, body,
+scrim heights, outline thickness — and all type goes through `_font`, so:
+
+    A CARD OF A GIVEN PIXEL SIZE RENDERS IDENTICALLY ON EVERY MONITOR
+
+still holds. `test_a_card_of_a_given_size_renders_identically_on_every_monitor`
+pins it across six font scales (0.85 → 1.8) by comparing every fifth pixel
+against the reference render.
+
+Verified in a live game: hand card 216×309 at 2560×1440 and 215×308 at
+1920×1200 — effectively identical, exactly as stage 29 intended.
+
+**Long Polish rules text is cut, not spilled.** `_description_font` shrinks the
+type and then TRUNCATES the lines that still do not fit. Found at 84×120, where
+the font floor in `_font` takes over and shrinking stops helping: the
+description ran off the bottom of the card. This is what `Renderer.draw_wrapped`
+already does to a standard card's body.
+
+The artwork is **cover-scaled** — scaled by the larger of the two ratios, with
+the overflow cropped. Fitting would letterbox and show the parchment the
+picture was supposed to replace; stretching would distort it.
+
+### 6. A test failure that was worth having
+`test_a_two_pawn_badge_is_wider_than_a_one_pawn_badge` failed: `142 < 142`.
+
+Its helper builds a throwaway card out of `movement.cards[0]` — which is
+**Troll**, now a Signature card, which draws no badge strip at all. The test was
+right and the feature had a hole: there was no way to say "this card keeps its
+parchment face". Hence the `""` opt-out, and the helper now strips `art` the
+way it already stripped `image`. Nothing was deleted or relaxed.
+
+### 7. Typography
+Titles ask `FontBook` for a DISPLAY face and fall back to the bold UI face when
+none is installed. Nothing proprietary is bundled: dropping
+`assets/fonts/Display-Bold.ttf` in restyles every artwork card at once. The
+supplied references are Hearthstone-framed; **the frame was not reproduced** —
+it is Blizzard's, and the brief rules out copying their assets. `Troll.png` is
+the inner illustration only, with the baked-in title cropped away so the game
+can draw it.
+
+### Files
+- `render/card_art.py` — **new.** `slugify`, `CardArtLibrary`. Nothing in it
+  raises; every failure path answers `None`.
+- `render/card_renderer.py` — the branch, `_signature_face`, `_cover`,
+  `_scrim`, `_outlined`, `_description_font`, `_lerp`; `reveal` threaded
+  through `face` / `draw` / `draw_transformed`; `_font` and `_title_font` take
+  a fraction and a display flag.
+- `cards/base_card.py` — `CardDef.art`, `Card.art`, `from_dict` (accepts
+  `false` as the opt-out).
+- `config/settings.py` — `CARD_ART_DIR`, `CARD_ART_SUFFIXES`.
+- `config/theme.py` — six `card_art_*` colours; `FontBook.get(display=)`.
+- `ui/hand_fan.py` — one keyword argument.
+- `assets/card_art/` — **new folder**, with `Troll.png` and its own README.
+- `tests/test_card_art.py` — **new**, 61 tests.
+- `tests/test_ui.py` — `_badge_card` strips `art` (see §6).
+- Docs: `assets/card_art/README.md` (new), `assets/README.md`, `README.md`,
+  `docs/ARCHITECTURE.md` §6a, `LLM_Instructions.txt` (new section
+  "HOW SIGNATURE CARDS WORK", N36a–c).
+
+### Verification
+- **1243 tests pass** (1182 before this stage).
+- The new tests come in matching pairs: half prove the Signature path works,
+  half prove nothing else moved —
+  `test_a_card_without_artwork_is_byte_identical_to_before`,
+  `test_artwork_changes_no_gameplay_property`,
+  `test_the_deck_composition_is_untouched`.
+- Layout is measured against **synthetic flat-grey artwork**, not the shipped
+  photo. The first draft scanned for pale pixels and kept finding the white
+  sneaker in the Troll picture instead of the title; against a flat backdrop
+  the only pale pixels are ones the renderer drew.
+- Rendered and inspected: six card sizes × both states, and live game screens
+  at 2560×1440 and 1920×1200 with Troll hovered in the hand.
+
+### Notes
+- **No gameplay file was touched.** No command, event, effect handler, status,
+  deck count or turn rule changed. Troll is still locked, still kept out of
+  opening hands, still unplayable by hand — a test pins all three against the
+  same definition with its artwork stripped.
+- `art` is **not** `image`. `image` is a small illustration inside the
+  parchment body, addressed by path under `assets/images`; `art` replaces the
+  face and is addressed by name under `assets/card_art`. Different folders,
+  different fields, different pictures.
+- The folder is *meant* to be incomplete. It fills up by hand over months, so
+  "a missing file falls back silently" is a requirement, not a courtesy.
+
+
+---
+
+## Stage 31 — The old card overlay comes off
+**Date:** 2026-08-11
+
+### Starting point
+The report, from the project owner:
+
+> There is currently an old visual overlay present on cards. It appears on
+> basically every card [...] a very thin brown rectangular border somewhere
+> inside the card, a small green circle positioned at the top center of that
+> inner border. [...] now that Signature Cards can use full-card artwork, this
+> overlay is visually problematic.
+
+Correct, and it had become a real defect rather than a taste question. On Troll
+the pip landed exactly on the gem the artwork draws at its top edge.
+
+### What it actually was — two unrelated things that looked like one
+The owner described the pip as belonging to the inner border. It does not; they
+come from different files and are drawn at different times. They only *look*
+related because the pip is pinned ten pixels below the card's top edge and the
+rule runs at `max(3, h*0.028)`, which at hand size puts the circle exactly on
+the line.
+
+| Element | Source | Was it functional? |
+|---|---|---|
+| inset brass rule | `card_renderer.face`, `_signature_face`, `overlays.py` reveal card | no — decoration |
+| green circle | `hand_fan._playable_marker` (`theme.valid`) | display only |
+| pale circle | `hand_fan._locked_marker` (`theme.prompt`) | display only |
+
+The brief asked for this to be checked rather than assumed, so it was. **The
+pips were display only.** Nothing hit-tests them, no gesture consults them and
+no rule reads them; `draw()` was their only caller, and `playable` was a local
+computed for their sake alone. Every question they answered is still answered,
+and still by the engine:
+
+* *may I play this?* — `Card.is_playable` still gates `_activate`, an
+  unplayable card is still discarded rather than played, and a drag still
+  colours the card's own border green / prompt / red from `effects.preview`;
+* *is it locked?* — `GameState` still refuses `PlayCard` and `DiscardCard`, and
+  clicking one still says so in the status bar.
+
+So the removal took a redundant hint, not a mechanic. What is genuinely lost is
+the *anticipatory* cue — the player now learns a card is locked by clicking it
+rather than by looking at it. Recorded here deliberately; if it is wanted back
+it belongs on the shelf or the border, never on the card face.
+
+### Removed
+- `card_renderer.face` — the inset rule. `inset` survives as the text margin it
+  always doubled as.
+- `card_renderer._signature_face` — the same rule, over the artwork.
+- `ui/overlays.py` (`RevealOverlay`) — a third copy. This overlay paints its own
+  card instead of calling `CardRenderer.face`, so leaving it would have made the
+  reveal the only place in the game where the double frame survived.
+- `ui/hand_fan.py` — `_playable_marker`, `_locked_marker`, their call sites, the
+  `playable` local and the now-unused `lighten` import.
+- `theme.card_frame` — retired. Nothing referenced it any more, and a colour
+  named for a frame that frames nothing is an invitation to draw the line again.
+
+**Kept:** the outer border (the card's silhouette, and the channel the drag
+preview colours through `border_color`), the title/body divider and its brass
+diamond (content, not overlay), the card back's own inset frame and emblem (a
+different composition, and no artwork under it), and the badge strip.
+
+### Verification
+- **1221 pass, 26 fail — and the 26 are pre-existing.** The uploaded zip fails
+  the identical set before any edit (1216 / 27). See "Not this stage" below.
+- Three new tests in `tests/test_card_art.py`, each confirmed to FAIL against
+  the pre-change code so they are not vacuous:
+  `test_no_inner_rule_is_drawn_inside_a_standard_card`,
+  `test_nothing_is_drawn_over_signature_artwork_but_the_border`,
+  `test_the_hand_draws_no_status_pip_on_a_card`. The pip test recomputes the
+  former pip centre from the live fan geometry rather than counting theme
+  colours across the shelf — the artwork is a photograph and always contains a
+  few pixels that match a theme colour by chance, so a count would be flaky.
+- `test_removing_the_pips_left_the_answers_they_gave_intact` pins the rules the
+  pips used to hint at.
+- `inspect_frame.py`: 0 problems at 1280×760, 1920×1200, 2560×1440, 3840×2160,
+  hovered and not. `run_game.py --selftest` exits 0.
+- Hover reveal re-checked end to end: artwork darkens, title lifts, description
+  appears, `slot.hover` reaches 1.0.
+
+### Not this stage — two things found on the way in
+1. **26 tests were already failing.** The Mod Patusa card `Shady` was renamed to
+   `Obóz Harcerski` in `cards.json`; the mod tests look it up by title and raise
+   `StopIteration`. The ENGINE is fine — mod rules are declared as `passive` and
+   read through `GameState.mod_rule`, never by title — so this is test content
+   lagging card content, not a broken game. Untouched here because it is card
+   data and out of this brief's scope.
+2. **`Shady.png` now illustrates the CHEST card, not the mod**, because the mod
+   no longer has that title. If the picture was drawn for the mod it needs
+   renaming to `Obóz Harcerski.png`.
+
+`test_a_title_two_decks_share_is_scoped_by_folder` was one of the 26 and IS
+fixed here, because it was mine and it was wrong: it used Shady as its example
+of a title two decks share, so the rename deleted the collision and the test
+with it. It now builds its two definitions instead of looking them up — a
+mechanism has to stay tested whether or not today's content exercises it.
+
+### Notes
+- **Nothing goes on top of a card face** (new N36d). One border, the card's own
+  content, nothing else. A pip, badge, counter or frame added there lands in
+  the middle of somebody's illustration.
+- The card face is the one surface in this game whose content the project does
+  not control. Everything drawn over it is a bet that no artwork will ever want
+  that spot, and Troll lost that bet at the first attempt.

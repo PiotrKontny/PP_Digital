@@ -1,8 +1,8 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 29 — responsive UI: three scales instead of one, and card
-              type no longer scaled twice, so a 1920x1200 laptop reads like
-              the 2560x1440 desktop (see CHANGELOG_LLM.md)
+Last updated: stage 31 — the old card overlay removed: the inset brass rule and
+              the two status pips no longer paint over a card face, so full-card
+              artwork is unobstructed (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -231,7 +231,14 @@ WORKING:
   stacking every pawn on one field and having his at the bottom. A wrong tower
   crosses that colour off every notepad at once. Two different endings, with a
   reveal, a way back to the poczekalnia and a way out.
-- 1182 automated tests.
+- SIGNATURE CARDS (stage 30): a card with a picture in ``assets/card_art`` is
+  drawn as the ARTWORK, with the title overlaid near the bottom and the
+  description revealed on hover behind a darkening gradient; a card without one
+  is drawn exactly as it always was.  The link is the FILENAME — ``Troll.png``
+  finds the card titled "Troll" — so illustrating a card is dropping a file in
+  a folder, with no JSON and no renderer change.  Troll is the worked example
+  and the only illustrated card so far.  See "HOW SIGNATURE CARDS WORK".
+- 1243 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
@@ -322,6 +329,11 @@ pedzacy_piotrek/
     turn_order.py    compute_round_turn_order, chest_recipient_for_round.
     animation.py     Easing functions, Tween, Animator, approach helpers.
   render/
+    card_art.py      WHICH PICTURE BELONGS TO WHICH CARD.  Scans
+                     ``assets/card_art`` once, folds filenames and card titles
+                     to the same key, and loads on demand.  Nothing in it may
+                     raise: every failure path answers None and the card falls
+                     back to the parchment face.
     renderer.py      Primitive drawing + text cache + shadows, shape/ring glows,
                      premium_panel / interactive_panel, text fitting.
     highlight.py     THE HIGHLIGHT SYSTEM.  Every number behind hover,
@@ -329,6 +341,9 @@ pedzacy_piotrek/
     camera.py        Camera: world<->screen, zoom, pan, clamping, set_viewport.
     board_renderer.py Paints the static world once; blits the visible slice.
     card_renderer.py Cached card faces at any size; rotated drawing for the fan.
+                     ``face()`` branches at its first line: artwork present ->
+                     ``_signature_face``, otherwise the parchment face it has
+                     always painted.
     particles.py     Dust, sparkle, trail, leaves.
   ui/
     app.py           App shell, window, screen stack, main loop, resizing.
@@ -379,6 +394,9 @@ pedzacy_piotrek/
     session.py       LocalSession, HostSession, ClientSession, NetworkStats.
     service.py       HostService / ClientService — what the screens talk to.
   assets/            Optional PNG/TTF/OGG overrides (see assets/README.md).
+    card_art/        FULL-CARD artwork, named after the card.  Its own
+                     README.md is the owner-facing workflow document; keep it
+                     current, it is the file they will actually open.
   main.py            Entry point and CLI.
 
 tests/               test_engine, test_board, test_session, test_ui,
@@ -671,6 +689,15 @@ A card may also declare:
                      slot for the whole game.  Stańczyk shipped that way for
                      one commit; test_no_locked_card_can_be_dealt_at_the_start
                      is what stops it happening again.
+  "art": "<name>"    OPTIONAL Signature Card artwork.  A NAME, not a path, and
+                     almost never needed: leave it out and the name is derived
+                     from the TITLE, so ``assets/card_art/Troll.png`` illustrates
+                     Troll with no JSON at all.  Set it when the file cannot be
+                     named after the card, or when a title is shared by two
+                     decks ("Shady" is a Mod AND a Chest card — scope it as
+                     ``"chest/shady"``).  ``"art": ""`` or ``"art": false`` is
+                     the OPT-OUT: this card keeps its parchment face even if a
+                     matching file exists.  NOT the same field as ``image``.
   "in_opening_hand": false
                      keep the card out of the opening deal for a reason OTHER
                      than being locked.  Troll declares it explicitly as well,
@@ -1810,6 +1837,182 @@ before trusting it.
 
 
 ================================================================================
+HOW SIGNATURE CARDS WORK  (stage 30 — read before touching CardRenderer.face)
+================================================================================
+
+A SIGNATURE CARD is a card with its own full-card artwork.  Every other card is
+a STANDARD card and is painted exactly as it was before this existed.  The
+whole feature is one branch on the first line of ``CardRenderer.face``:
+
+    Card ──> art.surface(definition)
+               │
+               ├── None ──────> the parchment face (unchanged since stage 29)
+               └── a Surface ─> _signature_face()
+
+THE POINT IS THAT IT IS OPTIONAL.  The owner illustrates cards ONE AT A TIME,
+over months.  A change that converts every card, or that makes an unillustrated
+card look even slightly different, has missed the requirement entirely.
+
+
+WHY face() IS THE RIGHT PLACE AND THE ONLY PLACE
+------------------------------------------------
+Every card drawn anywhere in the game goes through ``face()`` — the hand fan
+via ``draw_transformed``, every panel via ``draw_in``, the overlays, the
+RecentlyPlayed preview.  Branching there means NOTHING ELSE had to learn about
+artwork.  If you find yourself adding a second entry point, or an ``if
+card.has_art`` in ui/, the branch has been put in the wrong place.
+
+
+THE REVEAL, AND WHY IT DEFAULTS FROM ``highlighted``
+----------------------------------------------------
+``face(..., reveal=None)``.  0 is the resting state (artwork + title low), 1 is
+the hovered state (artwork darkened, title lifted, description under it).
+
+``None`` derives it as ``1.0 if highlighted else 0.0``.  That default is doing
+real work: every panel and overlay in the game ALREADY passes ``highlighted``,
+so all of them got both states without a single edit.  Only ``hand_fan``, which
+owns a smooth ``slot.hover`` of its own, passes a float — which is what makes
+the transition glide rather than snap.
+
+Reveal is QUANTISED to ``REVEAL_STEPS`` before it reaches the cache key, for
+the same reason ``SIZE_STEP`` exists: a continuous 0..1 would paint a new face
+every frame of the hover.
+
+
+THE TWO STATES ARE ONE LAYOUT
+-----------------------------
+Do not position the title twice.  The title, divider and description are laid
+out as ONE BLOCK anchored to the bottom margin, and the resting title position
+is that same block with the description removed:
+
+    resting_top = h - bottom_pad - title_h
+    opened_top  = h - bottom_pad - desc_h - 2*gap - title_h
+    title_top   = lerp(resting_top, opened_top, reveal)
+
+So the title rises by EXACTLY the height of the description appearing under it,
+at any card size, for any length of text, with no tuned offsets that will be
+wrong on a monitor nobody tested on.  This is the same reasoning as stage 29's
+``_lerp(roomy, tight)``: one readable pair of numbers, not a formula to decode.
+
+
+EVERYTHING ON THE FACE IS A FRACTION OF THE CARD
+------------------------------------------------
+``SIGNATURE_TITLE_FRACTION``, ``SIGNATURE_TEXT_FRACTION``, the scrim heights,
+the outline thickness — all of the card's HEIGHT, never of ``ui_scale``.  This
+is stage 29's invariant and it now covers the new face as well:
+
+    A CARD OF A GIVEN PIXEL SIZE RENDERS IDENTICALLY ON EVERY MONITOR.
+
+``test_a_card_of_a_given_size_renders_identically_on_every_monitor`` pins it
+across six font scales.  If you add a number to ``_signature_face``, it goes
+through ``_font`` or it is a fraction of ``h``.  Nothing else.
+
+LONG POLISH RULES TEXT IS CUT, NOT SPILLED.  ``_description_font`` shrinks the
+type and then TRUNCATES the lines that still do not fit.  Below about 110x157
+the font floor in ``_font`` takes over and shrinking stops helping; without the
+truncation the description ran off the bottom of a panel card.  This is what
+``Renderer.draw_wrapped`` already does to a standard card's body.
+
+
+NOTHING IS DRAWN ON TOP OF THE ARTWORK  (stage 31)
+--------------------------------------------------
+Inside its own border a Signature card is the picture, the title and the
+description.  That is the whole list.
+
+Two things used to be painted over it and were removed:
+
+  * the INSET BRASS RULE, one pixel in from ``max(3, h*0.028)``, which read as
+    a scratch across an illustration rather than a frame around it.  It was
+    drawn in three places — ``face``, ``_signature_face`` and the reveal
+    overlay's own card — and all three went at once.  ``theme.card_frame`` was
+    retired with them, so putting the line back means adding a colour first.
+  * the STATUS PIPS, ``_playable_marker`` and ``_locked_marker`` in
+    ``ui/hand_fan.py``: a green circle for "the engine can resolve this" and a
+    pale one for "locked".  Both sat ten pixels below the card's top edge — on
+    Troll, exactly on the gem the artwork draws there.
+
+The pips were DISPLAY ONLY.  Nothing hit-tested them and no rule read them, and
+both questions they answered are still answered by the engine: ``is_playable``
+still gates ``_activate``, ``GameState`` still refuses to play or discard a
+locked card, a drag still colours the card's own border from
+``effects.preview``, and clicking a locked card still says so in the status
+bar.  If an anticipatory cue is ever wanted back, put it anywhere except the
+card face.
+
+
+THE ARTWORK IS COVER-SCALED, NEVER STRETCHED
+--------------------------------------------
+``_cover`` scales by the LARGER of the two ratios and crops the overflow.
+Fitting would letterbox the picture and show the parchment it was supposed to
+replace; stretching would distort it.  Both are explicitly forbidden.
+
+
+HOW A FILE FINDS ITS CARD  (render/card_art.py)
+-----------------------------------------------
+Filename and card title are both put through ``slugify`` and compared, so
+``Troll.png``, ``troll.PNG`` and ``TROLL.jpg`` are one name, and
+``Stanczyk.png`` finds "Stańczyk" (the ``ł``/diacritic fold is explicit —
+Unicode will not decompose ``ł`` for us).
+
+TITLES ARE NOT UNIQUE ACROSS DECKS.  "Shady" is both a Mod Patusa and a Chest
+card and they are different pictures.  A file in a subfolder named after a deck
+is scoped to it and tried first; a bare name that two subfolders both claim is
+AMBIGUOUS and is dropped rather than guessed at.  Do not "simplify" that into
+first-match-wins — it resolves differently on different filesystems.
+
+Three states of ``CardDef.art``, and the third one matters:
+
+    None   derive the name from the title  (the default, and almost always right)
+    "x"    use exactly that name
+    ""     NO artwork, do not go looking   (the opt-out)
+
+The opt-out exists because a test that builds a throwaway card out of a real
+definition has to be able to strip the artwork the way it already strips
+``image`` — ``test_a_two_pawn_badge_is_wider_than_a_one_pawn_badge`` builds on
+``movement.cards[0]``, which is Troll, which has a picture and therefore no
+badge strip at all.
+
+
+THIS IS NOT N7
+--------------
+N7 forbids inferring card BEHAVIOUR from titles.  Matching a picture to a title
+is not behaviour: the worst a rename can do is un-match the artwork, and an
+un-matched card is a standard card — the same fallback a missing file gets.
+Nothing about how the card plays can change.  Pin it with ``"art"`` where that
+matters.  Do NOT extend this reasoning to anything the engine reads.
+
+
+art IS NOT image
+----------------
+``image`` is a small illustration drawn INSIDE the parchment body of a standard
+card, addressed by a path under ``assets/images``.  ``art`` REPLACES the face
+and is addressed by NAME under ``assets/card_art``.  They are different
+folders, different fields and different pictures.  A card may declare both, in
+which case the Signature face wins and ``image`` is unused.
+
+
+NOTHING HERE MAY RAISE
+----------------------
+The card-art folder is filled in by hand over months.  It WILL be incomplete,
+one file WILL be a renamed .psd, and none of that may reach the frame loop.
+Every failure path in ``card_art.py`` answers ``None`` and the card renders as
+it always did.  ``_load`` catches broadly ON PURPOSE — pygame raises
+``pygame.error`` for a truncated PNG, ``FileNotFoundError`` for a file deleted
+since the scan, and ``ValueError`` for a file whose extension lies — and the
+answer to all three is the same one.
+
+
+TYPOGRAPHY
+----------
+Signature titles ask ``FontBook`` for a DISPLAY face and fall back to the bold
+UI face when none is installed.  The project ships without one: dropping
+``assets/fonts/Display-Bold.ttf`` in restyles every artwork card at once.  Do
+not bundle anything proprietary — the project is non-commercial and
+redistributed from GitHub.  Whatever goes in must cover Latin Extended-A or
+Polish titles render as boxes.
+
+
+================================================================================
 HOW THE PLAYER SYSTEM WORKS
 ================================================================================
 
@@ -2151,6 +2354,13 @@ BUTTONS SIZE THEMSELVES  (stage 12)
     so even a layout that insists on a small control cannot clip a label.
 
 RULES
+  * A CARD FACE CARRIES ONE BORDER AND NOTHING ELSE ON TOP (stage 31).  The
+    concept's double frame — an outer edge plus an inset brass rule — and the
+    two status pips the hand fan painted at the top edge of every card are
+    gone.  They were harmless on plain parchment and became damage the moment a
+    card could be a full-bleed illustration: the pip landed in the middle of
+    the picture.  Do not put either back.  The information the pips carried has
+    other channels; see HOW SIGNATURE CARDS WORK.
   * a panel is never a filled rectangle: use ``premium_panel`` or ``inset_well``;
   * anything the mouse can touch goes through ``interactive_panel``;
   * headings are upper case, letter-spaced, brass — never sentence-case labels;
@@ -3193,6 +3403,20 @@ N34b. Never draw a plain rectangle where content lives; ``premium_panel`` and
      ``inset_well`` are what make the interface look built rather than sketched.
 N35. Never widen a side column by hand; make its contents smaller or let
      ``_fit_*_column`` do it.  Every pixel a column takes is one the board loses.
+N36a. Never make a card without artwork look different.  The Signature path is
+     an OPTIONAL layer; the parchment face is the default and must stay
+     byte-identical.  A change that "improves" both at once has broken the one
+     requirement the feature exists to satisfy.
+N36b. Never hard-code an artwork path in the renderer, and never write
+     ``if card.title == "Troll"`` to give a card a picture.  The filename IS
+     the configuration; ``card_art.py`` is the only file that resolves it.
+N36d. Never paint anything on top of a card face.  One border, the card's own
+     content, nothing else.  A badge, a pip, a counter or a frame added there
+     lands in the middle of somebody's illustration — that is what stage 31 had
+     to undo.  Status belongs on the shelf, the border, or the status bar.
+N36c. Never let a missing, renamed or corrupt card-art file raise.  It falls
+     back to the standard card, silently.  The folder is meant to be
+     incomplete.
 N36. Never make the engine wait for an animation.  Apply the state change and
      let the view catch up, or two machines will disagree at different frame
      rates.

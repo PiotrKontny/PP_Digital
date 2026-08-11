@@ -9,13 +9,27 @@ drawn placeholder steps aside.
 
 | Folder | What goes in it | How it gets picked up |
 |---|---|---|
-| `images/cards/` | card artwork (PNG with alpha) | set `"image": "cards/kolos.png"` on the card in `data/cards.json` |
+| `card_art/` | **full-card artwork** (Signature Cards) | named after the card — `Troll.png`. See `card_art/README.md` |
+| `images/cards/` | small in-card illustrations | set `"image": "cards/kolos.png"` on the card in `data/cards.json` |
 | `images/characters/` | character portraits | same, in `data/characters.json` |
 | `images/board/` | tiles, trees, rocks, huts, bridges | referenced from a board theme in `data/board.json` |
 | `images/ui/` | button and panel skins | referenced from the theme |
 | `fonts/` | `.ttf` / `.otf` | see below |
 | `sounds/` | short `.ogg` / `.wav` effects | played by name |
 | `music/` | looping `.ogg` tracks | played by name |
+
+## Two kinds of card picture — do not mix them up
+
+| | `card_art/` | `images/cards/` |
+|---|---|---|
+| What it does | **replaces** the card face | sits **inside** the parchment body |
+| Addressed by | the card's name | a path in `"image"` |
+| Card looks like | a Signature Card: art, title, hover description | the normal beige card, with a picture in it |
+| Configuration | none — the filename is the link | one line of JSON |
+
+A card may use either, neither, or both; if both, the Signature face wins and
+`image` is simply unused. Everything about the first column is in
+`card_art/README.md`; the rest of this file is about the second.
 
 ## Adding a card with a picture
 
@@ -43,6 +57,13 @@ same on every machine. Name them exactly:
 
 * `fonts/UI-Regular.ttf`
 * `fonts/UI-Bold.ttf`
+
+Signature Card titles additionally look for a **decorative** face, and fall
+back to the bold one above when there is none:
+
+* `fonts/Display-Bold.ttf`
+* `fonts/Display.ttf`
+* `fonts/Title-Bold.ttf`
 
 Polish needs full Latin Extended-A coverage (ą ć ę ł ń ó ś ź ż) — check that
 before committing a font, since a font missing those renders them as boxes.
