@@ -7,7 +7,7 @@
       "cards": [
         {
           "title": "Troll",
-          "text": "W następnej turze po dobraniu tej karty musisz zagrać losową Kartę Skrzyni z ręki. Jeśli jej nie masz, zagrana zostanie losowa karta ruchu.",
+          "text": "W następnej turze po dobraniu tej karty musisz zagrać losową Kartę Skrzyni z ręki. Jeśli jej nie masz, zagrana zostanie losowa karta ruchu",
           "count": 2,
           "locked": true,
           "in_opening_hand": false,
@@ -42,7 +42,7 @@
         },
         {
           "title": "Stańczyk",
-          "text": "Kiedy dobierzesz tę kartę, twoja następna tura jest pominięta. Karta zostaje wtedy odrzucona.",
+          "text": "Kiedy dobierzesz tę kartę, twoja następna tura jest pominięta. Karta zostaje wtedy odrzucona",
           "count": 1,
           "locked": true,
           "on_draw": {
@@ -56,7 +56,7 @@
         },
         {
           "title": "Spy",
-          "text": "Przejrzyj karty ruchu przeciwnika i zabierz jedną wybraną kartę ruchu.",
+          "text": "Przejrzyj karty ruchu przeciwnika i zabierz jedną wybraną kartę ruchu",
           "count": 1,
           "effect": {
             "type": "steal_card",
@@ -100,7 +100,7 @@
         },
         {
           "title": "Obniżenie progu",
-          "text": "Porusz pionek najbardziej z tyłu dwa pola do przodu",
+          "text": "Porusz pionek najbardziej z tyłu o dwa pola do przodu",
           "count": 2,
           "badge": {
             "pawn": "rainbow",
@@ -116,7 +116,7 @@
         },
         {
           "title": "Plagiat!",
-          "text": "Cofnij dwa wybrane pionki o jedno pole.",
+          "text": "Cofnij dwa wybrane pionki o jedno pole",
           "count": 2,
           "badge": {
             "pawn": "rainbow",
@@ -494,7 +494,7 @@
       "cards": [
         {
           "title": "Speedrun",
-          "text": "Każda karta ruchu cofająca pionki może być odwrócona.",
+          "text": "Każda karta ruchu cofająca pionki może być odwrócona",
           "count": 2,
           "passive": {
             "reverse_backward": true
@@ -510,7 +510,7 @@
         },
         {
           "title": "AKO",
-          "text": "Wszystkie ruchy poruszają jednego sąsiadującego pionka.",
+          "text": "Wszystkie ruchy poruszają jednego sąsiadującego pionka",
           "count": 1
         },
         {
@@ -531,7 +531,7 @@
         },
         {
           "title": "Paczka",
-          "text": "wszystkie karty ze Skrzyni są odkryte",
+          "text": "Karty Skrzyni wszystkich graczy zostają odkryte",
           "count": 2,
           "passive": {
             "reveal_chest": true
@@ -561,7 +561,7 @@
       "cards": [
         {
           "title": "Dzieckorolka",
-          "text": "Porusz wybranego pionka o trzy do przodu. Pionki stojące po drodze są zabierane (1 na pole).",
+          "text": "Porusz wybranego pionka o trzy do przodu. Pionki stojące po drodze są zabierane (1 na pole)",
           "count": 2,
           "effect": {
             "type": "move_and_collect",
@@ -573,7 +573,7 @@
         },
         {
           "title": "Rage Quit",
-          "text": "Wymień wszystkie aktywne Mody Patusa na losowe z talii.",
+          "text": "Wymień wszystkie aktywne Mody Patusa na losowe z talii",
           "count": 2,
           "effect": {
             "type": "replace_mods",
@@ -582,7 +582,7 @@
         },
         {
           "title": "Balbinka",
-          "text": "Porusz wszystkie pionki o dwa pola do przodu lub do tyłu.",
+          "text": "Porusz wszystkie pionki o dwa pola do przodu lub do tyłu",
           "count": 2,
           "effect": {
             "type": "move_all_pawns",
@@ -594,7 +594,7 @@
         },
         {
           "title": "Nie masz Rosji",
-          "text": "Zablokuj i spal dowolny ruch przeciwnika",
+          "text": "Przez następne dwie pełne rundy po zagraniu tej karty uzyskujesz możliwość zablokowania jednego dowolnego ruchu przeciwnika",
           "count": 2,
           "effect": {
             "type": "manual"
@@ -602,7 +602,7 @@
         },
         {
           "title": "Gambit Patusa",
-          "text": "Odwróć kierunek wszystkich kart ruchu w kolejnej rundzie.",
+          "text": "Odwróć kierunek wszystkich kart ruchu w kolejnej rundzie",
           "count": 3,
           "effect": {
             "type": "reverse_movement",
@@ -619,7 +619,7 @@
         },
         {
           "title": "Gejtos",
-          "text": "Wybierz opcję: Mężczyzna - przenieś pionki z sąsiadujących pól na to pole; Kobieta - oddal pionki z sąsiadujących pól o jedno pole.",
+          "text": "Wybierz opcję: Mężczyzna - przenieś pionki z sąsiadujących pól na to pole; Kobieta - oddal pionki z sąsiadujących pól o jedno pole",
           "count": 3,
           "effect": {
             "type": "gejtos",
@@ -635,7 +635,7 @@
           "presentation": {
             "type": "role_reveal",
             "delay": 1.0,
-            "intro_text": "Zmienia funkcję w zależności od gracza.",
+            "intro_text": "Zmienia funkcję w zależności od gracza",
             "variants": {
               "piotrek": {
                 "title": "Alter Ego",

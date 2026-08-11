@@ -64,7 +64,7 @@
         {
           "title": "Big D Randy",
           "skill": "Granny Costume",
-          "text": "Freezuje wybrany pionek na pełną turę. Pionek musi stać samotnie",
+          "text": "Freezuje wybrany pionek na pełną rundę. Pionek musi stać samotnie",
           "uses": 1,
           "ability": {
             "type": "freeze_pawn",

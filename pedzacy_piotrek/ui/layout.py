@@ -835,6 +835,255 @@ class Layout:
         size = int(_clamp(card.width * 0.22, 22, 40))
         return pygame.Rect(card.right - size - 6, card.top + 6, size, size)
 
+    # ── the card library (stage 32) ──────────────────────────────────────────
+    #
+    # A grid of REAL cards, so the card is sized first and the number of
+    # columns follows from it — not the other way round.  Fixing the column
+    # count and dividing the width by it is what produces four postage stamps
+    # at 1280x760 and four billboards at 4K; sizing the card against the HEIGHT
+    # available (which is what a card needs, being tall) and then asking how
+    # many fit across gives the same card everywhere, with no breakpoint table.
+    #
+    # STAGE 33 retuned this to FOUR across.  Stage 32 sized the card at ~0.6 of
+    # the viewport's height, which left room for three and put four cards on
+    # screen at 2560x1440; the owner wanted more of the collection visible at
+    # once, so the card now takes ~0.45 of that height and four fit with room
+    # for the taller control stack under them.  Only two numbers moved — the
+    # height share and the preferred column count — because everything else
+    # here is derived, which was the point of deriving it.
+    @property
+    def card_library_button(self) -> pygame.Rect:
+        """The book, in the bottom-right corner of the board.
+
+        Directly above 'Zakończ turę' and right-aligned with it: the corner is
+        already where the eye goes for "things I can do", and stacking rather
+        than sitting beside it keeps clear of the status bar, which owns the
+        rest of that edge.
+        """
+        end_turn = self.end_turn_button
+        size = _clamp(end_turn.height * 1.15, 34, 62)
+        return pygame.Rect(end_turn.right - size,
+                           end_turn.top - size - _clamp(10 * self.ui_scale, 8, 16),
+                           size, size)
+
+    @property
+    def card_library_panel_h(self) -> int:
+        """The overlay's height, which nothing else depends on.
+
+        Computed on its own so the CARD can be sized against it before the
+        panel's WIDTH exists: the width follows from how many columns of that
+        card the window can afford, and a card sized against the width it is
+        about to decide would be a circle.
+        """
+        return int(self.win_h * self._lerp(0.86, 0.92))
+
+    @property
+    def card_library_content_h(self) -> int:
+        return max(120, self.card_library_panel_h - self.card_library_header_h
+                   - self.card_library_footer_h)
+
+    @property
+    def card_library_allowance(self) -> int:
+        """The widest the content area is ever allowed to be."""
+        return max(160, int(self.win_w * self._lerp(0.86, 0.94))
+                   - 2 * self.card_library_pad)
+
+    @property
+    def card_library_panel(self) -> pygame.Rect:
+        """The overlay itself: large, but still a panel ON the game.
+
+        Its WIDTH is the grid's width, not a share of the window.  A share
+        would give a content area so much wider than it is tall that four or
+        five columns always fit, and the cards would be sized by the leftovers;
+        measuring the grid and wrapping the panel around it is what makes
+        "three big cards per row" a consequence of the card size rather than a
+        number written down somewhere.  It stops short of the window edges on
+        purpose — the table stays visible around it, which is the convention
+        every other overlay here follows.
+        """
+        columns = self.card_library_columns
+        cell_w = self.card_library_cell_size(False)[0]
+        pad = self.card_library_pad
+        width = min(int(self.win_w * self._lerp(0.86, 0.94)),
+                    columns * cell_w + 2 * pad + self.card_library_gap)
+        rect = pygame.Rect(0, 0, width, self.card_library_panel_h)
+        rect.center = (self.win_w // 2, self.win_h // 2)
+        return rect
+
+    @property
+    def card_library_header_h(self) -> int:
+        """Heading plus the tab strip.  Type, so it follows ``type_scale``."""
+        return int(_clamp(96 * self.type_scale, 84, 150))
+
+    @property
+    def card_library_footer_h(self) -> int:
+        """Room for the hint line AND the close button under the viewport.
+
+        Budgeted for both because it was budgeted for one: the hint was
+        anchored to the button's top edge, which put it fourteen pixels ABOVE
+        the content rectangle at 2560x1440 and printed it over the row of cards
+        the clip had just cut off.  The band holds a line of type and a button
+        that sizes itself to its own caption, so it follows ``type_scale``.
+        """
+        return int(_clamp(96 * self.type_scale, 88, 150))
+
+    @property
+    def card_library_content(self) -> pygame.Rect:
+        """The scrolling viewport.  Nothing may be painted outside it."""
+        panel = self.card_library_panel
+        pad = self.card_library_pad
+        top = panel.top + self.card_library_header_h
+        bottom = panel.bottom - self.card_library_footer_h
+        return pygame.Rect(panel.left + pad, top,
+                           max(80, panel.width - 2 * pad),
+                           max(80, bottom - top))
+
+    @property
+    def card_library_pad(self) -> int:
+        return int(_clamp(self.win_w * 0.014, 14, 40))
+
+    @property
+    def card_library_scrollbar(self) -> pygame.Rect:
+        content = self.card_library_content
+        width = max(4, int(6 * self.ui_scale))
+        return pygame.Rect(self.card_library_panel.right
+                           - self.card_library_pad // 2 - width,
+                           content.top, width, content.height)
+
+    #: The tallest a library card may get.  Past this the picture stops gaining
+    #: anything a reader can use, and a 4K monitor would otherwise hand the
+    #: grid cards half a metre tall.
+    CARD_LIBRARY_MAX_H = 480
+
+    #: How many cards the grid wants across.  Four, since stage 33.  Fewer only
+    #: when the window genuinely cannot hold four — never more, because past
+    #: four the grid stops reading as cards and starts reading as a contact
+    #: sheet, and the cards would be too small to read at rest.
+    CARD_LIBRARY_COLUMNS = 4
+
+    @property
+    def card_library_card_size(self) -> Tuple[int, int]:
+        """One card in the grid, sized against the viewport's HEIGHT.
+
+        Height, because a card is tall and because a row has to leave room for
+        the controls under it; and against the viewport rather than the window
+        so the same rule holds whatever the panel's chrome costs.  Bounded
+        below by the same reasoning as ``MIN_HAND_CARD_W``: past a point a card
+        stops being readable and the answer is scrolling, not a smaller card.
+        """
+        # A SMALL window spends a BIGGER share of its viewport on the card
+        # (0.50 against 0.46), which looks backwards and is not: at 1280x760
+        # the same share leaves a 154px card that is smaller than the one in
+        # the player's hand, and a library card nobody can read at rest is a
+        # thumbnail gallery — the thing the grid is explicitly not.  A big
+        # window can afford to spend its height on more ROWS instead.
+        height = _clamp(self.card_library_content_h * self._lerp(0.46, 0.50),
+                        150, self.CARD_LIBRARY_MAX_H)
+        width = int(height / CARD_ASPECT)
+        # Never wider than the window would allow for a single column.
+        width = min(width, max(110, self.card_library_allowance
+                               - 2 * self.card_library_gap))
+        return (int(width), int(width * CARD_ASPECT))
+
+    @property
+    def card_library_gap(self) -> int:
+        return int(_clamp(self.win_w * 0.012, 12, 34))
+
+    @property
+    def card_library_columns(self) -> int:
+        """Four cards across, fewer only when the window cannot hold four.
+
+        ``fits`` is still measured rather than assumed, so a window narrow
+        enough to make four impossible gets three or two instead of four
+        overlapping cards — which is what "do not blindly force four columns"
+        means in practice.  On all five reference resolutions the card is small
+        enough that four fit with width to spare, so all five get four.
+        """
+        card_w, _ = self.card_library_card_size
+        gap = self.card_library_gap
+        fits = (self.card_library_allowance + gap) // max(1, card_w + gap)
+        return int(max(1, min(fits, self.CARD_LIBRARY_COLUMNS)))
+
+    @property
+    def card_library_owner_h(self) -> int:
+        """Band above an ability card: the character, then the ability's name.
+
+        Two lines, so it is quoted against ``type_scale`` — it holds nothing
+        but letters, and a band that cannot hold its own type is not a band
+        (the lesson ``_label_band_px`` records).
+        """
+        return int(_clamp(42 * self.type_scale, 34, 62))
+
+    @property
+    def card_library_stepper_h(self) -> int:
+        """Band a ``[-] n [+]`` row is centred in.
+
+        Generous on purpose: :class:`~pedzacy_piotrek.ui.widgets.Stepper`
+        measures its own labels at the current type scale, and a band quoted
+        tighter than that clips the row it is supposed to contain.
+        """
+        return int(_clamp(50 * self.type_scale, 42, 78))
+
+    @property
+    def card_library_label_h(self) -> int:
+        return int(_clamp(22 * self.type_scale, 18, 34))
+
+    @property
+    def card_library_button_h(self) -> int:
+        """One action button under a card.
+
+        'Przywróć użycia' under an ability, 'Dobierz kartę' under a deck card.
+        One measurement for both, because they are the same control in the same
+        place and a second number would only be a chance for them to disagree.
+        """
+        return int(_clamp(34 * self.ui_scale, 30, 54))
+
+    def card_library_cell_size(self, abilities: bool) -> Tuple[int, int]:
+        """One grid cell: the card plus whatever the tab puts under it.
+
+        The two tabs stack different things, and the cell is the sum of what it
+        actually holds rather than one height with the difference padded out —
+        which is what keeps 'Dobierz kartę' inside its own cell instead of over
+        the card in the row below.
+        """
+        card_w, card_h = self.card_library_card_size
+        gap = self.card_library_gap
+        height = card_h + self.card_library_label_h + self.card_library_stepper_h
+        if abilities:
+            height += (self.card_library_owner_h + self.card_library_button_h
+                       + self.card_library_label_h + gap // 2)
+        else:
+            # 'Dobierz kartę', under the stepper (stage 33).
+            height += self.card_library_button_h + gap // 2
+        return (card_w + gap, height + gap)
+
+    def card_library_cell_rect(self, index: int, abilities: bool,
+                               scroll: int = 0) -> pygame.Rect:
+        """Where entry ``index`` sits, with the scroll offset already applied.
+
+        One function for the painter AND the hit test, so a card that looks
+        clicked is the card that was clicked however far the grid is scrolled.
+        """
+        content = self.card_library_content
+        columns = self.card_library_columns
+        cell_w, cell_h = self.card_library_cell_size(abilities)
+        # Whatever the cards do not use is split evenly, so the grid sits
+        # centred in the viewport rather than hard against its left edge.
+        spare = max(0, content.width - columns * cell_w)
+        left = content.left + spare // 2
+        column, row = index % columns, index // columns
+        return pygame.Rect(left + column * cell_w,
+                           content.top + row * cell_h - scroll,
+                           cell_w, cell_h)
+
+    def card_library_close_rect(self) -> pygame.Rect:
+        panel = self.card_library_panel
+        width = _clamp(panel.width * 0.16, 150, 280)
+        height = _clamp(38 * self.ui_scale, 34, 56)
+        return pygame.Rect(panel.centerx - width // 2,
+                           panel.bottom - height - _clamp(12 * self.ui_scale, 10, 22),
+                           width, height)
+
     def choice_confirm_rect(self) -> pygame.Rect:
         """Confirm button for a multi-select question, inside the prompt strip.
 

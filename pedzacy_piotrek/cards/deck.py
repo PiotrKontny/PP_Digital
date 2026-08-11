@@ -42,12 +42,29 @@ class Deck:
             self.reshuffle()
         return self.draw_pile.pop()
 
-    def take_titled(self, title: str) -> Optional[Card]:
-        """Remove a specific card by title from the draw pile (menu picks)."""
+    def take_titled(self, title: str, include_discard: bool = False) -> Optional[Card]:
+        """Remove a specific card by title from the deck (menu picks).
+
+        The draw pile first, and the discard pile only when asked — because the
+        two callers want different things.  ``setup`` is dealing character
+        cards before anything has been discarded and must not reach into a pile
+        that conceptually does not exist yet; the Card Library's 'Dobierz
+        kartę' is looking for a copy ANYWHERE in the deck, and the discard pile
+        is part of the deck (``take_card`` reshuffles it back in the moment the
+        draw pile runs dry, so a card sitting there is a card the deck still
+        has).  Refusing one that is one shuffle from being drawn anyway would
+        be a lie told by an off-by-one pile.
+        """
         for card in self.draw_pile:
             if card.title == title:
                 self.draw_pile.remove(card)
                 return card
+        if include_discard:
+            for card in reversed(self.discard_pile):
+                if card.title == title:
+                    self.discard_pile.remove(card)
+                    card.restore()
+                    return card
         return None
 
     def return_card(self, card: Card) -> None:

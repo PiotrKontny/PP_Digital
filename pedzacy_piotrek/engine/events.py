@@ -482,6 +482,40 @@ class MarkToggled(GameEvent):
     marked: bool
 
 
+# ── the card library (stage 32) ──────────────────────────────────────────────
+@dataclass
+class DeckCountChanged(GameEvent):
+    """A table deck gained or lost a printed copy of a title, mid-match.
+
+    ``count`` is the number of copies now IN THE MATCH — piles, hands and the
+    mod rack together — which is the number the library shows and the same
+    thing the lobby's ``[-] n [+]`` configures.  ``where`` says which pile the
+    change actually touched, because "added to the draw pile" and "taken off
+    the discard pile" are different things to anyone watching the piles.
+    """
+
+    deck_id: str
+    title: str
+    count: int
+    delta: int
+    where: str = "draw"          # "draw" | "discard"
+
+
+@dataclass
+class AbilityUsesChanged(GameEvent):
+    """An ability's REMAINING uses were set by hand from the library.
+
+    ``default`` travels with it so a listener can say "3 / 1" without going
+    back to the card definition — and so the distinction the whole feature
+    rests on is visible in the event itself.
+    """
+
+    title: str
+    uses_left: int
+    default: int
+    restored: bool = False
+
+
 # ── the match itself ─────────────────────────────────────────────────────────
 @dataclass
 class MatchBegan(GameEvent):

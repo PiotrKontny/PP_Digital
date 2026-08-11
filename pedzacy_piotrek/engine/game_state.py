@@ -696,7 +696,8 @@ class GameState:
     #: Commands that act on behalf of one player.  Outside edit mode the local
     #: seat is the only one this machine may issue them for.
     _OWNED_BY_PLAYER = (
-        cmd.DrawCard, cmd.DiscardCard, cmd.PlayCard, cmd.UseAbility,
+        cmd.DrawCard, cmd.DrawTitledCard, cmd.DiscardCard, cmd.PlayCard,
+        cmd.UseAbility,
         cmd.PlaceMod, cmd.KeepChestCards, cmd.DrawCharacter, cmd.DrawSkill,
         cmd.DiscardTopCharacterCard, cmd.ToggleMark, cmd.RenamePlayer,
         cmd.EndTurn, cmd.ChooseMod, cmd.VoteMod,
@@ -759,9 +760,7 @@ class GameState:
             return [ev.ActionRejected(f"Talia „{deck.name}” jest pusta", command.kind)]
         if needed_reshuffle:
             events.append(ev.DeckReshuffled(deck.id))
-        player.add_card(card)
-        events.append(ev.CardDrawn(player.index, deck.id, card.uid))
-        events.extend(self._after_draw(player, card))
+        events.extend(self._deliver_card(player, deck, card, command.kind))
         return events
 
     @staticmethod
@@ -842,6 +841,23 @@ class GameState:
                 ))
         return events
 
+    def _deliver_card(self, player: Player, deck: Deck, card: Card,
+                      kind: str) -> List[ev.GameEvent]:
+        """A card has left the deck; give it to a hand, with what that owes.
+
+        Factored out of ``_draw_one`` when 'Dobierz kartę' arrived (stage 33):
+        a card that arrives by name owes exactly the same debts as one that
+        arrives off the top — it is reported as a draw, and it acts on the way
+        in, which for a chest card can mean a limit prompt and for the
+        Gamechanger a reveal.  Two callers taking cards out of a deck by
+        different routes and then doing the arrival themselves is how one of
+        them quietly stops running ``_after_draw``.
+        """
+        player.add_card(card)
+        events: List[ev.GameEvent] = [ev.CardDrawn(player.index, deck.id, card.uid)]
+        events.extend(self._after_draw(player, card))
+        return events
+
     def _draw_one(self, player: Player, deck: Deck) -> List[ev.GameEvent]:
         """Take one card off a pile into a hand, with everything that follows.
 
@@ -859,10 +875,39 @@ class GameState:
             return [ev.ActionRejected(f"Talia „{deck.name}” jest pusta", "draw")]
         if needed_reshuffle:
             events.append(ev.DeckReshuffled(deck.id))
-        player.add_card(card)
-        events.append(ev.CardDrawn(player.index, deck.id, card.uid))
-        events.extend(self._after_draw(player, card))
+        events.extend(self._deliver_card(player, deck, card, "draw"))
         return events
+
+    def _draw_titled_card(self, command: cmd.DrawTitledCard) -> List[ev.GameEvent]:
+        """'Dobierz kartę': fetch ONE NAMED card out of ONE named deck.
+
+        Everything about this is scoped to the deck the library asked about, so
+        a Chest card and a Movement card that happen to share a title cannot be
+        confused for one another — the deck id comes from the tab the button
+        was under, and only that deck is searched.
+
+        There is no fabrication anywhere: if the deck does not hold a copy, the
+        answer is a refusal and the hand is not touched.  The refusal names the
+        card, because 'nie ma' about an unnamed card is not feedback.
+        """
+        player = self.player(command.player_index)
+        if player is None:
+            return [ev.ActionRejected("Nieznany gracz", command.kind)]
+        if command.deck_id not in settings.TABLE_DECKS:
+            return [ev.ActionRejected("Z tej talii nie można dobierać",
+                                      command.kind)]
+        deck = self.decks.get(command.deck_id)
+        if deck is None:
+            return [ev.ActionRejected("Nieznana talia", command.kind)]
+        if player.hand_is_full:
+            return [ev.ActionRejected(f"Ręka pełna ({RULES.max_hand} kart)",
+                                      command.kind)]
+
+        card = deck.take_titled(command.title, include_discard=True)
+        if card is None:
+            return [ev.ActionRejected(
+                f"Brak karty „{command.title}” w talii", command.kind)]
+        return self._deliver_card(player, deck, card, command.kind)
 
     def _discard_card(self, command: cmd.DiscardCard) -> List[ev.GameEvent]:
         player = self.player(command.player_index)
@@ -2354,6 +2399,249 @@ class GameState:
             events.append(ev.CharacterChanged(player.index, None))
         return events
 
+    # ── the card library (stage 32) ──────────────────────────────────────────
+    #
+    # WHAT "HOW MANY COPIES" MEANS DURING A MATCH, and why it is not the draw
+    # pile.  The lobby's ``[-] n [+]`` says how many copies of a title are
+    # PRINTED INTO the deck before the shuffle; from the first deal onwards
+    # those copies are spread across the draw pile, the discard pile, several
+    # hands, the mod rack and possibly an open Mod Patusa selection.  Counting
+    # only the draw pile would mean the library disagreed with the lobby the
+    # instant anybody drew, so it counts them all: the number the library shows
+    # is the number of copies IN THE MATCH, which is exactly the number the
+    # lobby configures.
+    #
+    # Nothing here reads ``config.movement_counts`` and friends.  Those are the
+    # settings the match was BUILT from and they say nothing about what has
+    # happened since; the cards themselves are the only honest answer, and
+    # keeping a second mapping in step with them is the two-sources-of-truth
+    # problem the library was explicitly not to create.
+    def _deck_bounds(self, deck_id: str) -> Tuple[int, int]:
+        """The legal range for one title's copy count, per the lobby's rules."""
+        if deck_id == settings.DECK_MODS:
+            return (RULES.mod_count_min, RULES.mod_count_max)
+        return (RULES.card_count_min, RULES.card_count_max)
+
+    def cards_of_deck(self, deck_id: str) -> List[Card]:
+        """Every physical card of ``deck_id`` currently in the match.
+
+        Piles, hands, the mod rack and the cards an open selection is holding.
+        A card is asked which deck it came from rather than being looked for in
+        one place, because a Mod Patusa in the rack and a Chest card in a hand
+        are both still copies their deck no longer has.
+        """
+        found: List[Card] = []
+        deck = self.decks.get(deck_id)
+        if deck is not None:
+            found.extend(deck.draw_pile)
+            found.extend(deck.discard_pile)
+        for player in self.players:
+            found.extend(card for card in player.hand if card.deck_id == deck_id)
+            for held in (player.character, player.skill):
+                if held is not None and held.deck_id == deck_id:
+                    found.append(held)
+        found.extend(card for card in self.mod_slots
+                     if card is not None and card.deck_id == deck_id)
+        selection = self.pending_mod_selection
+        if selection is not None:
+            found.extend(card for card in selection.piotrek_cards
+                         if card.deck_id == deck_id)
+            found.extend(card for card in selection.hunter_cards
+                         if card.deck_id == deck_id)
+        return found
+
+    def deck_card_count(self, deck_id: str, title: str) -> int:
+        """How many copies of ``title`` this deck has in the match."""
+        return sum(1 for card in self.cards_of_deck(deck_id)
+                   if card.title == title)
+
+    def deck_composition(self, deck_id: str) -> Dict[str, int]:
+        """Title → copies in the match, for every title the deck defines.
+
+        In the DEFINITION's order, which is the order the lobby lists and the
+        order the library shows: a shuffle is a permutation of a list and the
+        printed order is the one stable thing about it.
+        """
+        counts: Dict[str, int] = {}
+        try:
+            definition = self.library.deck(deck_id)
+        except Exception:
+            return counts
+        for card in definition.cards:
+            counts.setdefault(card.title, 0)
+        for card in self.cards_of_deck(deck_id):
+            if card.title in counts:
+                counts[card.title] += 1
+        return counts
+
+    def _next_card_uid(self, deck_id: str) -> int:
+        """A uid for a card added mid-match, agreed on by every machine.
+
+        ``setup.build_decks`` numbers a deck from ``(ordinal + 1) * 10_000``,
+        so one past the highest uid the deck currently holds is both free and
+        DETERMINISTIC — every replica applies the same commands to the same
+        cards and therefore computes the same number.  A uid from the global
+        counter would be a different number on every machine, and a command
+        naming a card by uid would then name a different card on each.
+        """
+        used = [card.uid for card in self.cards_of_deck(deck_id)]
+        order = list(self.library.deck_order)
+        base = ((order.index(deck_id) + 1) * 10_000
+                if deck_id in order else 10_000)
+        return max([base - 1] + used) + 1
+
+    def _definition_of(self, deck_id: str, title: str) -> Optional[CardDef]:
+        try:
+            definition = self.library.deck(deck_id)
+        except Exception:
+            return None
+        return next((card for card in definition.cards if card.title == title),
+                    None)
+
+    def _adjust_deck_count(self, command: cmd.AdjustDeckCount) -> List[ev.GameEvent]:
+        """Add or remove one printed copy of a title while the match runs.
+
+        THE SAFETY RULE, and it is the whole of the active-game question the
+        brief asks about: a copy is added to the DRAW pile and removed from the
+        DRAW pile first, the DISCARD pile second, and from NOWHERE ELSE.  A
+        hand, the mod rack and an open selection are cards that are out on the
+        table in front of somebody; taking one back would delete a card a
+        player is holding — or worse, one they are about to play — so when
+        every remaining copy is out there the command is refused and says so.
+        Nothing is duplicated either: an added copy is a NEW card with a fresh
+        deterministic uid, so no two cards ever share one.
+        """
+        if command.deck_id not in settings.TABLE_DECKS:
+            return [ev.ActionRejected("Tej talii nie można zmieniać",
+                                      command.kind)]
+        deck = self.decks.get(command.deck_id)
+        definition = self._definition_of(command.deck_id, command.title)
+        if deck is None or definition is None:
+            return [ev.ActionRejected("Nieznana karta", command.kind)]
+        delta = 1 if int(command.delta) > 0 else -1
+        low, high = self._deck_bounds(command.deck_id)
+        current = self.deck_card_count(command.deck_id, command.title)
+        wanted = current + delta
+        if wanted > high:
+            return [ev.ActionRejected(
+                f"Najwyżej {high} kopii karty „{command.title}”", command.kind)]
+        if wanted < low:
+            return [ev.ActionRejected(
+                f"Najmniej {low} kopii karty „{command.title}”", command.kind)]
+
+        if delta > 0:
+            card = Card(definition, uid=self._next_card_uid(command.deck_id))
+            # Somewhere in the middle rather than on top: a card conjured onto
+            # the top of the pile is the next card somebody draws, which is a
+            # way to hand a chosen card to the next player.  ``deck.rng`` is
+            # seeded from the session seed and has been advanced by exactly the
+            # same shuffles on every machine, so the position is agreed on
+            # without being predictable.
+            position = deck.rng.randrange(len(deck.draw_pile) + 1)
+            deck.draw_pile.insert(position, card)
+            where = "draw"
+        else:
+            where = self._remove_one_copy(deck, command.title)
+            if where is None:
+                return [ev.ActionRejected(
+                    f"Wszystkie kopie karty „{command.title}” są w grze",
+                    command.kind)]
+        return [ev.DeckCountChanged(
+            deck_id=command.deck_id, title=command.title,
+            count=self.deck_card_count(command.deck_id, command.title),
+            delta=delta, where=where,
+        )]
+
+    @staticmethod
+    def _remove_one_copy(deck: Deck, title: str) -> Optional[str]:
+        """Take one copy of ``title`` out of a pile.  Never out of a hand."""
+        for pile, name in ((deck.draw_pile, "draw"),
+                           (deck.discard_pile, "discard")):
+            for index in range(len(pile) - 1, -1, -1):
+                if pile[index].title == title:
+                    del pile[index]
+                    return name
+        return None
+
+    # ── abilities: the default and what is left of it ────────────────────────
+    #
+    # ``Card.uses_left`` is the runtime counter and ``CardDef.uses`` is the
+    # configured default — already the lobby's number, because
+    # ``DeckDef.with_uses`` rewrote the definition before the deck was built.
+    # So "restore" needs no memory of its own: it copies one onto the other.
+    def ability_card(self, title: str) -> Optional[Card]:
+        """The one physical copy of an ability card, wherever it currently is.
+
+        Dealt character cards and Piotrek's skill live on their player; the
+        rest are still in their deck.  Searched in a fixed order — seats, then
+        decks — so every replica finds the same card if content ever ships two
+        copies of one title.
+        """
+        for player in self.players:
+            for held in (player.character, player.skill):
+                if held is not None and held.title == title:
+                    return held
+        for deck_id in (settings.DECK_CHARACTERS, settings.DECK_SKILLS):
+            deck = self.decks.get(deck_id)
+            if deck is None:
+                continue
+            for card in list(deck.draw_pile) + list(deck.discard_pile):
+                if card.title == title:
+                    return card
+        return None
+
+    def ability_default_uses(self, title: str) -> Optional[int]:
+        """The configured default for an ability, or ``None`` if it has none."""
+        card = self.ability_card(title)
+        return None if card is None else card.uses_total
+
+    def _ability_for_command(self, command) -> Tuple[Optional[Card], Optional[ev.GameEvent]]:
+        card = self.ability_card(command.title)
+        if card is None:
+            return None, ev.ActionRejected("Nieznana umiejętność", command.kind)
+        if card.ability is None or card.uses_total is None:
+            return None, ev.ActionRejected(
+                "Ta karta nie ma umiejętności z ładunkami", command.kind)
+        return card, None
+
+    def _adjust_ability_uses(
+        self, command: cmd.AdjustAbilityUses
+    ) -> List[ev.GameEvent]:
+        """Move an ability's REMAINING uses by one, in either direction.
+
+        Floor of zero and no ceiling.  The ceiling is left off on purpose: the
+        table is allowed to hand an ability more charges than it was printed
+        with, and the default it would be restored to does not move when they
+        do.
+        """
+        card, refusal = self._ability_for_command(command)
+        if card is None:
+            return [refusal]      # type: ignore[list-item]
+        delta = 1 if int(command.delta) > 0 else -1
+        current = card.uses_left if card.uses_left is not None else 0
+        wanted = current + delta
+        if wanted < 0:
+            return [ev.ActionRejected("Zostało już zero użyć", command.kind)]
+        card.uses_left = wanted
+        return [ev.AbilityUsesChanged(title=card.title, uses_left=wanted,
+                                      default=int(card.uses_total or 0))]
+
+    def _restore_ability_uses(
+        self, command: cmd.RestoreAbilityUses
+    ) -> List[ev.GameEvent]:
+        """Remaining uses := the configured default.  The default itself moves not at all."""
+        card, refusal = self._ability_for_command(command)
+        if card is None:
+            return [refusal]      # type: ignore[list-item]
+        default = int(card.uses_total or 0)
+        if card.uses_left == default:
+            return [ev.ActionRejected(
+                f"„{card.skill or card.title}” ma już {default} użyć",
+                command.kind)]
+        card.uses_left = default
+        return [ev.AbilityUsesChanged(title=card.title, uses_left=default,
+                                      default=default, restored=True)]
+
     # ── handlers: board ──────────────────────────────────────────────────────
     def _pick_up_token(self, command: cmd.PickUpToken) -> List[ev.GameEvent]:
         token = self.tokens.get(command.pawn_id)
@@ -2857,6 +3145,23 @@ class GameState:
                 ]
                 for p in self.players
             },
+            # THE LIBRARY'S TWO NUMBERS, in the fingerprint because the library
+            # can change both mid-match and neither shows up anywhere else.
+            # Pile SIZES above would not notice two machines adding a copy of
+            # different titles, and ``ability_uses`` above only covers the
+            # cards that have been dealt — the library can top up a character
+            # nobody is playing.  Titles and counts only: a count is not a
+            # hand, and nothing here says who holds what.
+            "deck_composition": {
+                deck_id: sorted(self.deck_composition(deck_id).items())
+                for deck_id in settings.TABLE_DECKS
+            },
+            "ability_charges": sorted(
+                (card.title, card.uses_left)
+                for deck_id in (settings.DECK_CHARACTERS, settings.DECK_SKILLS)
+                for card in self.cards_of_deck(deck_id)
+                if card.ability is not None
+            ),
         }
 
     _OPERATIONS = {
@@ -2882,6 +3187,7 @@ class GameState:
 
     _HANDLERS = {
         cmd.DrawCard: _draw_card,
+        cmd.DrawTitledCard: _draw_titled_card,
         cmd.DiscardCard: _discard_card,
         cmd.PlayCard: _play_card,
         cmd.UseAbility: _use_ability,
@@ -2894,6 +3200,9 @@ class GameState:
         cmd.DrawCharacter: _draw_character,
         cmd.DrawSkill: _draw_skill,
         cmd.DiscardTopCharacterCard: _discard_top_character_card,
+        cmd.AdjustDeckCount: _adjust_deck_count,
+        cmd.AdjustAbilityUses: _adjust_ability_uses,
+        cmd.RestoreAbilityUses: _restore_ability_uses,
         cmd.PickUpToken: _pick_up_token,
         cmd.MoveToken: _move_token,
         cmd.SetRound: _set_round,

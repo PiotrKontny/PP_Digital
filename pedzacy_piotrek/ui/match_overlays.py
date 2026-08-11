@@ -308,7 +308,7 @@ class VictoryOverlay:
         r.premium_panel(panel, surface, radius=18, border=accent,
                         glow=accent, glow_strength=0.45 * fade, shadow=30)
 
-        title = "PIOTREK UCIEKŁ!" if self.piotrek_won else "ŁOWCY ZNALEŹLI PIOTRKA!"
+        title = "PIOTREK UCIEKŁ!" if self.piotrek_won else "OPRAWCY DOPADLI PIOTRKA!"
         r.fit_spaced_text(title, pygame.Rect(panel.left + int(30 * scale),
                                              panel.top + int(30 * scale),
                                              panel.width - int(60 * scale),

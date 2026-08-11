@@ -27,6 +27,7 @@ from ..engine import events as ev
 from ..render.card_renderer import CardRenderer
 from .app import App, Screen
 from .board_view import BoardView
+from .card_library import CardLibrary, draw_library_button
 from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
 from .match_overlays import (EliminationNotice, MatchStartOverlay,
@@ -132,6 +133,14 @@ class GameScreen(Screen):
         #: Paczka's read-only window: who holds which Chest cards.
         self.chest_reveal = ChestReveal()
         self.pause_menu = PauseMenu()
+        #: The Card Library — every card in the game, and the controls that
+        #: change how many of them there are.  Built with the SESSION's state
+        #: and the screen's own ``submit``, so everything it does travels the
+        #: road a played card travels.
+        self.card_library = CardLibrary(
+            self.state.library, self.state, self.submit, app.renderer,
+            seat=lambda: self.view_seat,
+        )
         #: Before the first move and after the last one.  Both are drawn over
         #: the live table and both make the game unplayable while they are up —
         #: though the engine refuses everything anyway, so this is manners
@@ -166,6 +175,7 @@ class GameScreen(Screen):
         self.hand.notify = self.status_bar.notify
 
         self.bus.subscribe(ev.ActionRejected, self._on_rejected)
+        self.bus.subscribe(ev.CardDrawn, self._on_card_drawn)
         self.bus.subscribe(ev.ModPlaced, self._on_mod_placed)
         self.bus.subscribe(ev.CardPlayed, self._on_card_played)
         self.bus.subscribe(ev.ActivePlayerChanged, self._on_player_changed)
@@ -256,6 +266,11 @@ class GameScreen(Screen):
         # engine's refusal would only repeat it as an error.
         if self.pending_choice is not None:
             return
+        if self.card_library.active:
+            # The status bar is behind the library.  A '-' that refuses because
+            # the last copies are in people's hands has to say so where the
+            # player is actually looking, or it reads as a dead button.
+            self.card_library.notify(event.reason)
         self.status_bar.notify(event.reason)
 
     def _on_choice_required(self, event: ev.ChoiceRequired) -> None:
@@ -612,6 +627,23 @@ class GameScreen(Screen):
         self.status_bar.notify(f"{event.title}: {event.description}",
                                duration=5.0)
 
+    def _on_card_drawn(self, event: ev.CardDrawn) -> None:
+        """Confirm a draw, but ONLY while the library is covering the hand.
+
+        Every other draw in this game announces itself by the card appearing in
+        the fan, and a status line for something the player can already see is
+        noise.  'Dobierz kartę' is the one draw whose result is hidden behind
+        the window that asked for it, so it is the one that needs saying.
+        """
+        if not self.card_library.active or event.player_index != self.view_seat:
+            return
+        # Deliberately not naming the card.  A drawn card ACTS on the way in,
+        # and Troll's action is to draw a replacement — so the last CardDrawn
+        # of the chain is some other card entirely, and a message naming it
+        # would confidently report the wrong one.  "A card arrived" is the part
+        # this message can always be sure of.
+        self.card_library.notify("Dodano kartę do ręki", ok=True)
+
     def _on_mod_placed(self, event: ev.ModPlaced) -> None:
         self.status_bar.notify("Mod Patusa aktywny")
 
@@ -783,6 +815,15 @@ class GameScreen(Screen):
             self._handle_pause_event(event, mouse)
             return
 
+        # 1a-i. The Card Library is a modal overlay over a live table, so it
+        #       takes EVERYTHING while it is open — clicks, the wheel and the
+        #       keyboard — and nothing reaches the game behind it.  Above the
+        #       keyboard dispatch so Esc closes the library rather than opening
+        #       the pause menu on top of it.
+        if self.card_library.active:
+            self.card_library.handle_event(event, mouse, self.app.layout)
+            return
+
         # 1a. The ending is absolutely modal: there is no game left to play, and
         #     Esc must not offer to "leave" a match that has already finished.
         if self.victory.active:
@@ -844,6 +885,10 @@ class GameScreen(Screen):
 
         # These two float over the board, so they have to be checked before the
         # board claims the click as a map drag.
+        if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                and self.app.layout.card_library_button.collidepoint(mouse)):
+            self.card_library.open()
+            return
         if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
                 and self.app.layout.end_turn_button.collidepoint(mouse)):
             self._end_turn_click(mouse)
@@ -1309,6 +1354,7 @@ class GameScreen(Screen):
         # this is called; the field has no clock of its own.
         self.rename.update(dt)
         self.pause_menu.update(dt, mouse)
+        self.card_library.update(dt, self.app.layout, mouse)
         self.hand.drop_zone = self.app.layout.board_viewport
         self.hand.update(dt, mouse)
         self.board_view.update(dt, mouse)
@@ -1349,6 +1395,15 @@ class GameScreen(Screen):
         drawn = r.interactive_panel(rect, style, surface, radius=9)
         r.fit_text(f"Wróć do: {name}  (Home)", drawn, style.text, surface,
                    base_size=int(14 * ctx.layout.ui_scale), padding=12)
+
+    def _draw_library_button(self, ctx: HudContext) -> None:
+        """The book that opens the Card Library.
+
+        Always on screen, unlike 'Wróć do', because it is a reference the
+        player reaches for at any moment rather than a state they are in.
+        """
+        draw_library_button(ctx.r, ctx.layout, ctx.surface, ctx.mouse,
+                            open_now=self.card_library.active)
 
     def _draw_turn_banner(self, ctx: HudContext) -> None:
         """Whose turn it is, and — when it is not yours — that you are waiting.
@@ -1438,6 +1493,7 @@ class GameScreen(Screen):
         self._draw_turn_banner(ctx)
         self._draw_return_button(ctx)
         self._draw_end_turn_button(ctx)
+        self._draw_library_button(ctx)
         # Above the board and below every dialog: it is an announcement, not a
         # question, so nothing it covers is anything the player must click.
         self.elimination_notice.draw(self.app.renderer, self.app.layout, surface)
@@ -1451,6 +1507,8 @@ class GameScreen(Screen):
                               surface, ctx.mouse)
         self.chest_reveal.draw(self.app.renderer, self.app.layout, surface,
                                ctx.mouse)
+        self.card_library.draw(self.app.renderer, self.cards, self.app.layout,
+                               surface, ctx.mouse)
         self._draw_connection_banner(ctx)
         # Above everything except the pause menu: these two ARE the screen
         # while they are up.

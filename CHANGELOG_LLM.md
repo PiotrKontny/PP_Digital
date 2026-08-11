@@ -3961,3 +3961,342 @@ mechanism has to stay tested whether or not today's content exercises it.
 - The card face is the one surface in this game whose content the project does
   not control. Everything drawn over it is a bet that no artwork will ever want
   that spot, and Troll lost that bet at the first attempt.
+
+---
+
+## Stage 32 — The Card Library
+
+**Date:** 2026-08-11
+
+### Goal
+An in-game encyclopedia of every card, opened from a book in the bottom-right
+corner, showing REAL game cards rather than a list of names — and, for the three
+table decks, letting the table change how many of each there are without leaving
+the match. Abilities get their own category with a different set of controls,
+because an ability is not a deck.
+
+### What it is
+`ui/card_library.py` — one overlay, four tabs:
+
+| Tab | Source | Controls under each card |
+|---|---|---|
+| Karty ruchu | `movement` deck definition | `n w talii`, `[-1] n [+1]` |
+| Mody Patusa | `mods` deck definition | the same |
+| Karty skrzyni | `chest` deck definition | the same |
+| Umiejętności | both ability decks | owner's name ABOVE, `PRZYWRÓĆ UŻYCIA (n)`, `Ilość użyć`, `[-1] n [+1]` |
+
+Every card is drawn by `CardRenderer.draw_in(..., reveal=hover)`. There is no
+second renderer, no second card definition and no `if card.has_art` anywhere in
+the file — stage 30 put that branch inside `face()` precisely so a new screen
+would not need one. Signature cards therefore arrived working: artwork at rest,
+artwork darkened with the description sliding up on hover, on the same float
+curve the hand fan uses.
+
+### The question the brief asked to be answered rather than invented
+**What does a quantity MEAN once the match has started?** The lobby's `[-] n [+]`
+sets how many copies are printed into a deck *before the shuffle*; from the first
+deal onwards those copies are spread across a draw pile, a discard pile, several
+hands, the mod rack and possibly an open Mod Patusa selection.
+
+The library counts **all of them** — `GameState.deck_card_count` walks piles,
+hands, rack and selection — so the number under a card is the number the lobby
+configured and the two readings never disagree. Counting only the draw pile
+would have made the library contradict the lobby the instant anybody drew.
+
+**Nothing mirrors anything.** `config.movement_counts` and friends are what the
+match was BUILT from and say nothing about what has happened since; the cards
+themselves are the only honest answer. There is exactly one number and it is
+computed from the cards on every frame.
+
+### The safety rule for editing a live deck
+```
++   a NEW Card, fresh deterministic uid, inserted at deck.rng.randrange(...)
+-   the draw pile first, the discard pile second, and NOWHERE ELSE
+```
+A hand, the mod rack and an open selection are cards out on the table in front of
+somebody. When every remaining copy is out there, `-` is REFUSED —
+`„Zerówka - czerwony” są w grze` — rather than reaching into a hand. That is the
+whole of "must not silently delete cards from players' hands".
+
+Not on top of the pile, either: a card conjured onto the top of the deck is the
+next card somebody draws, which is a way of handing a chosen card to the next
+player. `deck.rng` has been advanced by exactly the same shuffles on every
+machine, so the position is agreed on without being predictable.
+
+### Default uses vs current uses
+This distinction needed no new storage, because it already existed:
+
+```
+CardDef.uses    the configured default — ALREADY the lobby's number, because
+                DeckDef.with_uses rewrote the definition before the deck was built
+Card.uses_left  the runtime counter, which travels with the physical card
+```
+
+So `RestoreAbilityUses` is one assignment of one onto the other and keeps no
+memory of its own. `AdjustAbilityUses` has a floor of zero and **no ceiling** —
+the table may deliberately give an ability more charges than it was printed with,
+and restoring afterwards returns it to the printed default, not to the inflated
+number.
+
+`GameState.ability_card(title)` finds the one physical copy wherever it is: on a
+player (dealt character or Piotrek's skill) or still in its deck. Seats first,
+then decks, in a fixed order, so every replica finds the same card.
+
+### Multiplayer
+Three new commands, and the notable thing about them is a field they do NOT have:
+
+```
+AdjustDeckCount(deck_id, title, delta)
+AdjustAbilityUses(title, delta)
+RestoreAbilityUses(title)
+```
+
+No `player_index`. They are therefore in neither `_OWNED_BY_PLAYER` nor
+`_TURN_BOUND`, `authorise_remote` has no seat to compare against, and **any
+player may restore any character's ability at any time** — which is the
+requirement, and which written as an ordinary seat-owned command would have come
+out restricted to the owner.
+
+`delta` rather than an absolute value so two players clicking `+` at once add two
+cards; the server applies both in order and neither is a stale absolute
+overwriting the other's work.
+
+The snapshot gained `deck_composition` and `ability_charges`. Both were needed:
+the existing `decks` entry carries pile SIZES, which would not notice two
+machines adding copies of different titles, and the existing `ability_uses`
+covers only cards that have been dealt — the library can top up a character
+nobody is playing.
+
+### Layout: why the panel's width follows the grid
+`card_library_panel` is measured from the cards, not taken as a share of the
+window. A share gives a content area so much wider than it is tall that four or
+five columns always fit and the cards end up sized by the leftovers. Sizing the
+card against the viewport's HEIGHT (a card is tall, and a row has to leave room
+for the controls under it) and wrapping the panel around three of them makes
+"three big cards per row" a consequence rather than a number written down.
+
+A display tall enough to push the card into `CARD_LIBRARY_MAX_H` has stopped
+spending height on the card, and the width that buys is worth a fourth column:
+
+| window | columns | card |
+|---|---|---|
+| 1280×760 | 3 | 217×310 |
+| 1920×1080 | 3 | 318×454 |
+| 1920×1200 | 3 | 352×502 |
+| 2560×1440 | 3 | 441×630 |
+| 3840×2160 | 4 | 448×640 |
+
+### Stage 31 is intact
+The count, the steppers, the owner's name and the restore button are all OUTSIDE
+the card's rectangle. `test_nothing_is_drawn_over_a_card_face` asserts it for
+every visible cell of every tab — no card rect collides with any control box —
+so the next "just a small quantity badge in the corner" fails a test rather than
+landing in the middle of somebody's illustration.
+
+### Changed
+- `engine/commands.py` — three commands + registry entries.
+- `engine/events.py` — `DeckCountChanged`, `AbilityUsesChanged`.
+- `engine/game_state.py` — `cards_of_deck`, `deck_card_count`,
+  `deck_composition`, `_next_card_uid`, `_definition_of`, `_adjust_deck_count`,
+  `_remove_one_copy`, `ability_card`, `ability_default_uses`,
+  `_adjust_ability_uses`, `_restore_ability_uses`; `_HANDLERS`; two snapshot
+  entries.
+- `ui/layout.py` — the whole `card_library_*` family, including the book button.
+- `ui/card_library.py` — NEW.
+- `ui/game_screen.py` — construction, input routing (above the keyboard
+  dispatch, so Esc closes the library rather than opening the pause menu), the
+  book's click, `update`, `draw`, and refusals routed to the library while it is
+  open.
+
+### Two defects found by the verification, both fixed
+1. **The book painted `panel_bg` inside the board viewport**, which is the colour
+   that means "nothing has been drawn here" to
+   `test_the_world_fills_the_viewport_even_when_zoomed_right_out`. Six sampled
+   pixels failed it. The icon is now drawn entirely in the button's own text
+   colour and a darkened copy of it.
+2. **The footer hint printed over the last row of cards.** It was anchored to the
+   close button's TOP edge; `Button.fit` sizes itself to its caption, so at
+   2560×1440 that put the line fourteen pixels inside the content rectangle. It
+   is anchored to the content's bottom edge now and the footer band budgets for
+   both. This is N46 in yet another costume.
+
+### Verification
+- **1306 pass, 26 fail — and the 26 are the SAME 26 that failed before this
+  stage.** Baseline on the supplied zip: 1221 / 26. Every one of them is the
+  `Shady` → `Obóz Harcerski` rename in cards.json versus mod tests that still
+  look the card up by title (`StopIteration`), recorded in stage 31 and still out
+  of scope here. No regressions.
+- 85 new tests: `tests/test_card_library.py` (76) and
+  `tests/test_card_library_sync.py` (9).
+- `tools/inspect_frame.py`: 0 problems at 1280×760, 1920×1080, 1920×1200,
+  2560×1440 and 3840×2160. `run_game.py --selftest` exits 0.
+- Clipping is checked in PIXELS, not in arithmetic:
+  `test_the_grid_paints_nothing_outside_its_viewport` paints the frame twice —
+  once whole, once with the grid suppressed — and requires every differing pixel
+  to be inside the content rect, with the grid parked half a row out so the
+  straddling row is actually exercised.
+- Screenshots at 2560×1440 reviewed for all four tabs, hovered and not.
+
+### Limitations, honestly
+- **The library is refused before the match begins and after it ends.**
+  `_phase_refusal` gates every non-authority command, and the library's three are
+  not exempt. Consistent with the rest of the engine, but it means the book opens
+  and its buttons do nothing while Piotrek is choosing a colour. Exempting them
+  is a one-line change *if* the owner wants it — it was not invented here.
+- **`-` can refuse for a reason the player cannot see.** When the last copies are
+  in hands the refusal names the card but not who is holding it, because saying
+  so would leak hidden information.
+- **Removing a copy does not un-deal anything.** Cards already in hands stay
+  there; the count therefore cannot be driven below the number currently in play.
+- The scrollbar is drawn but not draggable — the wheel, the arrow keys and
+  Home/End scroll. Same bargain the settings panel makes.
+- The display cards are throwaway `Card` objects built from definitions, so they
+  take uids from the global counter. They are never submitted in a command and
+  never enter a deck; commands address cards by TITLE.
+
+---
+
+## Stage 33 — Four across, and "Dobierz kartę"
+
+**Date:** 2026-08-11
+
+Two changes to the Card Library, both asked for by the owner after using it.
+
+### 1. Four cards per row instead of three
+
+Stage 32 sized a library card at ~0.6 of the viewport's height, which is what
+left room for exactly three. The owner wanted more of the collection on screen
+at once, so **two numbers moved** and nothing else did:
+
+```
+card height share   _lerp(0.62, 0.55)  →  _lerp(0.46, 0.50)
+preferred columns   3 (4 at the ceiling)  →  CARD_LIBRARY_COLUMNS = 4
+CARD_LIBRARY_MAX_H  640 → 480
+```
+
+Everything else — the panel width, the cell, the scroll extent, the hit test —
+is derived from those, which was the point of deriving it. Measured:
+
+| window | columns | card | vs stage 32 | rows visible |
+|---|---|---|---|---|
+| 1280×760 | 4 | 184×262 | was 217×310 | 1.41 |
+| 1920×1080 | 4 | 252×360 | was 318×454 | 1.43 |
+| 1920×1200 | 4 | 277×395 | was 352×502 | 1.44 |
+| 2560×1440 | 4 | 309×441 | was 441×630 | 1.51 |
+| 3840×2160 | 4 | 336×480 | was 448×640 | 2.23 |
+
+Note the height share runs **backwards** — a small window spends a *bigger*
+share (0.50) than a large one (0.46). That looks like a mistake and is not: at
+1280×760 the flat share left a 154px card, *smaller than the one in the
+player's own hand*, which is the thumbnail gallery the grid is explicitly not.
+A big window can afford to spend its height on more rows instead.
+
+`card_library_columns` still **measures** whether four fit rather than
+asserting it, so a genuinely narrow window gets three or two instead of four
+cards on top of each other.
+
+### 2. "Dobierz kartę" — fetch one named card into your hand
+
+A button under every Movement / Mod / Chest card (never under an ability) that
+takes **that** card out of **that** deck and puts it in the clicking player's
+hand. It exists so a tester can get a particular card in front of them without
+drawing thirty others first.
+
+```
+DrawTitledCard(player_index, deck_id, title)
+```
+
+**What was reused rather than rebuilt:**
+
+* `Deck.take_titled(title)` already existed for `setup`'s character picks — it
+  gained an `include_discard` flag and nothing else.
+* `_draw_one`'s tail was extracted into `_deliver_card(player, deck, card)`,
+  and **`_draw_card` and `_draw_one` now both go through it**. A card that
+  arrives by name owes exactly the same debts as one off the top: it is
+  reported as `CardDrawn`, and it *acts on the way in* via `_after_draw`. Troll
+  still draws its replacement when fetched by name, which is a test.
+* Authority is the existing `_OWNED_BY_PLAYER` check — the command carries a
+  `player_index` (unlike the library's other three) precisely because this one
+  *is* about a particular player. It is deliberately **not** `_TURN_BOUND`:
+  fetching yourself a card to try is not a move.
+
+**Scoping.** Card identity here is (deck_id, title). Only the deck named by the
+tab is searched, so a title printed in two decks could never be fetched from the
+wrong one. There are no such titles today; the test asserts the scoping anyway.
+
+**The discard pile counts.** `take_titled(include_discard=True)` looks in the
+draw pile first and the discard pile second, because `take_card` already
+reshuffles the discard back in the moment the draw pile runs dry — refusing a
+card that is one shuffle from being drawn anyway would be a lie told by an
+off-by-one pile. `setup` keeps the old draw-pile-only behaviour via the default.
+
+**Nothing is ever fabricated.** No copy in the deck means `ActionRejected` and
+an untouched hand.
+
+### Feedback, in the one place the player can see it
+
+The library sits *on top of* the hand, so both outcomes are reported in its
+footer, which stage 32 already built for refusals:
+
+* failure → `Brak karty „…” w talii`, in `theme.warning` (red)
+* success → `Dodano kartę do ręki`, in `theme.valid` (green)
+
+`notice_colour(theme)` is a method so the red/green rule is one thing a test can
+ask a question of. The confirmation deliberately **does not name the card**: a
+drawn card acts on the way in, and Troll's action is to draw a replacement, so
+the last `CardDrawn` of the chain is some other card entirely and naming it
+would confidently report the wrong one. It also stays quiet when the library is
+shut — every other draw announces itself by appearing in the fan.
+
+### Hover now follows the CELL, not the card
+
+Stage 32 keyed the reveal to the card rectangle, which was right when nothing
+sat under it. With a button there, reaching for it dropped the reveal on the way
+down and the description flickered shut just as the player went to act on it. A
+cell is one entry, so the reveal now holds still while you work with it.
+
+### Changed
+- `engine/commands.py` — `DrawTitledCard` + registry.
+- `engine/game_state.py` — `_deliver_card`, `_draw_titled_card`, `_draw_one`
+  and `_draw_card` routed through the shared arrival, `_OWNED_BY_PLAYER`.
+- `cards/deck.py` — `take_titled(include_discard=False)`.
+- `ui/layout.py` — the three retuned numbers, `CARD_LIBRARY_COLUMNS`, and the
+  draw button's height in `card_library_cell_size`.
+- `ui/card_library.py` — the `draw` box, its click, `_draw_action` (now shared
+  with the restore button), `seat` callable, `notice_ok`/`notice_colour`,
+  cell-based hover.
+- `ui/game_screen.py` — `seat=` for the library, `_on_card_drawn`.
+- `assets/card_art/` — see below.
+
+### An asset that arrived broken
+`Stańczyk.png` was in this task's ZIP as `Sta#U0144czyk.png` — the "ń" replaced
+by a literal ASCII escape somewhere in the packaging round-trip. `slugify` was
+working correctly; the file was genuinely misnamed, so Stańczyk silently lost
+its artwork and rendered as a plain card. **Renamed back.** Deliberately NOT
+fixed in code: teaching `slugify` to decode `#Uxxxx` would bake a packaging
+accident into the product. Worth knowing if art vanishes again after a zip trip.
+
+### Verification
+- **1351 pass, 26 fail — the same 26 as before this stage** (baseline on this
+  task's ZIP was 1306/26). All 26 are the `Shady` → `Obóz Harcerski` rename in
+  cards.json versus mod tests still looking it up by the old title. No
+  regressions; all 85 stage-32 library tests still pass untouched.
+- 45 new tests: 30 in `test_card_library.py`, 6 in `test_card_library_sync.py`,
+  plus the retuned column assertions.
+- Geometry swept at all five reference resolutions × 4 tabs × 3 scroll
+  positions: no cell overlap, no box outside its cell or the viewport, **no box
+  touching a card face**, no two draw buttons touching, steppers inside their
+  bands. `inspect_frame.py` 0 problems; `--selftest` exits 0.
+- Screenshots at 2560×1440 and 1280×760 reviewed.
+
+### Limitations
+- Inherited from stage 32: the library's commands are refused before the match
+  begins and after it ends (`_phase_refusal`), and `DrawTitledCard` is no
+  exception.
+- A fetched card counts against the hand limit and is refused when the hand is
+  full — it is a shortcut, not a cheat.
+- The fetched card is drawn for the seat **on screen** (`view_seat`), matching
+  the hand fan. In a hot-seat game that is whoever is being viewed; in a network
+  match `_OWNED_BY_PLAYER` means it can only ever be your own seat.
+- 'Dobierz kartę' does not change the library's quantity, and should not: the
+  count is copies *in the match*, and a card in a hand is still in the match.

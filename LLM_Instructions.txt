@@ -1,8 +1,9 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 31 — the old card overlay removed: the inset brass rule and
-              the two status pips no longer paint over a card face, so full-card
-              artwork is unobstructed (see CHANGELOG_LLM.md)
+Last updated: stage 33 — the Card Library retuned to FOUR cards per row, and
+              every deck card given a "Dobierz kartę" button that fetches that
+              exact card out of its live deck into the clicking player's hand
+              (see CHANGELOG_LLM.md)
 ================================================================================
 
 Read this file together with the source tree before changing anything. It is
@@ -134,6 +135,15 @@ WORKING:
   charges in the fourth.  Defaults are whatever the data files print; an empty
   mapping means "as printed", so an older client still gets real decks.  All
   four replicate like every other setting.  See "THE SETTINGS PANEL".
+- THE CARD LIBRARY (stage 32): a BOOK in the bottom-right corner of the board
+  opens an encyclopedia of every card, drawn as REAL cards through the ordinary
+  ``CardRenderer`` — Signature artwork, hover reveal and all.  Four tabs mirror
+  the lobby's four categories.  The three table decks show how many copies the
+  match holds and can be changed mid-game; the ability tab shows each ability's
+  owning character, a restore action and its remaining uses.  Since stage 33
+  the grid is FOUR cards across and every deck card carries a "Dobierz kartę"
+  button that fetches that exact card into the clicking player's hand.
+  Everything it changes leaves as a Command.  See "THE CARD LIBRARY".
 - MOD DECK COMPOSITION (stage 24): thirteen cards, not one of each — Speedrun 2,
   Masa solna 2, AKO 1, Halloween 1, Sesja na PG 2, Paczka 2, Squid Game 1,
   Shady 2.  Those are DEFAULTS from cards.json; the lobby sets any count per
@@ -362,6 +372,10 @@ pedzacy_piotrek/
                      nothing.  See CLIPBOARD.
     board_view.py    Board viewport: camera, pawn animation, walks, stacks.
     hand_fan.py      The hand fan and the card-play gesture.
+    card_library.py  THE CARD LIBRARY (stage 32).  Four tabs of real cards, the
+                     deck-quantity steppers and the ability use counters.  Owns
+                     no numbers: it reads the live GameState every frame and
+                     answers with Commands.  See "THE CARD LIBRARY".
     overlays.py      ChoicePrompt (the engine asking a question, including
                      MULTI-SELECT with numbered order — see MULTI-SELECT),
                      RevealOverlay (Gamechanger, random reveals, and the forced
@@ -409,7 +423,12 @@ tests/               test_engine, test_board, test_session, test_ui,
                      the snapshot),
                      test_chest_cadence (stage 22: which tables are sparse,
                      that the rota feeds every hunter, and that the marker
-                     and the deal always agree).
+                     and the deal always agree),
+                     test_card_library + test_card_library_sync (stage 32: the
+                     deck-quantity semantics, the never-touch-a-hand rule, the
+                     default/current use split, the grid at five resolutions,
+                     pixel-level clipping, and that ANY player may restore ANY
+                     character's ability over a network).
 tools/               screenshot.py, inspect_frame.py (headless verification).
 docs/ARCHITECTURE.md Polish design rationale for the owner.
 
@@ -2013,6 +2032,211 @@ Polish titles render as boxes.
 
 
 ================================================================================
+THE CARD LIBRARY  (stage 32 — read before touching deck quantities mid-match)
+================================================================================
+
+``ui/card_library.py``, opened by the BOOK in ``layout.card_library_button``.
+Four tabs, three of which are table decks and one of which is not a deck at all.
+
+WHAT IT DOES NOT CONTAIN, and every one of these is load-bearing:
+
+  * no card renderer.  Every card goes through ``CardRenderer.draw_in(...,
+    reveal=hover)``, so a Signature card is a Signature card here with no
+    branch in this file.  Stage 30 put that branch on the first line of
+    ``face()`` exactly so a new screen would not need one.  If you find
+    yourself writing ``if entry.card.art`` in ui/, it is in the wrong place.
+  * no card definitions.  The tabs are built from ``ContentLibrary``, so a card
+    added to cards.json appears with no code change.
+  * NO NUMBERS OF ITS OWN.  Every quantity drawn is read from the live
+    ``GameState`` on the frame it is drawn, and every change leaves as a
+    Command.  There is nothing here to fall out of step with the game.
+  * nothing on a card face.  See N36d — the controls go UNDER the card.
+
+
+WHAT A QUANTITY MEANS ONCE THE MATCH HAS STARTED
+------------------------------------------------
+The lobby's ``[-] n [+]`` sets how many copies are printed INTO a deck before
+the shuffle.  From the first deal onwards those copies are spread across a draw
+pile, a discard pile, several hands, the mod rack and possibly an open Mod
+Patusa selection.  ``GameState.deck_card_count`` counts ALL OF THEM, so the
+library's number and the lobby's number mean the same thing and cannot
+disagree.  Counting the draw pile alone would have made the library contradict
+the lobby the instant anybody drew a card.
+
+``config.movement_counts`` and friends are NOT consulted and NOT updated.  They
+are what the match was built from; they say nothing about what has happened
+since.  The cards are the only honest answer, and mirroring them into a mapping
+would be the two-sources-of-truth problem the feature exists to avoid.
+
+
+EDITING A LIVE DECK, AND THE ONE RULE THAT MATTERS
+--------------------------------------------------
+    +   a NEW Card with a fresh deterministic uid, inserted at
+        ``deck.rng.randrange(len(draw_pile) + 1)``
+    -   the DRAW pile first, the DISCARD pile second, and NOWHERE ELSE
+
+A hand, the mod rack and an open selection hold cards that are out on the table
+in front of somebody.  When every remaining copy is out there, ``-`` is REFUSED
+rather than reaching into a hand.  Never "fix" that by taking the card back: it
+deletes a card a player is holding, possibly one they are about to play.
+
+NOT ON TOP OF THE PILE either.  A card conjured onto the top of the deck is the
+next card somebody draws, which is a way to hand a chosen card to the next
+player.  ``deck.rng`` has been advanced by exactly the same shuffles on every
+machine, so a seeded position is agreed on without being predictable.
+
+``_next_card_uid`` is one past the highest uid the deck currently holds.  A uid
+from the global counter would differ on every machine, and a command that names
+a card by uid would then name a different card on each of them.
+
+
+DEFAULT USES vs CURRENT USES — THE DISTINCTION THE ABILITY TAB RESTS ON
+-----------------------------------------------------------------------
+Both already existed; the library invented no storage:
+
+    CardDef.uses     the configured DEFAULT.  Already the lobby's number,
+                     because ``DeckDef.with_uses`` rewrote the definition
+                     before the deck was built.
+    Card.uses_left   the runtime counter, on the physical card, so it travels
+                     with the card if it changes hands.
+
+``RestoreAbilityUses`` is therefore one assignment of the first onto the second
+and remembers nothing.  ``AdjustAbilityUses`` has a floor of zero and NO
+CEILING — a table may deliberately give an ability more charges than it was
+printed with, and a restore afterwards returns it to the PRINTED default, not
+to the inflated number.  Do not add an upper bound; it is the requirement.
+
+``GameState.ability_card(title)`` finds the one physical copy wherever it is —
+on a player, or still in its deck — searching seats first and then decks, in a
+fixed order, so every replica finds the same card.
+
+The owner shown above each card is READ FROM THE DATA: a character card IS its
+own ability card, so the owner is its title; one of Piotrek's skills belongs to
+whichever character card declares ``"role": "piotrek"``.  Never type those
+relationships into the interface.
+
+
+AUTHORITY, AND THE FIELD THESE COMMANDS DELIBERATELY LACK
+----------------------------------------------------------
+    AdjustDeckCount(deck_id, title, delta)
+    AdjustAbilityUses(title, delta)
+    RestoreAbilityUses(title)
+
+NONE of them carries ``player_index``.  They are consequently in neither
+``_OWNED_BY_PLAYER`` nor ``_TURN_BOUND``, ``authorise_remote`` has no seat to
+compare against, and ANY PLAYER MAY RESTORE ANY CHARACTER'S ABILITY AT ANY
+TIME — which is the requirement.  Adding a ``player_index`` "for tidiness"
+would silently restrict every one of them to its own seat.
+
+``delta`` rather than an absolute count, so two players clicking ``+`` at the
+same moment add two cards: the server applies both in order and neither is a
+stale absolute overwriting the other's work.
+
+The snapshot carries ``deck_composition`` and ``ability_charges``.  Both are
+needed: the older ``decks`` entry holds pile SIZES, which would not notice two
+machines adding copies of different titles, and the older ``ability_uses``
+covers only cards that have been DEALT — the library can top up a character
+nobody is playing.
+
+
+"DOBIERZ KARTĘ": ONE NAMED CARD OUT OF ONE NAMED DECK  (stage 33)
+------------------------------------------------------------------
+    DrawTitledCard(player_index, deck_id, title)
+
+Under every Movement / Mod / Chest card, never under an ability.  It exists so
+a tester can get a particular card in front of them without drawing thirty
+others first, and it is built out of things that already existed:
+
+  * ``Deck.take_titled`` was already there for ``setup``'s character picks.  It
+    gained ONE flag, ``include_discard``, and the default keeps setup's old
+    draw-pile-only behaviour.
+  * ``_draw_one``'s tail became ``_deliver_card``, and ``_draw_card`` and
+    ``_draw_one`` BOTH go through it.  A card that arrives by name owes exactly
+    the same debts as one off the top: reported as ``CardDrawn``, and it ACTS
+    on the way in through ``_after_draw``.  Troll still draws its replacement
+    when it is fetched by name.  Two routes into a hand that each did the
+    arrival themselves is how one of them quietly stops running the other's
+    rules — N104's lesson on a different pair of paths.
+
+THE SEARCH IS SCOPED TO ONE DECK.  Card identity here is (deck_id, title); the
+deck comes from the TAB the button sat under and only that deck is looked in.
+No title is printed in two decks today, and the day one is, this still works.
+
+The discard pile counts as part of the deck, because ``take_card`` reshuffles
+it back in the moment the draw pile runs dry — refusing a card that is one
+shuffle from being drawn anyway would be a lie told by an off-by-one pile.
+
+NOTHING IS EVER FABRICATED.  No copy in the deck means ``ActionRejected`` and
+an untouched hand.  This command carries a ``player_index`` — unlike the
+library's other three — because it IS about a particular player, so the
+existing ``_OWNED_BY_PLAYER`` check is exactly the authorisation wanted.  It is
+NOT ``_TURN_BOUND``: fetching yourself a card to try is not a move.
+
+It does not, and must not, move the library's QUANTITY.  That number is copies
+in the match, and a card in a hand is still in the match.
+
+
+THE GRID: FOUR ACROSS, AND WHY THE PANEL'S WIDTH FOLLOWS THE CARDS
+-------------------------------------------------------------------
+``card_library_panel`` is measured from the grid rather than taken as a share of
+the window.  A share gives a content area so much wider than it is tall that
+four or five columns always fit and the cards end up sized by the leftovers.
+The card is sized against the viewport's HEIGHT — a card is tall, and a row must
+leave room for the controls under it — and the panel is wrapped around three of
+them, which makes "three big cards per row" a consequence rather than a number
+written down somewhere.
+
+Stage 33 retuned it to FOUR across — the owner wanted more of the collection
+visible at once — by moving two numbers and letting everything else follow: the
+card's height share and ``CARD_LIBRARY_COLUMNS``.  Measured: four columns at all
+five reference resolutions, cards from 184x262 at 1280x760 to 336x480 at 4K.
+
+``card_library_columns`` still MEASURES whether four fit rather than asserting
+it, so a genuinely narrow window gets three or two instead of four overlapping
+cards.
+
+The height share runs BACKWARDS on purpose — a small window spends a bigger
+share (0.50) than a large one (0.46).  At 1280x760 the flat share left a 154px
+card, smaller than the one in the player's own hand, and a library card nobody
+can read at rest is the thumbnail gallery the grid is explicitly not.  A big
+window can afford to spend its height on more ROWS instead.
+
+Scrolling is in PIXELS, not rows: a row here is a card and a card is most of the
+viewport, so a row-quantised scroll would move the grid by more than a screen.
+The grid is CLIPPED with ``surface.set_clip`` — the same call the board view
+uses for its particles — because the row being scrolled into view is always half
+outside the viewport and has to be cut off rather than left to paint over the
+tab strip.  ``_visible_indices`` is the hit test as well as the painter's list,
+so a card scrolled out of sight is out of reach and not merely invisible.
+
+THE HOVER FOLLOWS THE CELL, not the card (stage 33).  Keying it to the card was
+right while nothing sat under it; with 'Dobierz kartę' there, reaching for the
+button dropped the reveal on the way down and the description flickered shut
+just as the player went to act on it.  A cell is one entry.
+
+STEPPERS ARE BUILT ON DEMAND from the cell they belong to, by the same function
+the painter and the hit test both call.  The settings panel keeps one per
+VISIBLE ROW for the same reason; this is that rule with a finer-grained scroll.
+
+
+LIMITATIONS TO KNOW ABOUT BEFORE "FIXING" THEM
+-----------------------------------------------
+  * The library's commands are refused before the match begins and after it
+    ends, because ``_phase_refusal`` gates every non-authority command and they
+    are not exempt.  The book opens and its buttons do nothing while Piotrek is
+    choosing a colour.  Exempting them is a one-line change IF the owner wants
+    it — it was deliberately not invented.
+  * ``-`` can refuse for a reason the player cannot fully see: the refusal names
+    the card but not who is holding the last copies, because saying so would
+    leak hidden information.
+  * The scrollbar is drawn but not draggable (the wheel, the arrows and
+    Home/End scroll).  Same bargain the settings panel makes.
+  * The display cards are throwaway ``Card`` objects built from definitions and
+    take uids from the global counter.  They are never submitted in a command
+    and never enter a deck — commands address cards by TITLE.
+
+
+================================================================================
 HOW THE PLAYER SYSTEM WORKS
 ================================================================================
 
@@ -2549,6 +2773,9 @@ Layout regions (ui/layout.py, everything derived from window size):
 
 Input priority in game_screen.handle_event():
   1. renaming (captures everything)
+  1a. the Card Library (fully modal: every click, wheel notch and key is
+     consumed, so nothing reaches a live table behind it.  ABOVE the keyboard
+     dispatch, or Esc opens the pause menu on top of the library)
   2. the chest limit overlay (fully modal until the player keeps/discards)
   2b. a pending choice from the engine — which pawn, which field, how far
      (modal: clicks answer it, wheel and middle-drag still work so the player
@@ -2575,6 +2802,7 @@ Gestures:
   played card, hover .......... enlarges above everything and stops fading
   ability button .............. activates the character ability / Piotrek skill,
                                 showing remaining uses from the JSON "uses"
+  book, bottom-right .......... opens the Card Library
   Ctrl+wheel / middle drag .... zoom / pan
   S / F / Tab / Esc ........... snapping toggle / fit view / next player / cancel
 
@@ -3870,6 +4098,63 @@ N130. Never index into a generated board in a multiplayer test. A room's seed is
    to run: stage 27 shipped a test that passed when written, passed in
    isolation, and only failed once the suite grew enough to shift the order.
    Derive what the test needs from the board it was given.
+
+N131. Never take a card back out of a HAND to satisfy a deck-quantity change.
+   The Card Library's `-` removes from the draw pile, then the discard pile, and
+   refuses when every remaining copy is out on the table. Reaching into a hand
+   deletes a card somebody is holding — possibly the one they are about to play
+   — and no "the count said five" is worth that. The same goes for the mod rack
+   and an open Mod Patusa selection.
+
+N132. Never insert a card onto the TOP of a draw pile. That is the next card
+   somebody draws, so "add a copy" would become "hand a chosen card to the next
+   player". Use the deck's own seeded rng for the position: it has been advanced
+   by the same shuffles on every machine, so the place is agreed on without
+   being predictable.
+
+N133. Never give a table-bookkeeping command a `player_index`. `AdjustDeckCount`,
+   `AdjustAbilityUses` and `RestoreAbilityUses` deliberately have none, which is
+   what keeps them out of `_OWNED_BY_PLAYER` and `_TURN_BOUND` and lets ANY
+   player restore ANY character's ability. Adding the field "for consistency"
+   silently restricts every one of them to its own seat, and the requirement is
+   the opposite.
+
+N134. Never let a restore write the DEFAULT. `CardDef.uses` is the configured
+   default and `Card.uses_left` is what is left of it; `+` may push the second
+   past the first on purpose, and a restore returns it to the PRINTED number,
+   not to the inflated one. A restore that copied current onto default would
+   make every ability permanently as strong as the last person to click `+`.
+
+N135. Never anchor a line of type to a button's edge. `Button.fit` sizes itself
+   to its caption at the current type scale, so a label hung off `button.top`
+   lands wherever the caption leaves it — at 2560x1440 that put the library's
+   hint fourteen pixels inside the content rectangle, printed over the row of
+   cards the clip had just cut off. Anchor to the region, and budget the band
+   for everything in it. This is N46 in a third costume.
+
+N136. Never paint UI in `theme.panel_bg` or `theme.background` inside the board
+   viewport. Those two colours mean "nothing has been drawn here" to
+   `test_the_world_fills_the_viewport_even_when_zoomed_right_out`, which samples
+   the viewport for bare panel colour. The library's book icon used panel_bg for
+   its pages and failed on six pixels. Draw with the control's own colours.
+
+N137. Never take a card out of a deck and put it in a hand yourself. Go through
+   `_deliver_card`: a card ACTS on the way into a hand (Troll draws its
+   replacement, a chest card can trip the limit, the Gamechanger reveals
+   itself), and a second route that does `hand.append` and an event of its own
+   is a route where none of that runs. Stage 33 added a whole new way to draw
+   and it owes every debt the old one does.
+
+N138. Never search every deck for a card by title. Card identity in this project
+   is (deck_id, title), and `take_titled` is scoped to one deck for that reason.
+   Two decks are allowed to print the same title, and the day one does, a global
+   search hands out whichever copy it found first.
+
+N139. Never quote a library card's size as a flat share of the viewport. The
+   share runs backwards on purpose — a SMALL window spends MORE of its height on
+   the card (0.50 against 0.46), because the absolute pixels are what a reader
+   needs and 1280x760 has few of them. A flat share left a card smaller than the
+   one in the player's own hand.
 
 N104. Never add a rule to `_move_pawn` without asking whether `_move_pawns`
    needs it too. Plagiat! moves backwards through the second handler, so

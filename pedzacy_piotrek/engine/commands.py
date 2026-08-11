@@ -65,6 +65,28 @@ class DrawCard(Command):
 
 
 @dataclass(frozen=True)
+class DrawTitledCard(Command):
+    """Take ONE NAMED card out of a deck and into a hand (stage 33).
+
+    ``DrawCard`` takes whatever is on top; this takes the copy you asked for,
+    from anywhere in the deck.  It exists for the Card Library's 'Dobierz
+    kartę', whose whole purpose is getting a particular card in front of you
+    without drawing thirty others first.
+
+    It carries a ``player_index`` — unlike the library's other three commands —
+    because this one IS about a particular player: the card lands in the hand
+    of whoever clicked, so the seat is part of the request and the existing
+    ``_OWNED_BY_PLAYER`` check is exactly the authorisation wanted.  It is
+    deliberately NOT turn-bound: fetching yourself a card to try is not a move.
+    """
+
+    kind: ClassVar[str] = "draw_titled_card"
+    player_index: int = 0
+    deck_id: str = ""
+    title: str = ""
+
+
+@dataclass(frozen=True)
 class DiscardCard(Command):
     kind: ClassVar[str] = "discard_card"
     player_index: int = 0
@@ -194,6 +216,59 @@ class DiscardTopCharacterCard(Command):
 
     kind: ClassVar[str] = "discard_character_top"
     player_index: int = 0
+
+
+# ── the card library (stage 32) ──────────────────────────────────────────────
+# Three commands, and they are commands for the ordinary reason: the library is
+# open DURING a match, so everything it changes has to travel the same road as
+# a played card or every table would be looking at a different deck.  None of
+# them carries a ``player_index``, and that is deliberate — they are table
+# bookkeeping rather than a move, so they are neither owned by a seat nor bound
+# to a turn, and any player may issue one.
+@dataclass(frozen=True)
+class AdjustDeckCount(Command):
+    """Add or remove one printed copy of a title from a table deck.
+
+    ``delta`` rather than an absolute count so two players clicking ``+`` at the
+    same moment add two cards rather than one: the server applies both, in
+    order, and neither is a stale absolute overwriting the other's work.
+
+    The engine decides WHERE a copy is added or removed from; see
+    ``GameState._adjust_deck_count``.  A copy is never taken out of a hand.
+    """
+
+    kind: ClassVar[str] = "adjust_deck_count"
+    deck_id: str = ""
+    title: str = ""
+    delta: int = 0
+
+
+@dataclass(frozen=True)
+class AdjustAbilityUses(Command):
+    """Change how many uses of an ability are LEFT, by ``delta``.
+
+    Not the configured default — that is set in the lobby and is what
+    :class:`RestoreAbilityUses` restores to.  There is no upper bound (a table
+    may deliberately hand an ability more charges than it was printed with) and
+    a hard floor of zero.
+    """
+
+    kind: ClassVar[str] = "adjust_ability_uses"
+    title: str = ""
+    delta: int = 0
+
+
+@dataclass(frozen=True)
+class RestoreAbilityUses(Command):
+    """Put an ability's remaining uses back to its configured default.
+
+    Any player may do this for any character: at the table this is somebody
+    reaching over and resetting a counter, not the character using their own
+    ability, so it is not restricted to the owner.
+    """
+
+    kind: ClassVar[str] = "restore_ability_uses"
+    title: str = ""
 
 
 # ── board ────────────────────────────────────────────────────────────────────
@@ -333,6 +408,7 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
     cls.kind: cls
     for cls in (
         DrawCard,
+        DrawTitledCard,
         DiscardCard,
         PlayCard,
         UseAbility,
@@ -345,6 +421,9 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
         DrawCharacter,
         DrawSkill,
         DiscardTopCharacterCard,
+        AdjustDeckCount,
+        AdjustAbilityUses,
+        RestoreAbilityUses,
         MoveToken,
         PickUpToken,
         SetRound,
