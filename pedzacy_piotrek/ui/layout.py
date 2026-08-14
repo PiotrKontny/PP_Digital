@@ -93,6 +93,21 @@ TYPE_BOOST_MAX = 1.18
 #: the smallest supported window; everywhere else the shelf is already wider.
 MIN_HAND_CARD_W = 136
 
+# ── the enlarged hover preview (stage 48) ────────────────────────────────────
+#: How much bigger the preview is than the slot card it is previewing.  The
+#: same number ``RecentlyPlayed.HOVER_SCALE`` has used since stage 9, so the
+#: two enlargements in the interface are one size and not two.
+HOVER_PREVIEW_SCALE = 2.15
+#: Floor and ceiling, in pixels of HEIGHT.  The floor is what makes this worth
+#: doing at 1280x760, where 2.15x a 107 px slot card is still small; the
+#: ceiling stops a 4K window from putting a card the size of a door on screen.
+HOVER_PREVIEW_MIN_H = 260
+HOVER_PREVIEW_MAX_H = 460
+#: Share of the content area (the window above the hand shelf) the preview may
+#: occupy.  This is what actually binds on a short window, and it binds BEFORE
+#: the floor above, because a preview taller than the screen is not readable.
+HOVER_PREVIEW_HEIGHT_SHARE = 0.86
+
 
 def _clamp(value: float, low: float, high: float) -> int:
     return int(max(low, min(high, value)))
@@ -452,6 +467,89 @@ class Layout:
     def rename_rect(self, tile: pygame.Rect) -> pygame.Rect:
         size = self.rename_mark
         return pygame.Rect(tile.right - size - 7, tile.top + 7, size, size)
+
+    # ── the enlarged hover preview (stage 48) ────────────────────────────────
+    @property
+    def hover_preview_bounds(self) -> pygame.Rect:
+        """Where an enlarged hover preview is allowed to be.
+
+        The content area — everything above the hand shelf, inset by the same
+        ``pad`` the panels use.  Deliberately NOT the whole window: a preview
+        that reached down over the fan would cover the cards the player is
+        about to click, and the hand is the one region of this interface that
+        is always in use.
+        """
+        return pygame.Rect(self.pad, self.pad,
+                           self.win_w - 2 * self.pad, self.content_h)
+
+    @property
+    def hover_preview_gap(self) -> int:
+        """Clear air between the hovered card and its preview.
+
+        Non-zero on purpose, and it is load-bearing: the preview never touches
+        the card it belongs to, so moving the cursor onto the preview LEAVES
+        the card and simply ends the hover.  Two overlapping rects would give
+        the cursor a place to sit where the hover both is and is not on, which
+        is the classic tooltip flicker.
+        """
+        return max(6, int(10 * self.ui_scale))
+
+    def hover_preview_size(self, anchor: pygame.Rect) -> Tuple[int, int]:
+        """How big the preview of a card drawn in ``anchor`` should be.
+
+        Quoted against the ANCHOR first, so the preview is always a real
+        enlargement of the thing under the cursor, then clamped by what the
+        window can actually show.  Card proportions are kept exactly — the
+        preview is the same card, larger, not a differently shaped panel.
+        """
+        bounds = self.hover_preview_bounds
+        gap = self.hover_preview_gap
+        height = anchor.height * HOVER_PREVIEW_SCALE
+        height = max(height, HOVER_PREVIEW_MIN_H * self.ui_scale)
+        height = min(height, HOVER_PREVIEW_MAX_H * self.ui_scale)
+        # What the window has room for, on both axes.  The width limit is the
+        # WIDER of the two sides the preview may be placed on: it only has to
+        # fit somewhere, not everywhere.
+        room = max(bounds.right - (anchor.right + gap),
+                   (anchor.left - gap) - bounds.left)
+        height = min(height, bounds.height * HOVER_PREVIEW_HEIGHT_SHARE,
+                     max(1, room) * CARD_ASPECT)
+        height = max(48, int(height))
+        return (max(34, int(height / CARD_ASPECT)), height)
+
+    def hover_preview_rect(self, anchor: pygame.Rect,
+                           size: Tuple[int, int]) -> pygame.Rect:
+        """Place a preview of ``size`` beside the card drawn in ``anchor``.
+
+        RIGHT of the card when it fits, LEFT when it does not — which is what
+        the right-hand character column always takes, since there is nothing
+        to its right but the window edge.  When neither side has room the
+        preview is pushed inside the bounds rather than allowed off screen:
+        clipped text is the one outcome this whole feature exists to prevent.
+
+        Vertically it is centred on the card and then clamped, so a preview of
+        a slot near the top or the bottom of a column slides into view instead
+        of hanging off the edge.
+        """
+        bounds = self.hover_preview_bounds
+        gap = self.hover_preview_gap
+        width, height = size
+
+        if anchor.right + gap + width <= bounds.right:
+            x = anchor.right + gap
+        elif anchor.left - gap - width >= bounds.left:
+            x = anchor.left - gap - width
+        else:
+            # Neither side fits: take the roomier one and clamp.  A preview
+            # half over its own card still reads; one half off screen does not.
+            room_right = bounds.right - (anchor.right + gap)
+            room_left = (anchor.left - gap) - bounds.left
+            x = anchor.right + gap if room_right >= room_left else anchor.left - gap - width
+            x = _clamp(x, bounds.left, max(bounds.left, bounds.right - width))
+
+        y = anchor.centery - height // 2
+        y = _clamp(y, bounds.top, max(bounds.top, bounds.bottom - height))
+        return pygame.Rect(int(x), int(y), width, height)
 
     # ── recently played strip (floats over the board) ────────────────────────
     def recent_card_size(self) -> Tuple[int, int]:

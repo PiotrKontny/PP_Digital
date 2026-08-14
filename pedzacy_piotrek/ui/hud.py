@@ -38,6 +38,7 @@ from ..engine.game_state import GameState
 from ..players.player import Player
 from ..render.card_renderer import CardRenderer
 from ..render.renderer import Renderer
+from .card_preview import CardPreview
 from .layout import Layout
 from .widgets import TextField
 
@@ -64,6 +65,21 @@ class HudContext:
     view_index: int = 0
     #: Whether the viewer may act for the seat they are looking at.
     can_act: bool = True
+    #: Where a panel asks for an enlarged hover preview of a slot card.  A
+    #: panel only ever calls ``request``; the screen draws it late, above
+    #: every panel.  ``None`` in the tests and screens that build a context
+    #: without one, which is why every call site goes through ``preview_card``.
+    preview: Optional[CardPreview] = None
+
+    def preview_card(self, card: Optional[Card], anchor: pygame.Rect,
+                     border_color: Optional[Color] = None) -> None:
+        """Ask for an enlarged preview of ``card`` beside ``anchor``.
+
+        A no-op without a preview, so a panel never has to ask whether the
+        screen it is drawing into has one.
+        """
+        if self.preview is not None:
+            self.preview.request(card, anchor, border_color)
 
     @property
     def player(self) -> Player:
@@ -386,6 +402,13 @@ class ModPanel(Panel):
                 colour = theme.deck_colors.get(card.deck_id)
                 ctx.cards.draw_in(card, rect, surface,
                                   highlighted=(hovered and placing), border_color=colour)
+                # A mod in a slot is as small as the ability card and has the
+                # same problem, so it takes the same answer (stage 48).  A
+                # Signature mod is left alone: it already has a hover that
+                # works and the brief for this change was explicit that a
+                # working card-art hover is not to be disturbed.
+                if hovered and not ctx.cards.has_art(card):
+                    ctx.preview_card(card, rect, colour)
                 if hovered and not placing:
                     r.text("P-click: odrzuć", r.fonts.label(), theme.mod_instr, surface,
                            midtop=(rect.centerx, rect.bottom + 3))
@@ -471,8 +494,19 @@ class CharacterPanel(Panel):
                      radius=max(6, card_rect.height // 14))
         if ability is not None:
             hovered = card_rect.collidepoint(ctx.mouse)
+            # ``reveal=0.0`` PINS the ability card to its resting face (stage
+            # 48).  It used to derive the reveal from ``highlighted``, so
+            # hovering an illustrated ability darkened its artwork, lifted the
+            # title and squeezed the description into a card 142 px tall on a
+            # 1280x760 window — which is where the readability complaint came
+            # from.  The card the player is looking at now stays exactly as it
+            # is, hover rim and all, and the words move to the enlarged preview
+            # beside it.  This is the ONE slot that pins the reveal regardless
+            # of artwork: an ability is the thing the panel is about.
             ctx.cards.draw_in(ability, card_rect, surface, highlighted=hovered,
-                              border_color=ability_color)
+                              border_color=ability_color, reveal=0.0)
+            if hovered:
+                ctx.preview_card(ability, card_rect, ability_color)
         else:
             ctx.cards.draw_empty(card_rect.x, card_rect.y, surface, label="brak",
                                  size=(card_rect.w, card_rect.h))

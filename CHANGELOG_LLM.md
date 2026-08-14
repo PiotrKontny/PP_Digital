@@ -6820,3 +6820,128 @@ site that needed it, which is why the UI change is a single argument.
   `CardBackLibrary.refresh()` exists for a live reload; nothing calls it.
 - **A discard pile shows a front, not a back.** Unchanged behaviour — the top
   discard is face up, which is what it always was.
+
+## Stage 48 — The enlarged hover preview
+**Date:** 2026-08-14
+
+### Goal
+Make an ability readable on a small screen. Hovering one must leave the card
+exactly as it is and show a **larger copy beside it** carrying the title and
+the description — and cards without artwork, which have the same problem in the
+same kind of slot, must behave the same way.
+
+### What was there before
+Stage 30 gave every card a hover **reveal** — title lifted, description faded in
+underneath a darkened picture — and defaulted it from `highlighted`, so every
+panel in the game got both states without an edit. `CharacterPanel.draw` passed
+`highlighted=hovered` on the ability card and inherited it.
+
+In the hand that default is exactly right: a hand card is 200-300 px tall. In a
+**slot** it is exactly wrong, because it puts *more* text in the *same* small
+rectangle. At 1280×760 the ability card is 99×142 and a mod slot card is 74×107.
+On an illustrated ability it was worse than useless: the reveal veiled the
+artwork, so hovering an ability to read it replaced the ability with a darker
+version of itself.
+
+Inspection found one enlargement precedent worth reusing — `RecentlyPlayed`,
+which grows a hovered card by `HOVER_SCALE = 2.15`, **repaints** it at the
+enlarged size through `CardRenderer.quantised` rather than zooming the small
+raster, and nudges it away from the screen edge. Its scale factor and its
+repaint-don't-zoom discipline are both borrowed here rather than re-invented.
+
+### Implemented
+**`ui/card_preview.py`.** `CardPreview`: a one-request-per-frame collector.
+A panel calls `ctx.preview_card(...)` while drawing a slot; `GameScreen.draw`
+calls `card_preview.draw(ctx)` once, after every panel and before the dialogs.
+**The draw consumes the request**, so a frame on which nothing asks draws
+nothing and there is no state to unwind — a panel that stops asking, or stops
+being drawn, stops getting a preview on the very next frame. Last caller wins;
+two slots cannot be under one cursor.
+
+**The presentation is borrowed, not rebuilt.** It draws through
+`cards.draw_in(..., highlighted=True, reveal=1.0)` — the same face and the same
+reveal the card-art hover has painted since stage 30. There is no second card
+renderer. The size goes through `quantised`, so the face is repainted at the
+size it will be seen.
+
+**Geometry in `Layout`, like every other rectangle.** `hover_preview_bounds`
+(the content area — deliberately *not* the whole window, so a preview never
+reaches down over the hand fan), `hover_preview_gap`, `hover_preview_size`
+(2.15× the anchor, floored, capped, then clamped by what the window can show,
+card proportions kept exactly) and `hover_preview_rect` (right when it fits,
+left when it does not, clamped inside the bounds when neither side has room).
+
+**Which slots ask.** The ability card **always**, artwork or not — it pins
+`reveal=0.0` and is the one place that does, because an ability is what that
+panel is about. A mod-rack card **only when it has no artwork**: a Signature mod
+keeps the stage-30 hover, which works and was not to be disturbed.
+
+**`CardRenderer.has_art`.** How a panel asks. Stage 30's rule still holds —
+the artwork branch lives on `face()`'s first line and `ui/` never writes
+`if card.art`. This is a *different* question ("which hover affordance does this
+slot offer?"), and routing it through the renderer keeps one opinion about what
+counts as artwork. A test greps all of `ui/` for `.art.surface(` and
+`CardArtLibrary`.
+
+### Architecture notes
+The gap between the card and its preview is **load-bearing twice over**. The
+rects never touch, so moving the cursor onto the preview simply leaves the card
+and ends the hover — overlapping rects would give the cursor somewhere to sit
+where the hover is simultaneously on and off, which is the classic tooltip
+oscillation. And the shadow is **sized from the gap**: a fixed spread reached
+back across it and darkened the right-hand six pixels of the very card being
+previewed by one unit per channel. Invisible to the eye, caught by the
+byte-for-byte test, and a real violation of the promise the feature makes.
+
+`HudContext.preview` is optional and every call goes through
+`ctx.preview_card`, a no-op without one. Plenty of screens and tests build a
+context of their own; a panel that assumed a preview was always there would
+take all of them down.
+
+The right-hand character column **always** takes the left-hand fallback — there
+is nothing to its right but the window edge — so the fallback is the path that
+ships, not a defensive branch nobody walks.
+
+### Changed
+- `pedzacy_piotrek/ui/card_preview.py` — new; `CardPreview`, `PreviewRequest`.
+- `pedzacy_piotrek/ui/layout.py` — `HOVER_PREVIEW_*` constants;
+  `hover_preview_bounds` / `_gap` / `_size` / `_rect`.
+- `pedzacy_piotrek/render/card_renderer.py` — `has_art()`.
+- `pedzacy_piotrek/ui/hud.py` — `HudContext.preview` + `preview_card()`; the
+  ability card pins `reveal=0.0` and requests a preview; mod slots request one
+  for a card without artwork.
+- `pedzacy_piotrek/ui/game_screen.py` — owns the `CardPreview`, passes it in
+  the context, draws it above the panels and below the dialogs.
+- `tests/test_card_preview.py` — new, 44 tests.
+- `LLM_Instructions.txt` — "THE ENLARGED HOVER PREVIEW"; gesture table; module
+  map; CURRENT IMPLEMENTATION; N143, N144.
+
+### Untouched deliberately
+The hand fan, the card library, `_signature_face`, the reveal itself, every
+engine rule, `net/`, and the mod-slot and ability-button gestures. The hand and
+the library draw cards big enough to read; the preview is for slots, and a hand
+of eight would otherwise put a preview beside every card in it.
+
+### Verification
+- **2052 pass, 0 fail** (stage 47 ended at 2008; +44, all in
+  `test_card_preview.py`).
+- `tests/test_card_preview.py`: **44 pass**.
+- Rendered headlessly at 1920×1080 and 1280×760 and inspected: the ability card
+  keeps its artwork and its resting title, the enlarged copy appears to its left
+  fully on screen, and nothing else on the frame moves.
+- Geometry asserted at 2560×1440, 1920×1080, 1600×900 and 1280×760 — the
+  preview is inside the bounds, clear of the hand, clear of its own card, and at
+  least 1.8× its height at every one.
+
+### Known limitations
+- **The preview can cover the turn bar or the player strip on a short window.**
+  It is centred on its card and then clamped, and on a 760 px window a preview
+  of the ability card is taller than the room above the board. It is transient
+  and covers nothing that must be clicked to answer it, but it is not free.
+- **No fade.** The preview appears and disappears on the frame the hover starts
+  and ends. `RecentlyPlayed` eases its enlargement; this does not, because an
+  animated size would repaint a face per step for a hover that is binary.
+- **A mod with artwork still has no readable hover.** It keeps the stage-30
+  reveal, which at 74×107 is no more readable than it ever was. That is the
+  brief's line, not an oversight — but it is the obvious next thing to ask
+  about, and moving it is one condition in `ModPanel.draw`.

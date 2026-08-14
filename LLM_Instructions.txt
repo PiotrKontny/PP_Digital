@@ -279,7 +279,13 @@ WORKING:
   ``assets/card_backs``, and which picture belongs to which deck is one table,
   ``settings.CARD_BACKS``.  The drawn cover that used to be painted per deck
   colour survives only as the fallback for a missing file.  See "CARD BACKS".
-- 1243 automated tests.
+- THE ENLARGED HOVER PREVIEW (stage 48): a card sitting in a PANEL SLOT is too
+  small to read, so hovering the ability card — or a mod-rack card with no
+  artwork — leaves it exactly as it is and draws a second, LARGER copy of the
+  same card beside it, carrying the title and the description.  Right of the
+  card when there is room, left when there is not.  ``ui/card_preview.py``,
+  geometry in ``Layout.hover_preview_*``.  See "THE ENLARGED HOVER PREVIEW".
+- 2052 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
@@ -397,6 +403,10 @@ pedzacy_piotrek/
     particles.py     Dust, sparkle, trail, leaves.
   ui/
     app.py           App shell, window, screen stack, main loop, resizing.
+    card_preview.py  THE ENLARGED HOVER PREVIEW.  A panel asks for one while
+                     drawing a slot; the screen draws it late, above every
+                     panel and below every dialog.  Draws only — it creates no
+                     card, hit-tests nothing and receives no click.
     layout.py        EVERY rectangle, computed from window size.
     widgets.py       Button (measures its own label), Stepper, Checkbox,
                      Dropdown, Slider, ScrollBar, fit_buttons, and
@@ -2317,6 +2327,123 @@ fallback needs it, and ``theme.deck_colors`` is still doing four other jobs
 
 
 ================================================================================
+THE ENLARGED HOVER PREVIEW  (stage 48 — read before changing any slot hover)
+================================================================================
+
+THE RULE, IN ONE LINE
+    A card in a PANEL SLOT is never transformed by its own hover.  It stays
+    exactly as it is and a second, LARGER copy of it appears beside it.
+
+WHY THE REVEAL WAS THE WRONG TOOL HERE
+    Stage 30 gave every card a hover reveal — title lifted, description faded
+    in underneath — and defaulted it from ``highlighted``, so every panel in
+    the game got it for free.  In the HAND that is exactly right: a hand card
+    is 200-300 px tall and there is room for the words.
+
+    In a SLOT it is exactly wrong, because it puts MORE text in the SAME small
+    rectangle.  At 1280x760 the character panel's ability card is 99x142 and a
+    mod slot card is 74x107.  No amount of type fitting rescues a description
+    at that size, and on an illustrated ability the reveal also veiled the
+    artwork — so hovering an ability to read it replaced the ability with a
+    darker version of itself.  That is the complaint this stage answers.
+
+WHERE THE LINE IS DRAWN, AND WHY IT IS DRAWN THERE
+    PANEL SLOTS take the preview.  The hand fan does NOT: its cards are big
+    enough to read, its reveal rides a smooth ``slot.hover`` that makes the
+    transition glide, and a hand of eight would otherwise put a preview beside
+    every card in it.  The card library does NOT either — its cards are ~0.6 of
+    the viewport and reading them was never the problem.
+
+    Which slots ask:
+      * the ability card in ``CharacterPanel`` — ALWAYS, artwork or not.  An
+        ability is what that panel is about, and the brief was explicit that
+        the card the player is looking at must not change under the cursor.
+        This is the one place that pins ``reveal=0.0`` regardless of artwork.
+      * a mod-rack card with NO artwork.  A Signature mod keeps the stage-30
+        hover, which works and was not to be disturbed.
+
+    ``CardRenderer.has_art`` is how a panel asks.  Stage 30's rule — the
+    artwork branch lives on ``face()``'s first line and ui/ never writes
+    ``if card.art`` — still holds: this is a DIFFERENT question ("which hover
+    affordance does this slot offer?"), and routing it through the renderer is
+    what keeps one opinion about what counts as artwork.  A test greps all of
+    ``ui/`` for ``.art.surface(`` and ``CardArtLibrary``.
+
+THE PRESENTATION IS BORROWED, NOT REBUILT
+    ``CardPreview.draw`` calls ``cards.draw_in(..., highlighted=True,
+    reveal=1.0)``.  That is the SAME face and the SAME reveal the card-art
+    hover has painted since stage 30 — on a Signature card the darkened
+    artwork with the title lifted and the description under it, and on a card
+    without artwork the parchment face it always had, title, divider,
+    description and badge included.  THERE IS NO SECOND CARD RENDERER, and
+    there must not be one.
+
+    The size goes through ``CardRenderer.quantised`` like every other enlarged
+    card in the game, so the face is REPAINTED at the size it will be seen
+    rather than scaled up from the slot.  A blown-up 74x107 card is exactly as
+    unreadable as the original — see stage 9, and the note above about tests
+    that pass because of a bug.
+
+GEOMETRY LIVES IN Layout, LIKE EVERY OTHER RECTANGLE
+    ``hover_preview_bounds``  the content area — the window above the hand
+                              shelf, inset by ``pad``.  NOT the whole window:
+                              a preview reaching down over the fan would cover
+                              the cards the player is about to click.
+    ``hover_preview_gap``     clear air between the card and its preview.
+                              LOAD-BEARING, see below.
+    ``hover_preview_size``    ``HOVER_PREVIEW_SCALE`` (2.15, the same number
+                              ``RecentlyPlayed`` has used since stage 9) of the
+                              anchor, floored, capped, and then clamped by what
+                              the window can actually show.  Card proportions
+                              are kept exactly.
+    ``hover_preview_rect``    RIGHT of the card when it fits, LEFT when it does
+                              not, clamped inside the bounds when neither side
+                              has room.  Centred on the card vertically, then
+                              clamped.
+
+    The right-hand character column ALWAYS takes the left-hand fallback — there
+    is nothing to its right but the window edge — so the fallback is the path
+    that ships, not a defensive branch nobody walks.  It is tested at all four
+    window sizes; so is everything else here, because a preview verified at one
+    resolution is a preview verified at no resolution.
+
+THE GAP IS NOT DECORATION
+    The preview never touches the card it belongs to.  Two consequences, both
+    deliberate:
+
+      1. NO FLICKER.  Moving the cursor onto the preview LEAVES the card and
+         simply ends the hover.  Overlapping rects would give the cursor
+         somewhere to sit where the hover is simultaneously on and off, which
+         is the classic tooltip oscillation.
+      2. THE SHADOW IS SIZED FROM THE GAP.  A fixed spread reached back across
+         it and darkened the right-hand six pixels of the very card being
+         previewed by one unit per channel — invisible to the eye, caught by
+         the byte-for-byte test, and a real violation of the promise this
+         feature makes.  Do not hardcode a spread here.
+
+IT IS A PICTURE, NOT A CARD
+    ``CardPreview`` creates no ``Card``, touches no deck, hand, count or use,
+    has no ``handle_click``, and is never registered as a ``Panel`` or a modal.
+    A right-click aimed at the preview discards nothing; the mod slot is still
+    where the layout says it is.  It holds the card it was handed by
+    IDENTITY, so an ability that spends a use or a card that changes variant
+    shows the truth on the next frame with nothing to keep in step.
+
+ONE PER FRAME, AND THE DRAW CONSUMES IT
+    A panel calls ``ctx.preview_card(...)`` while drawing; ``GameScreen.draw``
+    calls ``card_preview.draw(ctx)`` once, after every panel and before the
+    dialogs.  The draw takes the request and clears it, so a frame on which
+    nothing asks draws nothing and there is NO STATE TO UNWIND — a panel that
+    stops asking, or stops being drawn at all, stops getting a preview on the
+    very next frame.  Last caller wins: two slots cannot be under one cursor.
+
+    ``HudContext.preview`` is OPTIONAL and every call goes through
+    ``ctx.preview_card``, which is a no-op without one.  Plenty of screens and
+    tests build a context of their own; a panel that assumed a preview was
+    always there would take all of them down.
+
+
+================================================================================
 THE CARD LIBRARY  (stage 32 — read before touching deck quantities mid-match)
 ================================================================================
 
@@ -3494,6 +3621,9 @@ Gestures:
   empty board, drag ........... pan the map (pawns win the gesture)
   tower, hover ................ fans out so each pawn is clickable
   played card, hover .......... enlarges above everything and stops fading
+  ability card, hover ......... the card stays put; a LARGER copy of it appears
+                                beside it, with the title and description
+  mod slot card, hover ........ the same, for a card with no artwork
   ability button .............. activates the character ability / Piotrek skill,
                                 showing remaining uses from the JSON "uses"
   book, bottom-right .......... opens the Card Library
@@ -4912,6 +5042,19 @@ N142. Never assume the fingerprint notices new shared state. It notices what
    machines that disagreed about who Piotrek is would have agreed about every
    field in the dictionary. When a stage makes something CHANGEABLE that used
    to be fixed, that is the moment to ask whether the snapshot can tell.
+
+N143. Never let a card in a PANEL SLOT take the hover reveal. The reveal puts
+   MORE text in the SAME rectangle, and a slot card is 74x107 at 1280x760 — it
+   was already unreadable before the description arrived. A slot pins
+   `reveal=0.0` and asks for the enlarged preview instead; the card the cursor
+   is on never changes. The hand fan is not a slot and keeps its reveal. See
+   "THE ENLARGED HOVER PREVIEW".
+
+N144. Never draw a hover preview with a hardcoded shadow spread. The shadow is
+   paint, and a preview that promises not to touch the card it previews must
+   not reach back across the gap and darken its edge. Size the spread FROM
+   `Layout.hover_preview_gap`, which is the only number that knows how far
+   apart the two rects actually are at this ui_scale.
 
 N104. Never add a rule to `_move_pawn` without asking whether `_move_pawns`
    needs it too. Plagiat! moves backwards through the second handler, so

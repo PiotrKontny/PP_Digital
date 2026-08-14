@@ -206,6 +206,21 @@ class CardRenderer:
                           display=display)
 
     # ── faces ────────────────────────────────────────────────────────────────
+    def has_art(self, card: Card) -> bool:
+        """Whether ``card`` is a Signature card — i.e. has full-card artwork.
+
+        The ONE question the interface is allowed to ask about artwork, and it
+        is not a rendering question: ``face()`` still branches on its own first
+        line and nothing outside this module chooses a face.  What this answers
+        is which HOVER AFFORDANCE a slot should offer — a Signature card reveals
+        its description in place, a card without artwork has no reveal to give
+        and needs the enlarged preview instead (stage 48).
+
+        It exists so that ui/ asks the renderer rather than reaching into
+        ``self.art`` and growing a second opinion about what counts as artwork.
+        """
+        return self.art.surface(card.definition) is not None
+
     def face(
         self,
         card: Card,

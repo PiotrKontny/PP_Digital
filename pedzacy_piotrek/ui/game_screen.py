@@ -44,6 +44,7 @@ from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
 from .match_overlays import (EliminationNotice, MatchStartOverlay,
                              VictoryOverlay)
+from .card_preview import CardPreview
 from .modals import Modal, ModalStack
 from .overlays import (
     CardPicker, ChestChoice, ChestHoldingView, ChestReveal, ChoicePrompt,
@@ -135,6 +136,11 @@ class GameScreen(Screen):
         self.character_panel = CharacterPanel()
         self.player_tiles = PlayerTiles()
         self.recently_played = RecentlyPlayed()
+        #: The enlarged hover preview shared by every panel that draws a card
+        #: in a slot.  ONE of them for the whole screen: two slots cannot be
+        #: under one cursor, and a preview per panel is a preview per panel to
+        #: keep in step.  See ``ui/card_preview.py``.
+        self.card_preview = CardPreview()
         self.status_bar = StatusBar()
         self.choice_prompt = ChoicePrompt()
         self.reveal = RevealOverlay()
@@ -1937,6 +1943,7 @@ class GameScreen(Screen):
             dt=dt,
             view_index=self.view_seat,
             can_act=self.controls_view,
+            preview=self.card_preview,
         )
 
     def update(self, dt: float, mouse: Tuple[int, int]) -> None:
@@ -2113,6 +2120,13 @@ class GameScreen(Screen):
         # Last of all: a played card the player is inspecting sits above
         # everything, including the hand fan.
         self.recently_played.draw_overlay(ctx)
+        # The enlarged hover preview any panel asked for while drawing above:
+        # above every panel, so it is never half-covered by the column it grew
+        # out of, and below the dialogs and banners below, because a window the
+        # player has to answer outranks something they are only reading.  This
+        # call CONSUMES the request, so a frame on which nothing asked draws
+        # nothing and there is no stale preview to clear.
+        self.card_preview.draw(ctx)
         self._draw_turn_banner(ctx)
         self._draw_return_button(ctx)
         self._draw_end_turn_button(ctx)
