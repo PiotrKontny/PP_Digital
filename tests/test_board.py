@@ -50,9 +50,9 @@ def test_rows_always_finish_on_a_single_field():
     for count in range(10, 80):
         rows = make_rows(count, pattern)
         assert rows[-1] == "single"
-        total = sum(2 if r == "double" else 1 for r in rows)
-        assert total >= count
-        assert total - count <= 1
+        # One row is one board position, doubled or not: the requested size is
+        # a count of POSITIONS, so the list is exactly that long.
+        assert len(rows) == count
 
 
 def test_too_small_a_board_is_rejected():
@@ -66,13 +66,15 @@ def board() -> BoardModel:
     return BoardModel.generate(cell_count=24, seed=42)
 
 
-def test_board_has_exactly_the_requested_number_of_fields(board):
-    assert len(board.tiles) == 24
+def test_board_has_exactly_the_requested_number_of_positions(board):
+    assert board.position_count == 24
+    assert board.meta_number == 24
     # Numbers count board *positions*, so a doubled row spends one number on
     # two fields: 1, 2a, 2b, 3, ...
     assert [t.number for t in board.tiles] == sorted(t.number for t in board.tiles)
     assert board.tiles[0].number == 1
     assert board.tiles[-1].number == board.position_count
+    assert len(board.tiles) >= board.position_count
 
 
 def test_doubled_positions_are_labelled_a_and_b(board):
@@ -107,14 +109,20 @@ def test_double_frequency_controls_how_often_rows_widen():
     often_count = sum(1 for p in often.positions if p.is_doubled)
     assert rare_count < often_count
     for model in (none_doubled, rare, often):
-        assert len(model.tiles) == 40
+        # The frequency decides how many FIELDS there are, never how long the
+        # board is: all three finish on 40.
+        assert model.position_count == 40
+        assert model.meta_number == 40
         assert model.verify_spacing() is None
+    assert len(none_doubled.tiles) == 40
+    assert len(rare.tiles) < len(often.tiles)
 
 
 @pytest.mark.parametrize("count", [10, 17, 24, 40, 63])
-def test_field_count_holds_for_any_board_size(count):
+def test_position_count_holds_for_any_board_size(count):
     model = BoardModel.generate(cell_count=count, seed=3)
-    assert len(model.tiles) == count
+    assert model.position_count == count
+    assert model.meta_number == count
     assert model.tiles[0].kind is TileKind.START
     assert model.tiles[-1].kind in (TileKind.FINISH,)
 
@@ -165,10 +173,11 @@ def test_nothing_grows_inside_the_starting_camp(seed):
     from pedzacy_piotrek.board.tiles import PropKind
 
     model = BoardModel.generate(cell_count=34, seed=seed)
-    xs = [s.position[0] for s in model.camp_slots]
-    ys = [s.position[1] for s in model.camp_slots]
-    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
-    half_w, half_h = (max(xs) - min(xs)) / 2 + 80, (max(ys) - min(ys)) / 2 + 90
+    # Assert the generator's OWN keep-out box rather than a hand-copied one.
+    # The hand-copied margins here were ±80/±90 against a real ±86/±86, so the
+    # test claimed four pixels of clearance nobody had promised and only passed
+    # because the four seeds below happened to miss the gap.
+    (cx, cy), half_w, half_h = model.camp_bounds
 
     intruders = [
         prop for prop in model.props
@@ -233,7 +242,108 @@ def test_tile_near_respects_the_snap_radius():
     assert model.tile_near(far) is None
 
 
-# ── the spacing guarantee (this stage's bug fix) ─────────────────────────────
+# ── logical positions vs physical fields (the board-length bug) ──────────────
+#
+# The board size chosen in the lobby is a count of POSITIONS: ask for 24 and
+# the meta stands on 24.  The generator used to spend the budget on FIELDS, so
+# every 4a/4b pair ate two of it and the same board finished early — 24 with
+# two doubled rows ended on 22, with seven of them on 19.
+
+
+def test_the_meta_stands_on_the_requested_number_whatever_the_doubles():
+    """The bug, stated directly: 24 means the meta is 24."""
+    for frequency in (0.0, 0.15, 0.3, 0.5, 0.85, 1.0):
+        model = BoardModel.generate(cell_count=24, seed=42,
+                                    double_frequency=frequency)
+        assert model.position_count == 24
+        assert model.meta_number == 24
+        assert model.positions[-1].tiles[0].label == "24"
+
+
+@pytest.mark.parametrize("cells", [10, 20, 24, 30, 47])
+@pytest.mark.parametrize("frequency", [0.0, 0.35, 1.0])
+def test_board_length_is_independent_of_the_double_frequency(cells, frequency):
+    """Every supported size, every frequency: the length is what was asked."""
+    model = BoardModel.generate(cell_count=cells, seed=7,
+                                double_frequency=frequency)
+    assert model.position_count == cells
+    assert model.meta_number == cells
+    assert model.last_position == cells - 1
+    assert model.verify_spacing() is None
+
+
+def test_a_doubled_position_is_one_position_and_two_fields():
+    """The semantic difference itself, counted both ways on one board."""
+    model = BoardModel.generate(cell_count=24, seed=42, double_frequency=0.3)
+    doubled = [p for p in model.positions if p.is_doubled]
+    assert len(doubled) >= 2, "this board should contain several widened rows"
+
+    # Physical entries: every doubled position contributes an extra field.
+    assert len(model.tiles) == model.position_count + len(doubled)
+    assert len(model.tiles) > model.position_count
+    # Logical positions: the extra fields buy no extra length.
+    assert model.position_count == 24
+    assert model.meta_number == 24
+
+    # Position numbering is unbroken, and a pair shares its number.
+    assert [p.number for p in model.positions] == list(range(1, 25))
+    for position in doubled:
+        assert [t.label for t in position.tiles] == [
+            f"{position.number}a", f"{position.number}b"
+        ]
+
+
+def test_two_doubles_do_not_shorten_a_twenty_four_field_board():
+    """The example from the report: 4a/4b and 14a/14b must still end at 24."""
+    rows = ["single"] * 24
+    rows[3] = "double"    # position 4 → 4a / 4b
+    rows[13] = "double"   # position 14 → 14a / 14b
+
+    model = BoardModel.generate(cell_count=24, seed=5, double_frequency=0.0)
+    model._place_tiles(rows)
+
+    assert model.meta_number == 24
+    assert model.position_count == 24
+    assert len(model.tiles) == 26  # 24 positions, two of them drawn twice
+    assert [t.label for t in model.tiles[2:6]] == ["3", "4a", "4b", "5"]
+    assert model.tile_by_label("14b") is not None
+    assert model.positions[-1].tiles[0].kind is TileKind.FINISH
+
+
+def test_a_board_with_no_doubles_has_one_field_per_position():
+    for cells in (20, 24):
+        model = BoardModel.generate(cell_count=cells, seed=3,
+                                    double_frequency=0.0)
+        assert model.position_count == cells
+        assert len(model.tiles) == cells
+        assert model.meta_number == cells
+        assert not any(p.is_doubled for p in model.positions)
+
+
+def test_the_meta_is_never_one_half_of_a_pair():
+    """Even at frequency 1.0, where every other row widens."""
+    for seed in range(6):
+        model = BoardModel.generate(cell_count=26, seed=seed,
+                                    double_frequency=1.0)
+        last = model.positions[-1]
+        assert not last.is_doubled
+        assert last.tiles[0].variant == ""
+        assert last.tiles[0].kind is TileKind.FINISH
+        assert last.number == 26
+
+
+def test_the_same_size_and_seed_still_build_the_same_board():
+    """The fix must not cost determinism — multiplayer rebuilds from these."""
+    for frequency in (0.0, 0.4, 1.0):
+        a = BoardModel.generate(cell_count=24, seed=99,
+                                double_frequency=frequency)
+        b = BoardModel.generate(cell_count=24, seed=99,
+                                double_frequency=frequency)
+        assert [t.label for t in a.tiles] == [t.label for t in b.tiles]
+        assert [t.position for t in a.tiles] == [t.position for t in b.tiles]
+
+
+# ── the spacing guarantee (an earlier stage's bug fix) ───────────────────────
 @pytest.mark.parametrize("cells", [10, 13, 24, 37, 48, 63])
 @pytest.mark.parametrize("seed", [0, 1, 2, 3])
 def test_fields_never_crowd_each_other(cells, seed):

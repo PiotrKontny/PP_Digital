@@ -7,14 +7,23 @@ offers an event to the hand fan, then the board, then each panel in priority
 order, collects the commands they produce and hands them to the session.  It
 contains no rules.
 
-Input priority (unchanged from the prototype except for the fan, which is new
-and sits first because it is the topmost thing on screen):
+Input priority:
 
-    renaming → hand fan → board → round counter → right-click chain → left-click chain
+    renaming → THE MODAL STACK → keyboard → floating buttons → hand fan →
+    board → round counter → right-click chain → left-click chain
+
+Everything that can own input as a WINDOW lives in the modal stack
+(ui/modals.py) rather than in a hand-written chain of ``if ... .active:``
+tests.  One list decides both what is painted on top and what receives the
+click, so the two can no longer disagree — which is the bug round 7 exposed,
+where the Mod Patusa selection was drawn over the Chest limit and the Chest
+limit answered the clicks.  Register a new window in ``_register_modals``;
+do not add another branch here.
 """
 
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -35,6 +44,7 @@ from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
 from .match_overlays import (EliminationNotice, MatchStartOverlay,
                              VictoryOverlay)
+from .modals import Modal, ModalStack
 from .overlays import (
     CardPicker, ChestChoice, ChestHoldingView, ChestReveal, ChoicePrompt,
     ModChoice, PauseMenu, RevealOverlay, RevealPhase,
@@ -190,6 +200,22 @@ class GameScreen(Screen):
         #: moves after the card has been seen and not underneath it.
         self._spotlight_left = 0.0
 
+        #: Paczka's holdings, held back while a Mod selection is still running.
+        #: The engine already defers the EVENT; this is the belt to that
+        #: braces, for a replica that replayed an old log or resynced mid-pause.
+        self._held_chest_reveal: Optional[List[ChestHoldingView]] = None
+        #: Esc's random fallback.  DELIBERATELY NOT the session RNG (R4): this
+        #: draw happens on ONE machine, at a moment nobody else knows about, and
+        #: pulling from the shared stream would leave every other replica one
+        #: number behind.  What travels is the COMMAND it produces, which is
+        #: what every machine agrees on — exactly as a mouse click does.
+        self._escape_rng = random.Random(self.state.config.seed ^ 0x5EC0)
+
+        #: THE MODAL STACK.  One list behind both painting and input; see
+        #: ui/modals.py for why there is only one.
+        self.modals = ModalStack()
+        self._register_modals()
+
         self.hand.notify = self.status_bar.notify
 
         self.bus.subscribe(ev.ActionRejected, self._on_rejected)
@@ -232,6 +258,417 @@ class GameScreen(Screen):
             # Joining a match that has not begun (the ordinary case online) or
             # one that is already over (a reconnection after the last move).
             self._sync_match_overlays()
+
+    # ── the modal stack ──────────────────────────────────────────────────────
+    def _register_modals(self) -> None:
+        """THE ORDER OF THE WINDOWS.  Bottom first; the last one owns input.
+
+        This list is the single source of truth for BOTH the paint order and
+        the input order, so "visually on top" and "receives the click" are the
+        same statement by construction rather than by two people remembering
+        to keep two lists in step.  Read it top-down as the stack:
+
+            pause menu              meta: leaving the match
+            victory / match start   there is no table to play
+            check / breakup / movement decisions   the table is stopped
+            card library            a modal encyclopedia over a live game
+            Paczka                  informational, dismissed with one click
+            card picker             somebody else's hand
+            MOD PATUSA SELECTION    ← above the chest limit, per stage 44
+            chest limit             pending underneath while mods are chosen
+            pending choice          which pawn / which field / how far
+            reveal                  presentation only
+
+        The Mod selection sitting ABOVE the chest limit is the stage 44 fix.
+        It was always painted there; it now receives input there too, and the
+        chest limit waits underneath instead of stealing the clicks.
+        """
+        layout = lambda: self.app.layout       # noqa: E731 — read every frame
+
+        def covers(rect_of):
+            def _covers(mouse):
+                rect = rect_of()
+                return rect is not None and rect.collidepoint(mouse)
+            return _covers
+
+        full_screen = lambda mouse: True       # noqa: E731
+
+        self.modals.register(Modal(
+            name="reveal",
+            is_active=lambda: self.reveal.active,
+            handle=self._modal_reveal,
+            draw=lambda: self.reveal.draw(self.app.renderer, self.cards,
+                                          self.app.layout, self.app.canvas),
+            blocking=False, blocks_keyboard=False,
+            covers=covers(lambda: self.reveal.card_rect(self.app.layout)),
+            resolve=self._resolve_reveal_randomly,
+        ))
+        self.modals.register(Modal(
+            name="pending_choice",
+            # The card picker is the VIEW of a card-kind pending choice, so
+            # this entry stands down while that one is up (it is above).
+            is_active=lambda: self.pending_choice is not None,
+            handle=self._modal_pending_choice,
+            draw=lambda: self.choice_prompt.draw(
+                self.app.renderer, self.app.layout, self.app.canvas,
+                self.app.mouse()),
+            blocking=False, blocks_keyboard=False,
+            covers=lambda mouse: self.choice_prompt.option_at(mouse) is not None
+            or self.choice_prompt.confirm_hit(mouse),
+            resolve=self._resolve_pending_choice_randomly,
+        ))
+        self.modals.register(Modal(
+            name="chest_choice",
+            is_active=lambda: self.chest_choice.active,
+            handle=self._modal_chest_choice,
+            draw=lambda: self.chest_choice.draw(
+                self.app.renderer, self.cards, self.app.layout,
+                self.app.canvas, self.app.mouse()),
+            blocking=True, blocks_keyboard=False,
+            covers=covers(lambda: self.app.layout.chest_choice_panel(
+                len(self.chest_choice.cards))),
+            resolve=self._resolve_chest_choice_randomly,
+        ))
+        self.modals.register(Modal(
+            name="mod_choice",
+            is_active=lambda: self.mod_choice.active,
+            handle=self._modal_mod_choice,
+            draw=lambda: self.mod_choice.draw(
+                self.app.renderer, self.cards, self.app.layout,
+                self.app.canvas, self.app.mouse()),
+            # Not blocking, for the reason it never was: a hunter waiting on
+            # four other votes should still be able to pan and zoom.
+            blocking=False, blocks_keyboard=False,
+            covers=covers(lambda: self.app.layout.mod_choice_panel(
+                len(self.mod_choice.cards)) if self.mod_choice.cards else None),
+            resolve=self._resolve_mod_choice_randomly,
+        ))
+        self.modals.register(Modal(
+            name="card_picker",
+            is_active=lambda: self.card_picker.active,
+            handle=self._modal_card_picker,
+            draw=lambda: self.card_picker.draw(
+                self.app.renderer, self.cards, self.app.layout,
+                self.app.canvas, self.app.mouse()),
+            blocking=True, blocks_keyboard=False,
+            covers=covers(lambda: self.app.layout.card_picker_panel(
+                len(self.card_picker.cards)) if self.card_picker.cards else None),
+            resolve=self._resolve_pending_choice_randomly,
+        ))
+        self.modals.register(Modal(
+            name="chest_reveal",
+            is_active=lambda: self.chest_reveal.active,
+            handle=self._modal_chest_reveal,
+            draw=lambda: self.chest_reveal.draw(
+                self.app.renderer, self.app.layout, self.app.canvas,
+                self.app.mouse()),
+            # Informational: the table underneath stays live so the other
+            # players keep going while somebody reads it.  Keyboard IS taken,
+            # so Esc and Enter close it rather than opening the pause menu.
+            blocking=False, blocks_keyboard=True,
+            covers=covers(lambda: self.app.layout.chest_reveal_panel(
+                self.chest_reveal.lines)),
+            resolve=self._resolve_chest_reveal_randomly,
+        ))
+        self.modals.register(Modal(
+            name="card_library",
+            is_active=lambda: self.card_library.active,
+            handle=lambda event, mouse: self.card_library.handle_event(
+                event, mouse, self.app.layout),
+            draw=lambda: self.card_library.draw(
+                self.app.renderer, self.cards, self.app.layout,
+                self.app.canvas, self.app.mouse()),
+            blocking=True, blocks_keyboard=True, covers=full_screen,
+            # Esc already closes it, in its own handler.  There is nothing to
+            # answer at random: it is an encyclopedia, not a question.
+            resolve=None,
+        ))
+        self.modals.register(Modal(
+            name="movement_decision",
+            is_active=lambda: self.movement_decision.active,
+            handle=self._modal_movement_decision,
+            draw=self._draw_movement_decision,
+            blocking=False, blocks_keyboard=False,
+            covers=lambda mouse: self.movement_decision.consumes_click(
+                mouse, self.app.layout),
+            resolve=self._resolve_movement_decision_randomly,
+        ))
+        self.modals.register(Modal(
+            name="breakup_choice",
+            is_active=lambda: self.breakup_choice.active,
+            handle=self._modal_breakup_choice,
+            draw=lambda: self.breakup_choice.draw(
+                self.app.renderer, self.app.layout, self.app.canvas,
+                self.app.mouse()),
+            blocking=False, blocks_keyboard=False,
+            covers=lambda mouse: self.breakup_choice.consumes_click(
+                mouse, self.app.layout),
+            resolve=self._resolve_breakup_randomly,
+        ))
+        self.modals.register(Modal(
+            name="check_decision",
+            is_active=lambda: self.check_decision.active,
+            handle=self._modal_check_decision,
+            draw=self._draw_check_decision,
+            blocking=False, blocks_keyboard=False,
+            covers=lambda mouse: self.check_decision.consumes_click(
+                mouse, self.app.layout),
+            resolve=self._resolve_check_decision_randomly,
+        ))
+        self.modals.register(Modal(
+            name="match_start",
+            is_active=lambda: self.match_start.active,
+            handle=self._modal_match_start,
+            draw=lambda: self.match_start.draw(
+                self.app.renderer, self.app.layout, self.app.canvas,
+                self.app.mouse()),
+            blocking=True, blocks_keyboard=True, covers=full_screen,
+            resolve=self._resolve_match_start_randomly,
+        ))
+        self.modals.register(Modal(
+            name="victory",
+            is_active=lambda: self.victory.active,
+            handle=self._modal_victory,
+            draw=lambda: self.victory.draw(
+                self.app.renderer, self.app.layout, self.app.canvas,
+                self.app.mouse()),
+            blocking=True, blocks_keyboard=True, covers=full_screen,
+            # NO RANDOM RESOLUTION.  "Quit the application" is not a choice a
+            # die gets to make, and there is no game state left to unblock.
+            resolve=None,
+        ))
+        self.modals.register(Modal(
+            name="pause_menu",
+            is_active=lambda: self.pause_menu.active,
+            handle=self._modal_pause_menu,
+            draw=lambda: self.pause_menu.draw(
+                self.app.renderer, self.app.layout, self.app.canvas),
+            blocking=True, blocks_keyboard=True, covers=full_screen,
+            # Navigation, not a game choice — same reasoning as the ending.
+            resolve=None,
+        ))
+
+    # ── modal adapters: one event in, "did I take it" out ────────────────────
+    def _modal_reveal(self, event: pygame.event.Event, mouse) -> bool:
+        """Presentation only: a click dismisses it, and also does its job.
+
+        Clicking PAST the reveal dismisses it *and* performs whatever was
+        clicked, so an animation never costs the player an action.
+        """
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            self.reveal.dismiss()
+            return True
+        if event.type != pygame.MOUSEBUTTONDOWN:
+            return False
+        on_card = self.reveal.hit(self.app.layout, mouse)
+        self.reveal.dismiss()
+        return bool(on_card)
+
+    def _modal_pending_choice(self, event: pygame.event.Event, mouse) -> bool:
+        if self.pending_choice is None:
+            return False
+        self._handle_choice_event(event, mouse)
+        # ``_handle_choice_event`` already forwards navigation to the board
+        # itself, so anything it saw is dealt with.  Only a KEYDOWN is left for
+        # the rest of the screen, which is what keeps S/F/Tab working.
+        return event.type != pygame.KEYDOWN
+
+    def _modal_chest_choice(self, event: pygame.event.Event, mouse) -> bool:
+        self._handle_chest_event(event, mouse)
+        return event.type != pygame.KEYDOWN
+
+    def _modal_mod_choice(self, event: pygame.event.Event, mouse) -> bool:
+        return self._handle_mod_choice_event(event, mouse)
+
+    def _modal_card_picker(self, event: pygame.event.Event, mouse) -> bool:
+        self._handle_card_picker_event(event, mouse)
+        return event.type != pygame.KEYDOWN
+
+    def _modal_chest_reveal(self, event: pygame.event.Event, mouse) -> bool:
+        return self._handle_chest_reveal_event(event, mouse)
+
+    def _modal_movement_decision(self, event: pygame.event.Event, mouse) -> bool:
+        decision = self.movement_decision.handle_event(event, mouse,
+                                                       self.app.layout)
+        if decision is not None:
+            self.submit(decision)
+            return True
+        return False
+
+    def _modal_breakup_choice(self, event: pygame.event.Event, mouse) -> bool:
+        pick = self.breakup_choice.handle_event(event, mouse, self.app.layout)
+        if pick is not None:
+            self.submit(pick)
+            return True
+        return False
+
+    def _modal_check_decision(self, event: pygame.event.Event, mouse) -> bool:
+        answer = self.check_decision.handle_event(event, mouse, self.app.layout)
+        if answer is not None:
+            self.submit(answer)
+            return True
+        return False
+
+    def _modal_match_start(self, event: pygame.event.Event, mouse) -> bool:
+        self._handle_identity_event(event, mouse)
+        return True
+
+    def _modal_victory(self, event: pygame.event.Event, mouse) -> bool:
+        self._handle_victory_event(event, mouse)
+        return True
+
+    def _modal_pause_menu(self, event: pygame.event.Event, mouse) -> bool:
+        self._handle_pause_event(event, mouse)
+        return True
+
+    def _draw_movement_decision(self) -> None:
+        mouse = self.app.mouse()
+        self.movement_decision.draw(self.app.renderer, self.app.layout,
+                                    self.app.canvas, mouse)
+        self.movement_decision.draw_confirm(self.app.renderer, self.cards,
+                                            self.app.layout, self.app.canvas,
+                                            mouse)
+
+    def _draw_check_decision(self) -> None:
+        mouse = self.app.mouse()
+        self.check_decision.draw(self.app.renderer, self.app.layout,
+                                 self.app.canvas, mouse)
+        self.check_decision.draw_confirm(self.app.renderer, self.app.layout,
+                                         self.app.canvas, mouse)
+
+    # ── Esc: resolve the active window with a VALID random answer ────────────
+    def _pick(self, options):
+        """One of ``options`` at random, or ``None`` if there are none.
+
+        Every caller passes the SAME set the interface would have accepted a
+        click on, which is the whole rule: Esc answers the question, it does
+        not guess at objects and hope the engine agrees.
+        """
+        options = list(options)
+        if not options:
+            return None
+        if len(options) == 1:
+            return options[0]
+        return self._escape_rng.choice(options)
+
+    def _resolve_reveal_randomly(self) -> bool:
+        if not self.reveal.active:
+            return False
+        self.reveal.dismiss()
+        return True
+
+    def _resolve_chest_reveal_randomly(self) -> bool:
+        if not self.chest_reveal.active:
+            return False
+        self.chest_reveal.hide()
+        return True
+
+    def _resolve_pending_choice_randomly(self) -> bool:
+        """Answer the engine's question with one of the options it offered.
+
+        The valid set is the engine's own list — ``card_options`` when the
+        question is about cards, ``options`` otherwise — so this can no more
+        name an illegal pawn than a click on the prompt could.
+        """
+        choice = self.pending_choice
+        if choice is None:
+            return False
+        if choice.kind == "card" and choice.card_options:
+            ids = [str(uid) for uid in choice.card_options]
+        else:
+            ids = [str(option[0]) for option in choice.options]
+        if not ids:
+            # Nothing legal to pick.  Backing out costs nothing and is the
+            # behaviour the interface already has for an unanswerable question.
+            self._cancel_choice()
+            return True
+        if choice.count > 1:
+            wanted = min(int(choice.count), len(ids))
+            picked = self._escape_rng.sample(ids, wanted)
+            answer = ",".join(picked)
+            self.pending_choice = None
+            self._clear_choice_ui()
+            self.submit(choice.resubmit(self.pending_choice_seat, answer))
+            return True
+        self._resolve_choice(self._pick(ids))
+        return True
+
+    def _resolve_chest_choice_randomly(self) -> bool:
+        """Keep a random legal handful, discard the rest."""
+        if not self.chest_choice.active:
+            return False
+        uids = [card.uid for card in self.chest_choice.cards]
+        limit = max(0, min(int(self.chest_choice.limit), len(uids)))
+        keep = tuple(self._escape_rng.sample(uids, limit)) if limit else ()
+        seat = self.chest_choice_seat
+        self.chest_choice.hide()
+        self.submit(cmd.KeepChestCards(player_index=seat, keep_uids=keep))
+        # A dealing round feeds two seats, so the next queued prompt has to be
+        # let through exactly as it is when the player answers by hand.
+        self._open_next_chest_choice()
+        return True
+
+    def _resolve_mod_choice_randomly(self) -> bool:
+        """Pick, or vote, at random among the three that were dealt.
+
+        Resolves ONE step: this seat's pick, or the vote of the hunter whose
+        turn it is at this keyboard.  The selection phase is several decisions
+        and Esc answers the one in front of the player, which is what the
+        stack's "resolve the active interaction" rule means.
+        """
+        if not self.mod_choice.interactive:
+            # A seat with nothing to decide — the read-only "waiting" view.
+            # There are ZERO valid options, so Esc means what it always meant.
+            return False
+        uid = self._pick([card.uid for card in self.mod_choice.cards])
+        if uid is None:
+            return False
+        return self._answer_mod_choice(uid)
+
+    def _resolve_movement_decision_randomly(self) -> bool:
+        if not self.movement_decision.active:
+            return False
+        seat = self.movement_decision.seat()
+        options = [cmd.AcceptMovement(player_index=seat)]
+        # Blocking spends the card's one use, so it is only on the menu while
+        # the card still has one — the same condition the engine enforces.
+        card = self.movement_decision.card
+        if card is None or int(getattr(card, "uses_left", 1) or 0) > 0:
+            options.append(cmd.BlockMovement(player_index=seat))
+        self.movement_decision.confirming = False
+        self.submit(self._pick(options))
+        return True
+
+    def _resolve_check_decision_randomly(self) -> bool:
+        if not self.check_decision.active:
+            return False
+        seat = self.check_decision.seat()
+        options = [cmd.AllowCheck(player_index=seat)]
+        if self.check_decision.uses_left > 0:
+            options.append(cmd.RefuseCheck(player_index=seat))
+        self.check_decision.confirming = False
+        self.submit(self._pick(options))
+        return True
+
+    def _resolve_breakup_randomly(self) -> bool:
+        tiles = self.breakup_choice.tiles()
+        if not self.breakup_choice.active or len(tiles) < 2:
+            return False
+        tile = self._pick(tiles)
+        self.submit(cmd.ChooseBreakupTile(player_index=self.breakup_choice.seat(),
+                                          tile_index=tile.index))
+        return True
+
+    def _resolve_match_start_randomly(self) -> bool:
+        """Piotrek's colour, from the list the authority offered him."""
+        if not self.match_start.active or not self.match_start.choosing:
+            return False
+        pawn = self._pick([str(p.get("id", "")) for p in self.match_start.pawns
+                           if p.get("id")])
+        if not pawn:
+            return False
+        self._choose_identity(pawn)
+        return True
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def on_enter(self) -> None:
@@ -552,6 +989,10 @@ class GameScreen(Screen):
     def _on_mod_selection_finished(self, event: ev.ModSelectionFinished) -> None:
         self.mod_choice.hide()
         self.status_bar.notify("Mody Patusa aktywne — gramy dalej", duration=4.0)
+        # Anything a chosen Mod queued may open now: the phase it depended on
+        # is over.  The engine emits its own deferred events after this one, so
+        # this only releases a window held by the replica-side net above.
+        self._release_held_chest_reveal()
 
     # ── the Mody Patusa that announce themselves ─────────────────────────────
     def _on_chest_revealed(self, event: ev.ChestCardsRevealed) -> None:
@@ -560,10 +1001,25 @@ class GameScreen(Screen):
         Not modal and not synchronised — it changes nothing, so each player
         dismisses their own copy and the table carries on underneath.
         """
-        self.chest_reveal.show([
+        holdings = [
             ChestHoldingView(name=holding.player_name, titles=list(holding.titles))
             for holding in event.holdings
-        ])
+        ]
+        if self.state.pending_mod_selection is not None:
+            # The engine already defers this while a selection is running, so
+            # reaching here means a replica replaying an old log or resyncing
+            # mid-pause (L19).  Held rather than shown: a window in front of
+            # four people who still have to vote is the bug, whatever produced
+            # the event.
+            self._held_chest_reveal = holdings
+            return
+        self.chest_reveal.show(holdings)
+
+    def _release_held_chest_reveal(self) -> None:
+        """Show a Paczka window that waited for the Mod selection to finish."""
+        holdings, self._held_chest_reveal = self._held_chest_reveal, None
+        if holdings:
+            self.chest_reveal.show(holdings)
 
     def _on_lead_check(self, event: ev.LeadCheckAnnounced) -> None:
         """Say what the automatic check did, including when it did nothing.
@@ -911,6 +1367,14 @@ class GameScreen(Screen):
         pawn_id = self.match_start.pawn_at(mouse)
         if not pawn_id:
             return
+        self._choose_identity(pawn_id)
+
+    def _choose_identity(self, pawn_id: str) -> None:
+        """Commit Piotrek's colour, online or at one keyboard.
+
+        Split out of the click handler so Esc's random fallback takes exactly
+        the same road — including the Alter Ego resume branch below.
+        """
         if self.service is not None:
             self.service.choose_identity(pawn_id)
             # Shown as chosen at once.  The server confirms within a frame or
@@ -927,7 +1391,9 @@ class GameScreen(Screen):
             self.submit(cmd.FinishIdentitySwap() if swapping else cmd.BeginMatch())
 
     def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
-        # 1. Renaming captures all input until confirmed or cancelled.
+        # 1. Renaming captures all input until confirmed or cancelled.  It is
+        #    not a window — it is an editor living inside a player tile — so it
+        #    sits outside the stack and above it.
         if self.rename.active:
             if event.type == pygame.MOUSEBUTTONDOWN:
                 self._commit_rename()
@@ -937,103 +1403,20 @@ class GameScreen(Screen):
                 self._commit_rename(result)
             return
 
-        if self.pause_menu.active:
-            self._handle_pause_event(event, mouse)
+        # 2. THE MODAL STACK.  Exactly one window is offered the event — the
+        #    topmost active one — and everything below it stays pending.  This
+        #    is where the round 7 conflict is resolved: the Mod Patusa
+        #    selection is registered above the chest limit, so it now owns the
+        #    click it was already drawn over.
+        if self.modals.handle_event(event, mouse):
             return
 
-        # 1a-i. The Card Library is a modal overlay over a live table, so it
-        #       takes EVERYTHING while it is open — clicks, the wheel and the
-        #       keyboard — and nothing reaches the game behind it.  Above the
-        #       keyboard dispatch so Esc closes the library rather than opening
-        #       the pause menu on top of it.
-        if self.card_library.active:
-            self.card_library.handle_event(event, mouse, self.app.layout)
-            return
-
-        # 1a'. Nie masz Rosji.  Above the table because the table is genuinely
-        #      stopped while it is up, and below the library and the ending for
-        #      the same reason those two come first.
-        decision = self.movement_decision.handle_event(event, mouse,
-                                                       self.app.layout)
-        if decision is not None:
-            self.submit(decision)
-            return
-        if self.movement_decision.consumes_click(mouse, self.app.layout):
-            return
-
-        # 1a''. Ice Block, and Piotrek's 2a/2b pick.  Same tier as the movement
-        #       window: the table is genuinely stopped while either is up.
-        answer = self.check_decision.handle_event(event, mouse, self.app.layout)
-        if answer is not None:
-            self.submit(answer)
-            return
-        if self.check_decision.consumes_click(mouse, self.app.layout):
-            return
-        pick = self.breakup_choice.handle_event(event, mouse, self.app.layout)
-        if pick is not None:
-            self.submit(pick)
-            return
-        if self.breakup_choice.consumes_click(mouse, self.app.layout):
-            return
-
-        # 1a. The ending is absolutely modal: there is no game left to play, and
-        #     Esc must not offer to "leave" a match that has already finished.
-        if self.victory.active:
-            self._handle_victory_event(event, mouse)
-            return
-
-        # 1b. Before the first move: Piotrek picks a colour, everybody else
-        #     waits.  Nothing on the table responds to anything.
-        if self.match_start.active:
-            self._handle_identity_event(event, mouse)
-            return
-
-        # 1c. Paczka's window is informational, so it takes only the input that
-        #     dismisses it — the table underneath stays live and the other
-        #     players keep playing while somebody reads it.  Above the keyboard
-        #     dispatch so Esc and Enter close it rather than reaching the game.
-        if self.chest_reveal.active:
-            if self._handle_chest_reveal_event(event, mouse):
-                return
-
+        # 3. Keyboard, for whatever the top window did not want.  A dialog that
+        #    declares ``blocks_keyboard`` never gets here, which is what stops
+        #    Esc opening the pause menu on top of the Card Library.
         if event.type == pygame.KEYDOWN:
             self._handle_key(event)
             return
-
-        # 2. The chest limit is fully modal: nothing else may happen until the
-        #    player says which cards they keep.
-        if self.chest_choice.active:
-            self._handle_chest_event(event, mouse)
-            return
-
-        # 2a-i. The Mod Patusa selection pauses the round.  Unlike the chest
-        #       limit it does NOT swallow everything: a hunter waiting on four
-        #       other votes should still be able to look around the board, so
-        #       navigation falls through the way it does for a pending choice.
-        if self.mod_choice.active:
-            if self._handle_mod_choice_event(event, mouse):
-                return
-
-        # 2a. Somebody else's hand is fully modal too: it is showing hidden
-        #     information, so nothing else may happen behind it.
-        if self.card_picker.active:
-            self._handle_card_picker_event(event, mouse)
-            return
-
-        # 3. A pending decision blocks everything except answering it and
-        #    looking around the board.
-        if self.pending_choice is not None:
-            self._handle_choice_event(event, mouse)
-            return
-
-        # A reveal is only presentation.  Clicking it dismisses it; clicking
-        # past it dismisses it *and* does whatever was clicked, so the animation
-        # never costs the player an action.
-        if self.reveal.active and event.type == pygame.MOUSEBUTTONDOWN:
-            on_card = self.reveal.hit(self.app.layout, mouse)
-            self.reveal.dismiss()
-            if on_card:
-                return
 
         # These two float over the board, so they have to be checked before the
         # board claims the click as a map drag.
@@ -1213,7 +1596,14 @@ class GameScreen(Screen):
         uid = self.mod_choice.card_at(self.app.layout, mouse)
         if uid is None:
             return False
+        return self._answer_mod_choice(uid)
 
+    def _answer_mod_choice(self, uid: int) -> bool:
+        """Turn a chosen uid into Piotrek's pick or one hunter's vote.
+
+        Shared by the click and by Esc's random fallback, so the two cannot
+        drift apart about which seat a choice speaks for.
+        """
         if self.mod_choice.mode == "piotrek":
             seat = self.state.piotrek_seat
             if seat is None:
@@ -1483,13 +1873,11 @@ class GameScreen(Screen):
         if event.key == pygame.K_F3:
             self.debug_panel.toggle()
             return
-        if event.key == pygame.K_ESCAPE and (self.pending_choice is not None
-                                             or self.card_picker.active):
-            self._cancel_choice()
-            return
-        if event.key == pygame.K_ESCAPE and self.reveal.active:
-            self.reveal.dismiss()
-            return
+        # Esc on an OPEN WINDOW never reaches here: the modal stack answers it
+        # first, with a valid random choice (stage 44).  What is left is Esc
+        # with nothing on screen to resolve — a half-made gesture, or the way
+        # out of the match.  Cancelling a pending choice is now the RIGHT
+        # BUTTON, which is where it always also was.
         if event.key == pygame.K_ESCAPE:
             if self.hand.dragging is not None or self.hand.pressed is not None:
                 self.hand.cancel_drag()
@@ -1732,36 +2120,14 @@ class GameScreen(Screen):
         # Above the board and below every dialog: it is an announcement, not a
         # question, so nothing it covers is anything the player must click.
         self.elimination_notice.draw(self.app.renderer, self.app.layout, surface)
-        self.choice_prompt.draw(self.app.renderer, self.app.layout, surface, ctx.mouse)
-        self.reveal.draw(self.app.renderer, self.cards, self.app.layout, surface)
-        self.chest_choice.draw(self.app.renderer, self.cards, self.app.layout,
-                               surface, ctx.mouse)
-        self.mod_choice.draw(self.app.renderer, self.cards, self.app.layout,
-                             surface, ctx.mouse)
-        self.card_picker.draw(self.app.renderer, self.cards, self.app.layout,
-                              surface, ctx.mouse)
-        self.chest_reveal.draw(self.app.renderer, self.app.layout, surface,
-                               ctx.mouse)
-        self.card_library.draw(self.app.renderer, self.cards, self.app.layout,
-                               surface, ctx.mouse)
-        self.movement_decision.draw(self.app.renderer, self.app.layout,
-                                    surface, ctx.mouse)
-        self.movement_decision.draw_confirm(self.app.renderer, self.cards,
-                                            self.app.layout, surface,
-                                            ctx.mouse)
-        self.breakup_choice.draw(self.app.renderer, self.app.layout, surface,
-                                 ctx.mouse)
-        self.check_decision.draw(self.app.renderer, self.app.layout, surface,
-                                 ctx.mouse)
-        self.check_decision.draw_confirm(self.app.renderer, self.app.layout,
-                                         surface, ctx.mouse)
+        # EVERY interactive window, in the ONE order that also decides who
+        # receives the click.  Adding a draw call here instead of registering
+        # a modal is how the two orders drifted apart in the first place.
+        self.modals.draw()
+        # Last, and deliberately above the dialogs: "connection lost" is the
+        # one message that must never be covered by a window the player can no
+        # longer resolve.
         self._draw_connection_banner(ctx)
-        # Above everything except the pause menu: these two ARE the screen
-        # while they are up.
-        self.match_start.draw(self.app.renderer, self.app.layout, surface,
-                              ctx.mouse)
-        self.victory.draw(self.app.renderer, self.app.layout, surface, ctx.mouse)
-        self.pause_menu.draw(self.app.renderer, self.app.layout, surface)
         self.debug_panel.draw(
             self.app.renderer, self.app.layout, surface,
             session=self.session, service=self.service, state=self.state,

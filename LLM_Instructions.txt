@@ -1,9 +1,10 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 36 — "Nie masz Rosji" implemented, in both variants: an
-              opponent's movement can be PAUSED before it happens and stopped
-              once per card, with a configurable decision window owned by the
-              authority
+Last updated: stage 44 — THE MODAL STACK.  One ordered list decides both what
+              is painted on top and what receives the click, so the two can no
+              longer disagree; Mod Patusa windows that open a second window
+              wait for the whole selection phase; Esc resolves the active
+              window with a valid random choice
               (see CHANGELOG_LLM.md)
 ================================================================================
 
@@ -395,6 +396,10 @@ pedzacy_piotrek/
                      deck-quantity steppers and the ability use counters.  Owns
                      no numbers: it reads the live GameState every frame and
                      answers with Commands.  See "THE CARD LIBRARY".
+    modals.py        THE MODAL STACK.  ``Modal`` + ``ModalStack``: one ordered
+                     list behind BOTH painting and input, so "visually on top"
+                     and "receives the click" are the same statement.  See
+                     THE MODAL STACK.
     overlays.py      ChoicePrompt (the engine asking a question, including
                      MULTI-SELECT with numbered order — see MULTI-SELECT),
                      RevealOverlay (Gamechanger, random reveals, and the forced
@@ -448,6 +453,11 @@ tests/               test_engine, test_board, test_session, test_ui,
                      default/current use split, the grid at five resolutions,
                      pixel-level clipping, and that ANY player may restore ANY
                      character's ability over a network).
+                     test_stage44_modal_stack.py (stage 44: the round 7
+                     conflict, input ownership, the pending queue, Paczka's
+                     deferral, Esc's valid random fallback — and a PIXEL check
+                     that the overlap really is painted Mod-over-chest, because
+                     both windows reported ``active`` and both were right).
 tools/               screenshot.py, inspect_frame.py (headless verification).
 docs/ARCHITECTURE.md Polish design rationale for the owner.
 
@@ -465,8 +475,9 @@ BoardLayout.orientation is "horizontal" (start on the left). _to_world() maps
 along/across to world x/y; switching to a vertical board is that one value.
 
 Generation steps:
-1. make_rows(): which rows hold one field and which hold two. Ported unchanged
-   from the prototype, including "the board always ends on a single field".
+1. make_rows(): which rows hold one field and which hold two. One row per
+   board POSITION (see "THE BOARD SIZE IS A LOGICAL LENGTH" below), keeping the
+   prototype's rule that "the board always ends on a single field".
 2. _fit_path(): find a road of exactly the needed length that satisfies THREE
    constraints (see IMPORTANT DESIGN DECISIONS D3). Returns BoardGeometry.
 3. _place_tiles(): fields at fixed arc-length intervals, single rows on the
@@ -478,17 +489,37 @@ Generation steps:
    road, the water, the camp and the finish banner. HILL props are background
    and may pass under everything.
 
-POSITIONS VS FIELDS (added stage 3, important):
+POSITIONS VS FIELDS (added stage 3, corrected stage 45, important):
 A widened row holds two fields that share one board position.  They are 12a and
 12b: both are twelve steps from the start.  Therefore:
-  * ``BoardModel.tiles``     — every field.  ``cell_count`` counts these.
-  * ``BoardModel.positions`` — logical steps.  MOVEMENT COUNTS THESE.
+  * ``BoardModel.tiles``     — every field.  A doubled position contributes
+    TWO of these, so ``len(tiles) >= cell_count``.
+  * ``BoardModel.positions`` — logical steps.  MOVEMENT COUNTS THESE, and
+    ``cell_count`` COUNTS THESE: ``position_count == cell_count`` always.
   * ``Tile.number`` is the position number, ``Tile.variant`` is "a"/"b" or "",
     and ``Tile.label`` is what players see.
-Queries: position(i), position_count, last_position, position_of_pawn(pawn),
-tiles_at_position(i), tile_by_label("12a").
+Queries: position(i), position_count, last_position, meta_number,
+position_of_pawn(pawn), tiles_at_position(i), tile_by_label("12a").
 Never go back to numbering fields sequentially — the a/b pair is a rule, not a
 label, and effects.route_between() depends on it.
+
+THE BOARD SIZE IS A LOGICAL LENGTH (stage 45, load-bearing):
+``cell_count`` / ``SessionConfig.board_cells`` / the lobby's "Liczba pól
+planszy" is a count of POSITIONS, and therefore THE NUMBER THE META STANDS ON.
+Ask for 24 and the meta is 24 — whether the generator widened no rows, two, or
+twenty-three.  ``double_frequency`` changes how many FIELDS the board holds; it
+must never change how long the board is.
+  * ``make_rows()`` emits exactly one row per position: ``len(rows) ==
+    position_count``.  It must NOT spend the budget on fields.
+  * ``meta_number`` is the query for "which number is the meta" and equals
+    ``cell_count``.
+  * The last row is always ``single``, so the meta is never half of a pair.
+  * Do not "correct" a short board with an offset after generation — the
+    budget itself is what carries the meaning.
+This was a real bug until stage 45: the budget counted fields, so every 4a/4b
+pair ate two of it and a board asked for 24 finished on 19.  Regression tests
+live in ``test_board.py`` ("logical positions vs physical fields") and
+``test_engine.py`` (lobby size → meta, end to end).
 
 Row types come either from ``BoardTheme.row_pattern`` (a fixed cycle) or from
 ``double_frequency`` (probability per row, drawn from the seeded RNG).  The menu
@@ -1087,6 +1118,13 @@ returns whether it consumed the event, and anything that is not a click on one
 of the three cards falls through to the board — a hunter waiting on four other
 votes can still pan and zoom.
 
+SINCE STAGE 44 it is nonetheless the TOP of the modal stack whenever it is
+open, above the chest limit and everything else a round change can raise.
+"Not modal" means the wheel and the middle drag reach the board; it does NOT
+mean another window may take a click.  A chest limit dealt in the same round
+stays PENDING underneath — drawn, unanswerable — and becomes the input owner
+by itself the moment the selection resolves.  See THE MODAL STACK.
+
 
 TESTS AND THE PAUSE
 -------------------
@@ -1315,9 +1353,27 @@ because nothing changes, and no command is logged.
 
 The window is a LIST, not a row of card faces — six players holding two cards
 each is twelve faces and no lineup fits at 1280×760 — but it is built from the
-card picker's furniture so it reads as the same family of window.  It sits
-ABOVE the keyboard dispatch in ``handle_event`` so Esc closes it rather than
-opening the pause menu, and it consumes only the input that dismisses it.
+card picker's furniture so it reads as the same family of window.  It declares
+``blocks_keyboard`` in the modal stack so Esc closes it rather than opening the
+pause menu, and it consumes only the input that dismisses it.
+
+IT DOES NOT OPEN DURING A MOD SELECTION (stage 44).  ``_arm_mod`` used to fire
+``ChestCardsRevealed`` the moment ONE faction settled, putting a window in
+front of four hunters who still had to vote.  A passive listed in
+``GameState._MOD_FOLLOWUP_PASSIVES`` is one whose arrival opens a WINDOW; while
+a selection is open the arrival is recorded on ``ModSelection.followup_uids``
+and ``_finish_mod_selection`` replays it — ``ModSelectionFinished`` first, the
+window after.  It is rebuilt FROM THE RACK, so a mod chosen and then replaced
+before the pause lifted owes nothing.  ``followup_uids`` is in the snapshot.
+
+A mod that only changes the board (Shady) or the statuses (Sesja na PG variant
+2) is NOT one of these and still lands the instant it arrives.  Outside a
+selection — PlaceMod, Thunderfuck, Rage Quit — nothing waits.
+
+THE GENERAL RULE: a secondary window whose meaning depends on a phase being
+complete must not interrupt that phase.  Add the passive to
+``_MOD_FOLLOWUP_PASSIVES`` and the window to ``_mod_followup_events``; do not
+invent a second deferral mechanism.
 
 
 SQUID GAME: WHO IS CHECKED IS PUBLIC, WHAT IT MEANS IS NOT
@@ -3139,21 +3195,88 @@ Layout regions (ui/layout.py, everything derived from window size):
                   status bar over the board's bottom-left corner.
 
 Input priority in game_screen.handle_event():
-  1. renaming (captures everything)
-  1a. the Card Library (fully modal: every click, wheel notch and key is
-     consumed, so nothing reaches a live table behind it.  ABOVE the keyboard
-     dispatch, or Esc opens the pause menu on top of the library)
-  2. the chest limit overlay (fully modal until the player keeps/discards)
-  2b. a pending choice from the engine — which pawn, which field, how far
-     (modal: clicks answer it, wheel and middle-drag still work so the player
-     can look around, Esc or right-click cancels and costs nothing)
-  2c. a reveal overlay (presentation only: a click dismisses it, and a click
-     past it also does whatever was clicked)
-  3. hand fan
-  4. board view
-  5. round counter
-  6. right-click chain (cancel staging / stage a card / discard a mod)
-  7. left-click chain (player tiles, decks, character panel)
+  1. renaming (captures everything; an editor inside a tile, not a window)
+  2. THE MODAL STACK  (ui/modals.py) — see below
+  3. the keyboard, for whatever the top window did not want
+  4. the floating buttons (library, end turn, return to seat, undo)
+  5. hand fan
+  6. board view
+  7. round counter
+  8. right-click chain (cancel staging / stage a card / discard a mod)
+  9. left-click chain (player tiles, decks, character panel)
+
+
+THE MODAL STACK (stage 44 — READ THIS BEFORE ADDING A WINDOW)
+-------------------------------------------------------------
+There is ONE ordered list of every window that can own input, in
+``ui/modals.py``, registered in ``GameScreen._register_modals``.
+
+    REGISTRATION ORDER  ==  PRIORITY  ==  PAINT ORDER
+
+``draw()`` walks it upwards; ``handle_event`` offers the event to the TOPMOST
+ACTIVE modal and to NO OTHER.
+
+    INVARIANT: the visually topmost active modal receives input, and no other
+               modal receives any.
+
+Bottom to top:
+
+    reveal · pending choice · chest limit · MOD PATUSA SELECTION · card picker
+    · Paczka · card library · movement / breakup / check decisions
+    · match start · victory · pause menu
+
+WHY IT EXISTS.  Until stage 44 the same order was written down TWICE — the
+chain of ``if ....active:`` tests and the sequence of ``.draw()`` calls — with
+nothing tying them together, so they drifted.  A drift between them is never
+cosmetic: it is a window painted on top while the window underneath answers
+the click.  Round 7 is where it was caught (the Mod selection drawn over the
+chest limit, the chest limit eating the clicks) but the Card Library and the
+reveal overlay had drifted too.
+
+RULES THE STACK ENFORCES:
+  * A lower modal is PENDING — still drawn, still holding its state, NOT
+    actionable.  That is what turns two clickable windows into a queue.
+  * ``blocking`` says whether a modal swallows everything (chest limit, card
+    picker, library, the two endings) or lets navigation through (the mod
+    vote, a pending choice).  The mod pause was never a blindfold.
+  * A NON-blocking modal lets the wheel and the middle drag past, but never a
+    CLICK onto another window: a press inside its own panel, or inside any
+    pending modal beneath it, stops there.
+  * ``blocks_keyboard`` is separate, so S / F / Tab keep reaching the game
+    under the dialogs that always allowed them.
+  * ``resolve`` is Esc's valid-random fallback — see ESC below.
+
+TO ADD A WINDOW: register a ``Modal`` in ``_register_modals``.  Do NOT add a
+branch to ``handle_event`` and do NOT add a ``.draw()`` call to ``draw``;
+that is precisely how the two orders came apart.
+
+Announcements nobody clicks — the elimination notice, the connection banner,
+the debug panel — are NOT modals and are not registered.
+
+
+ESC: RESOLVE, NEVER CANCEL (stage 44)
+-------------------------------------
+Esc ANSWERS the active window with a valid random choice and closes it; the
+queue then advances.  It is not a cancel and not a "hide all dialogs".
+
+The valid set is ALWAYS the one the interface itself would have accepted a
+click on: the three mods actually dealt, the cards actually in the prompt,
+``choice.options`` / ``card_options``, the breakup tiles, Block only while the
+card still has its use, Refuse only while Ice Block has one.  ONE option means
+that option.  ZERO options means Esc keeps its old meaning rather than
+inventing an answer.
+
+  * The modal's OWN handler sees Esc first, so meanings that already existed
+    survive: backing out of a Block confirmation, closing the Library.
+  * ``victory`` and ``pause_menu`` declare NO resolver.  "Quit the
+    application" is not a choice a die gets to make.
+  * CANCELLING IS THE RIGHT BUTTON.  It always was, in
+    ``_handle_choice_event`` and the card picker; Esc and right-click simply
+    no longer mean the same thing.
+  * The draw comes from a UI-LOCAL RNG, deliberately outside R4.  It happens
+    on one machine at a moment no other machine knows about, so pulling from
+    the shared seeded stream would leave every replica one number behind.
+    What travels is the COMMAND it produces, exactly as a mouse click does.
 
 Gestures:
   hand card, left click ....... play it if playable, otherwise discard
@@ -3171,7 +3294,10 @@ Gestures:
                                 showing remaining uses from the JSON "uses"
   book, bottom-right .......... opens the Card Library
   Ctrl+wheel / middle drag .... zoom / pan
-  S / F / Tab / Esc ........... snapping toggle / fit view / next player / cancel
+  S / F / Tab ................. snapping toggle / fit view / next player
+  Esc ......................... resolve the active window with a valid random
+                                choice; with nothing open, the pause menu
+  right click (in a prompt) ... cancel the choice, and it costs nothing
 
 Panels implement draw(ctx) and optionally handle_click(ctx, button, ui) which
 returns a list of Commands. `ui` is the GameScreen (for pending_mod_uid and
@@ -3442,6 +3568,11 @@ L19. Paczka's window is driven by an EVENT, so a player who reconnects and
     a wart rather than a bug — but it is the same class of thing N74 exists
     for, and if it ever matters the fix is to drive it from ``armed_mods`` and
     the state the way the match overlays are driven.
+    NARROWED IN STAGE 44: the window is now DEFERRED while a Mod selection is
+    open (see PACZKA), and ``GameScreen`` holds a ``ChestCardsRevealed`` that
+    arrives during one anyway — so the replay can no longer drop a window on
+    top of a live selection. The general wart, a window for a mod that arrived
+    rounds ago, is unchanged and still wants the state-driven fix.
 
 L14. DECIDED, NOT SPECIFIED: Halloween treats the CAMP as one cluster — pawns
     waiting there are neighbours of one another. The brief says only "one in
@@ -4408,6 +4539,33 @@ N120. Never carry riders on a card that moves EVERY pawn. Balbinka moves each
    (furthest first going forward, rearmost first going backward, bottom of a
    tower before what stands on it) is what stops a pawn landing on a field its
    occupant has not left yet.
+
+N121. Never write the order of the windows down twice. The paint order and the
+   input order ARE ``GameScreen._register_modals`` and nothing else. Adding an
+   ``if ....active:`` branch to ``handle_event`` or a ``.draw()`` call to
+   ``draw`` recreates the second list, and a second list drifts — which is a
+   window painted on top while the window underneath answers the click. That
+   is exactly what round 7 shipped (stage 44). Register a ``Modal``.
+
+N122. Never open a secondary window from inside a phase that is still running.
+   A Mod chosen by one faction must not put a window in front of the faction
+   still choosing. The arrival is recorded on ``ModSelection.followup_uids``
+   and replayed by ``_finish_mod_selection``, rebuilt FROM THE RACK so a mod
+   already replaced owes nothing. This is a rule about WINDOWS, not about mods:
+   a passive that only changes the board or the statuses still lands at once.
+
+N123. Never make Esc a cancel again, and never make it a "hide all dialogs".
+   It RESOLVES the active window with a choice drawn from the same valid set
+   the interface would have accepted a click on, and the queue then advances.
+   Hiding a dialog without resolving it leaves an invisible interaction holding
+   the game, which is the failure this was added to prevent. Cancelling is the
+   right button.
+
+N124. Never draw Esc's fallback from the session RNG. It runs on ONE machine at
+   a moment no other machine knows about, so the shared seeded stream would end
+   up one number apart on every other replica (R4 exists to stop exactly that
+   kind of divergence, and this is the case where obeying it literally causes
+   it). What travels is the COMMAND, as it does for a mouse click.
 
 N121. Never express "for one round" as a turn expiry. A round is a VARIABLE
    number of turns — Piotrek holds every third slot — so Gambit Patusa carries a

@@ -487,7 +487,13 @@ def test_clicking_a_half_finishes_the_move(library):
     assert card not in state.active_player.hand
 
 
-def test_escape_cancels_a_pending_choice_and_keeps_the_card(library):
+def test_right_click_cancels_a_pending_choice_and_keeps_the_card(library):
+    """Backing out of a question is the RIGHT BUTTON, and costs nothing.
+
+    Esc used to do this too.  Since stage 44 Esc RESOLVES a window rather than
+    abandoning it, so the two gestures no longer mean the same thing and the
+    cancel is tested on the one that still is a cancel.
+    """
     screen = doubled_screen(library)
     state = screen.state
     state.board.place_pawn("żółty", state.board.positions[0].tiles[0].index)
@@ -495,11 +501,36 @@ def test_escape_cancels_a_pending_choice_and_keeps_the_card(library):
     card = give_card(screen, lambda c: c.title == "Zerówka - żółty")
     settle(screen)
     click(screen, screen.hand.slots[card.uid].position)
+    assert screen.pending_choice is not None
 
-    screen.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE), (0, 0))
+    click(screen, (10, 10), button=3)
     assert screen.pending_choice is None
     assert screen.board_view.choice_tiles == []
     assert card in state.active_player.hand
+    assert screen.app.running
+
+
+def test_escape_resolves_a_pending_choice_instead_of_cancelling(library):
+    """Esc answers the question with one of the options it was offered."""
+    screen = doubled_screen(library)
+    state = screen.state
+    state.board.place_pawn("żółty", state.board.positions[0].tiles[0].index)
+    state._sync_token_positions()
+    card = give_card(screen, lambda c: c.title == "Zerówka - żółty")
+    settle(screen)
+    click(screen, screen.hand.slots[card.uid].position)
+    offered = {option[0] for option in screen.pending_choice.options}
+    assert offered
+
+    screen.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE), (0, 0))
+    settle(screen, 5)
+
+    # Resolved, not abandoned: the window is gone, nothing invisible is left
+    # holding the game, and the card was actually played.
+    assert screen.pending_choice is None
+    assert screen.board_view.choice_tiles == []
+    assert screen.modals.owner() is None
+    assert card not in state.active_player.hand
     assert screen.app.running
 
 
@@ -1259,17 +1290,35 @@ def test_a_two_step_ability_asks_twice(screen):
     assert screen.state.board.position_of_pawn("żółty") == 4
 
 
-def test_escape_abandons_a_prompt_without_spending_the_ability(screen):
+def test_right_click_abandons_a_prompt_without_spending_the_ability(screen):
     seat = seat_with_character(screen, "Big D Randy")
     place_pawn(screen, "żółty", 5)
     frame(screen)
     click(screen, screen.app.layout.ability_button_rect(False).center)
     assert screen.pending_choice is not None
 
-    screen.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE), (0, 0))
+    click(screen, (10, 10), button=3)
     assert screen.pending_choice is None
     assert not screen.choice_prompt.active
     assert screen.state.players[seat].character.uses_left == 1
+
+
+def test_escape_spends_the_ability_on_a_valid_random_target(screen):
+    """Esc is not a cancel: it answers, so the ability really is used."""
+    seat = seat_with_character(screen, "Big D Randy")
+    place_pawn(screen, "żółty", 5)
+    frame(screen)
+    click(screen, screen.app.layout.ability_button_rect(False).center)
+    offered = {option[0] for option in screen.pending_choice.options}
+    assert offered
+
+    screen.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE), (0, 0))
+    settle(screen, 5)
+
+    assert screen.pending_choice is None
+    assert not screen.choice_prompt.active
+    assert screen.modals.owner() is None
+    assert screen.state.players[seat].character.uses_left == 0
 
 
 def test_the_prompt_blocks_the_rest_of_the_interface(screen):
@@ -2214,6 +2263,7 @@ def test_spy_opens_a_card_picker_showing_only_movement_cards(screen):
 
 
 def test_the_card_picker_can_be_backed_out_of(screen):
+    """Right-click backs out of somebody else's hand and costs nothing."""
     state = screen.state
     hunter = next(p for p in state.players if not p.is_piotrek)
     state.active_player_index = hunter.index
@@ -2224,6 +2274,27 @@ def test_the_card_picker_can_be_backed_out_of(screen):
     settle(screen, 10)
     assert screen.card_picker.active
 
+    click(screen, (10, 10), button=3)
+    settle(screen, 5)
+
+    assert not screen.card_picker.active
+    assert screen.pending_choice is None
+    assert hunter.card_by_uid(spy.uid) is spy, "and the card is still in hand"
+
+
+def test_escape_steals_a_valid_random_card_from_the_picker(screen):
+    """Esc resolves the picker with one of the cards it was actually showing."""
+    state = screen.state
+    hunter = next(p for p in state.players if not p.is_piotrek)
+    state.active_player_index = hunter.index
+    screen.view_seat = hunter.index
+    spy = _give(state, hunter, "Spy")
+    settle(screen)
+    click(screen, screen.hand.slots[spy.uid].position)
+    settle(screen, 10)
+    assert screen.card_picker.active
+    offered = [card.uid for card in screen.card_picker.cards]
+
     screen.handle_event(
         pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, unicode=""), (0, 0)
     )
@@ -2231,7 +2302,11 @@ def test_the_card_picker_can_be_backed_out_of(screen):
 
     assert not screen.card_picker.active
     assert screen.pending_choice is None
-    assert hunter.card_by_uid(spy.uid) is spy, "and the card is still in hand"
+    assert screen.modals.owner() is None
+    # Exactly one of the offered cards changed hands, and it is one that was
+    # on the table — never an invented uid.
+    taken = [uid for uid in offered if hunter.card_by_uid(uid) is not None]
+    assert len(taken) == 1
 
 
 def test_a_spotlit_card_holds_the_board_back_before_it_moves(screen):

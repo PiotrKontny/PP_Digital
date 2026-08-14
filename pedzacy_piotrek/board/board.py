@@ -103,7 +103,7 @@ class BoardTheme:
 
 
 def make_rows(
-    cell_count: int,
+    position_count: int,
     pattern: Sequence[str],
     double_frequency: Optional[float] = None,
     rng: Optional[random.Random] = None,
@@ -118,28 +118,32 @@ def make_rows(
       from the seeded RNG so the board stays reproducible.
 
     Both keep the prototype's rule that the board always ends on a single
-    field, so the finish is never one of a pair.  ``cell_count`` counts
-    *fields*, not positions: a doubled row spends two of them.
+    field, so the finish is never one of a pair.
+
+    ``position_count`` counts *positions*, not fields — ONE ROW IS ONE ROW,
+    whether it holds a single field or the pair ``12a``/``12b``.  The list is
+    therefore always exactly ``position_count`` long, which is what makes the
+    lobby's board size mean "the meta stands on this number".  Budgeting
+    *fields* here was the old bug: every doubled row silently ate two of them
+    and a board asked for 24 finished at 19.
     """
-    if cell_count < 10:
+    if position_count < 10:
         raise ValueError("Plansza musi mieć co najmniej 10 pól")
 
     use_frequency = double_frequency is not None and rng is not None
     frequency = max(0.0, min(1.0, double_frequency or 0.0))
 
     rows: List[str] = []
-    cell_num = 1
-    pattern_index = 0
-    while cell_num <= cell_count:
+    for index in range(position_count):
+        # The draw happens even for the final row, so that the RNG stream
+        # depends only on the board size and not on where the doubles fell.
         if use_frequency:
             row_type = "double" if rng.random() < frequency else "single"
         else:
-            row_type = pattern[pattern_index]
-        if row_type == "double" and cell_num + 1 >= cell_count:
+            row_type = pattern[index % len(pattern)]
+        if index == position_count - 1:
             row_type = "single"
         rows.append(row_type)
-        cell_num += 2 if row_type == "double" else 1
-        pattern_index = (pattern_index + 1) % len(pattern)
     return rows
 
 
@@ -166,6 +170,11 @@ class BoardGeometry:
 class BoardModel:
     """Generated geometry plus live pawn placement."""
 
+    #: The board's LOGICAL length: how many positions the road holds, and
+    #: therefore the number the meta stands on.  This is the value the lobby
+    #: shows.  A doubled position spends ONE of these however many fields it
+    #: is drawn with, so ``len(tiles) >= cell_count`` while
+    #: ``position_count == cell_count`` always.
     cell_count: int
     theme: BoardTheme
     layout: BoardLayout
@@ -196,6 +205,13 @@ class BoardModel:
         pawn_count: int = 6,
         double_frequency: Optional[float] = None,
     ) -> "BoardModel":
+        """Build a board of ``cell_count`` POSITIONS, meta included.
+
+        ``cell_count`` is the lobby's board size and it is a logical count:
+        ask for 24 and the meta is 24, whether the generator widened two rows
+        or ten.  ``double_frequency`` therefore changes how many *fields* the
+        board has, never how long it is.
+        """
         theme = theme or BoardTheme.load()
         layout = layout or BOARD
         if double_frequency is not None:
@@ -414,8 +430,6 @@ class BoardModel:
             position = BoardPosition(index=slot, number=number)
 
             for variant_index, lateral in enumerate(laterals):
-                if len(self.tiles) >= self.cell_count:
-                    break
                 world = self.path.offset_point(arc, lateral)
                 kind = TileKind.CROSSROAD if doubled else TileKind.ROAD
                 if slot == 0:
@@ -434,10 +448,9 @@ class BoardModel:
                 self.tiles.append(tile)
                 position.tiles.append(tile)
 
-            if not position.tiles:
-                break
-            # A position that ended up with one field (the last one before the
-            # field budget ran out) is not a choice, so it loses its a/b label.
+            # A position with one field is not a choice, so it carries no a/b
+            # label.  Single rows are already built that way; this only guards
+            # a theme that hands back something other than "single"/"double".
             if len(position.tiles) == 1:
                 position.tiles[0].variant = ""
                 if position.tiles[0].kind is TileKind.CROSSROAD:
@@ -693,6 +706,16 @@ class BoardModel:
     @property
     def last_position(self) -> int:
         return len(self.positions) - 1
+
+    @property
+    def meta_number(self) -> int:
+        """The number printed on the finish — equal to ``cell_count``.
+
+        Kept as a query rather than left implicit because "which number is the
+        meta" is the question the lobby setting answers, and it used to have a
+        different answer from the one the player chose.
+        """
+        return self.positions[-1].number if self.positions else 0
 
     def position_of_pawn(self, pawn_id: str) -> Optional[int]:
         """Which board position a pawn stands on, ignoring which half it chose."""

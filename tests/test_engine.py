@@ -566,9 +566,51 @@ def test_a_pawn_walks_through_the_nearer_half_of_a_pair(library):
 
 
 def test_positions_and_fields_are_different_counts(library):
+    """`board_cells` is a count of POSITIONS, so the extra fields a widened
+    row brings do not come out of the board's length."""
     game = _doubled_game(library)
-    assert len(game.board.tiles) == 30
-    assert game.board.position_count < len(game.board.tiles)
+    assert game.board.position_count == 30
+    assert game.board.meta_number == 30
+    assert len(game.board.tiles) > game.board.position_count
+
+
+@pytest.mark.parametrize("cells", [20, 24, 30])
+@pytest.mark.parametrize("frequency", [0.0, 0.3, 1.0])
+def test_the_lobby_board_size_is_the_number_the_meta_stands_on(
+    library, cells, frequency
+):
+    """End to end: what the lobby sets is where the game finishes.
+
+    `board_cells` travels SessionConfig → create_game → BoardModel, and the
+    number a player reads on the meta has to be the one they chose, however
+    many rows the generator widened on the way.
+    """
+    game = create_game(
+        SessionConfig(num_players=4, board_cells=cells, seed=2024,
+                      double_frequency=frequency),
+        library,
+    )
+    assert game.board.meta_number == cells
+    assert game.board.position_count == cells
+    assert game.board.last_position == cells - 1
+    finish = game.board.positions[-1].tiles[0]
+    assert finish.label == str(cells)
+
+
+def test_every_replica_builds_the_same_board_from_one_config(library):
+    """Multiplayer rebuilds the board from the config, so two peers given the
+    same one must agree field for field — including the meta."""
+    for frequency in (0.0, 0.45, 1.0):
+        config = SessionConfig(num_players=4, board_cells=24, seed=555,
+                               double_frequency=frequency)
+        host = create_game(config, library)
+        client = create_game(config, library)
+        assert host.board.to_dict()["cell_count"] == 24
+        assert host.board.meta_number == client.board.meta_number == 24
+        assert ([t.label for t in host.board.tiles]
+                == [t.label for t in client.board.tiles])
+        assert ([t.position for t in host.board.tiles]
+                == [t.position for t in client.board.tiles])
 
 
 def test_create_game_keeps_every_session_setting(library):

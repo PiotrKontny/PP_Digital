@@ -205,6 +205,13 @@ class ModSelection:
     votes: Dict[int, int] = field(default_factory=dict)
     piotrek_done: bool = False
     hunters_done: bool = False
+    #: Uids of mods that reached the rack DURING this selection and owe a
+    #: follow-up window (Paczka's list, today).  A mod chosen by one faction
+    #: must not interrupt the other faction's choice with a window of its own,
+    #: so the arrival is recorded here and replayed when the whole selection
+    #: finishes.  Uids rather than events, so it survives the snapshot and a
+    #: reconnecting client rebuilds the same queue from the same state.
+    followup_uids: List[int] = field(default_factory=list)
 
     @property
     def finished(self) -> bool:
@@ -2117,11 +2124,26 @@ class GameState:
         return events
 
     def _finish_mod_selection(self) -> List[ev.GameEvent]:
+        """Both factions have settled: unpause, then let the queue out.
+
+        ORDER MATTERS.  ``ModSelectionFinished`` first, so the selection
+        overlay is gone before anything it queued appears; the follow-up
+        windows after, so they arrive into a screen that has room for them.
+        They are rebuilt from the RACK rather than from remembered events —
+        a mod that was chosen and then immediately replaced is no longer in
+        play and owes nothing.
+        """
         selection = self.pending_mod_selection
         if selection is None:
             return []
         self.pending_mod_selection = None
-        return [ev.ModSelectionFinished(selection.round_number)]
+        events: List[ev.GameEvent] = [ev.ModSelectionFinished(selection.round_number)]
+        rack = {card.uid: card for card in self.active_mods}
+        for uid in selection.followup_uids:
+            card = rack.get(uid)
+            if card is not None:
+                events.extend(self._mod_followup_events(card))
+        return events
 
     # ── mods that DO something the moment they arrive, or when they leave ────
     def _sync_mod_states(self) -> List[ev.GameEvent]:
@@ -2193,21 +2215,47 @@ class GameState:
             events.extend(self._return_pawn_to_rear(status.subject_id, status))
         return events
 
+    #: Passives whose arrival opens a SECOND interactive window.  A mod that
+    #: only changes the board (Shady) or the statuses (Sesja na PG variant 2)
+    #: is not one of these: it interrupts nobody, so it lands at once.
+    _MOD_FOLLOWUP_PASSIVES = ("reveal_chest",)
+
     def _arm_mod(self, card: Card) -> List[ev.GameEvent]:
         """Run whatever a mod does at the moment it reaches the rack.
 
         Keyed on the card's declared ``passive``, never on its title (N98), so
         a second mod that reveals the Chest or hides the leader is a JSON entry
         exactly as a passive rule is.
+
+        A mod that opens a WINDOW is different from one that simply changes the
+        state, and the difference is timing.  Piotrek settling his half of a
+        selection while four hunters are still voting must not put a window in
+        front of all five of them; the arrival is recorded on the selection and
+        replayed by :meth:`_finish_mod_selection`.  Outside a selection —
+        PlaceMod, Thunderfuck, Rage Quit — there is nothing to wait for and the
+        window opens immediately, exactly as it always did.
         """
         events: List[ev.GameEvent] = []
-        if card.passive.get("reveal_chest"):
-            events.append(self._chest_reveal_event())
         if card.passive.get("hide_leader"):
             events.extend(self._hide_leading_pawn(card.uid))
         if card.passive.get("cancel_ability_effects"):
             events.extend(self._cancel_ability_effects())
+
+        if not any(card.passive.get(rule) for rule in self._MOD_FOLLOWUP_PASSIVES):
+            return events
+        selection = self.pending_mod_selection
+        if selection is not None:
+            if card.uid not in selection.followup_uids:
+                selection.followup_uids.append(card.uid)
+            return events
+        events.extend(self._mod_followup_events(card))
         return events
+
+    def _mod_followup_events(self, card: Card) -> List[ev.GameEvent]:
+        """The secondary window a mod opens once it is allowed to open it."""
+        if card.passive.get("reveal_chest"):
+            return [self._chest_reveal_event()]
+        return []
 
     # ── Sesja na PG, variant 2: what is already running stops ────────────────
     def _cancel_ability_effects(self) -> List[ev.GameEvent]:
@@ -4536,6 +4584,10 @@ class GameState:
                               self.pending_mod_selection.votes.items())},
                 "piotrek_done": self.pending_mod_selection.piotrek_done,
                 "hunters_done": self.pending_mod_selection.hunters_done,
+                # Real state, not a UI detail: two machines that disagree about
+                # which mods still owe a window disagree about what happens the
+                # moment the pause lifts.
+                "followups": list(self.pending_mod_selection.followup_uids),
             },
             "decks": {
                 did: {"draw": d.draw_count, "discard": d.discard_count}

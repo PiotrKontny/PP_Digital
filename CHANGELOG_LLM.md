@@ -6278,3 +6278,233 @@ meaningful rather than accidental.
   text and an art key, and now renders through the ordinary Chest card choice
   prompt — which is at least the same prompt every other Chest card uses.
 - The card art key is `Herold` in the chest deck. No art file was added.
+
+---
+
+## Stage 44 — The modal stack: one order for painting and for input
+**Date:** 2026-08-14
+
+### The report
+In round 7 the Mod Patusa selection and a Chest hand-limit prompt were on
+screen together. The Mod window was drawn on top; the Chest window answered
+the clicks.
+
+### Reproduced first, in the real screen
+```
+pending_mod_selection: True     pending_chest_choice: (3, [30014, 30013, 30011])
+mod_choice.active: True         chest_choice.active: True
+mod card rect <rect(602,367,225,322)>  chest panel <rect(534,292,852,497)>  overlap: True
+click on the Mod card →  mod slot changed?  False
+                         chest keep changed? True
+```
+Round 7 is where it shows because `_begin_round` calls `_open_mod_selection()`
+and then `_distribute_chest_card()` in the same breath, and by round 7 the
+hands are reliably at the chest limit. It is not a round 7 bug.
+
+### ROOT CAUSE — two lists, nothing keeping them in step
+`GameScreen` held the running order of its dialogs **twice**: as the chain of
+`if ....active:` tests at the top of `handle_event`, and as the sequence of
+`.draw()` calls at the bottom of `draw`. Neither referred to the other, so
+they drifted. Mod-vs-chest was the reported drift; it was not the only one —
+the Card Library was drawn *below* the movement/check decisions and the two
+endings while taking input *before* all of them, and `reveal` was drawn above
+`choice_prompt` while `pending_choice` took input first.
+
+A drift between those two lists is never cosmetic. It is exactly "a window is
+painted on top and the window underneath answers the click".
+
+### THE FIX: `ui/modals.py`
+One ordered list, `ModalStack`, registered in `GameScreen._register_modals`.
+**Registration order IS priority IS paint order.** `draw()` walks it upwards;
+`handle_event` offers the event to the topmost active modal and to no other.
+
+    INVARIANT: the visually topmost ACTIVE modal receives input, and no other
+               modal receives any.
+
+Bottom to top: reveal · pending choice · **chest limit · MOD PATUSA SELECTION**
+· card picker · Paczka · card library · movement / breakup / check decisions ·
+match start · victory · pause menu.
+
+Rules the stack enforces:
+- A lower modal is **pending**: still drawn, still holding its state, not
+  actionable. That is what turns two clickable windows into a queue.
+- `blocking` decides whether a modal swallows everything (chest limit, picker,
+  library, endings) or lets navigation through (mod vote, pending choice) —
+  the pause was never meant to be a blindfold and still is not.
+- A non-blocking modal lets the **wheel and middle-drag** past but never a
+  **click** onto another window: a press inside its own panel, or inside any
+  pending modal beneath it, stops there.
+- `blocks_keyboard` is separate, so S/F/Tab keep working under the dialogs
+  that always allowed them.
+
+Two orderings collapsed into one, so two things moved: `reveal` now paints
+below `choice_prompt` (a question belongs above an animation), and the
+connection banner paints above the endings — "connection lost" is the one
+message that must never be under a window the player can no longer resolve.
+
+### PACZKA: a secondary window must not interrupt the phase it depends on
+`_arm_mod` fired `ChestCardsRevealed` the moment **one** faction settled,
+while four hunters still had to vote. Now it is deferred **in the engine**, so
+every replica behaves the same:
+- `_MOD_FOLLOWUP_PASSIVES` names the passives whose arrival opens a *window*.
+  A mod that only changes the board (Shady) or the statuses (Sesja na PG
+  variant 2) is not one and still lands immediately.
+- While a selection is open the arrival is recorded on
+  `ModSelection.followup_uids`; `_finish_mod_selection` emits
+  `ModSelectionFinished` **first** and then rebuilds the window **from the
+  rack** — a mod chosen and then replaced before the pause lifted owes nothing.
+- Outside a selection (PlaceMod, Thunderfuck, Rage Quit) nothing changed.
+- `followup_uids` is in the snapshot: two machines that disagree about it
+  disagree about what happens the instant the pause lifts.
+- `GameScreen` holds a `ChestCardsRevealed` that arrives while a selection is
+  open anyway. That is the replica-side net for L19 (a reconnecting client
+  replaying an old log), and it is a net, not the mechanism.
+
+### ESC: resolve, never cancel
+Esc now **answers** the active window with a valid random choice and closes
+it; the queue then advances. The valid set is always the one the interface
+itself would have accepted a click on — the three mods actually dealt, the
+cards actually in the prompt, `choice.options` / `card_options`, the breakup
+tiles, Block only while the card still has its use, Refuse only while Ice
+Block has one. One option means that option; zero means Esc keeps its old
+meaning rather than inventing an answer.
+
+- The modal's **own** handler sees Esc first, so the meanings that already
+  existed survive (backing out of a Block confirmation, closing the Library).
+- `victory` and `pause_menu` declare no resolver. "Quit the application" is
+  not a choice a die gets to make, and neither is blocking anything.
+- **Cancelling is now the right button only.** `_handle_choice_event` and the
+  card picker have always had it; Esc and right-click simply no longer mean
+  the same thing.
+- The fallback draws from a **UI-local RNG**, deliberately outside R4. It runs
+  on one machine at a moment no other machine knows about; pulling from the
+  shared seeded stream would leave every other replica one number behind. What
+  travels is the **Command** it produces, exactly as a mouse click does.
+
+### Changed
+- `ui/modals.py` — NEW. `Modal`, `ModalStack`.
+- `ui/game_screen.py` — `_register_modals` and the modal adapters; the input
+  chain and the paint block replaced by the stack; `_answer_mod_choice` and
+  `_choose_identity` extracted so Esc and the click share one road; the Esc
+  resolvers; the held-Paczka net; `_handle_key`'s two cancel branches removed.
+- `engine/game_state.py` — `ModSelection.followup_uids`, `_arm_mod` split into
+  immediate and follow-up, `_mod_followup_events`, `_finish_mod_selection`
+  flush, snapshot field.
+- `tests/test_stage44_modal_stack.py` — NEW, 29 tests.
+- `tests/test_ui.py` — three Esc tests re-pointed at the new contract, and
+  three added beside them for what Esc does now.
+
+### Verification
+- **1908 pass, 0 fail** (stage 43 ended at 1877). No test was deleted; the
+  three that asserted "Esc cancels" now assert "right-click cancels" and are
+  joined by three asserting "Esc resolves".
+- The reproduction above, re-run: the Mod slot fills and `chest_choice.keep`
+  does not move.
+- The round 7 scenario driven end to end: both windows up → Mod window owns
+  input → chest window unclickable and still pending → Mods finish → chest
+  discard becomes the owner → completed by hand → nothing left active.
+- Paczka driven end to end: chosen by Piotrek, no window, all four hunters
+  vote, window appears only after the phase closes, dismissed with OK.
+- Esc driven across the mod selection, the chest discard, a six-option pawn
+  selection (two chained questions, two presses), a one-option window, a
+  multi-pending stack and an empty screen.
+- **Checked in PIXELS, not flags.** Both windows reported `active` and both
+  were right; the bug was invisible to a flag. The two windows are painted to
+  scratch surfaces in each order and the real frame matched against them:
+  6204/6204 differing pixels in the overlap match Mod-over-chest.
+
+### Limitations
+- Esc resolves the mod selection ONE step at a time — this seat's pick, or the
+  hunter whose turn it is at this keyboard. That is deliberate: it is the
+  active interaction, and one player's Esc must not vote for the rest of the
+  table.
+- `reveal` moving below `choice_prompt` and the connection banner moving above
+  the endings are behaviour changes, small but real, and fall out of there
+  being only one order now.
+
+---
+
+## Stage 45 — The board size means the meta
+**Date:** 2026-08-14
+
+### Reported problem
+A board asked for 24 fields in the lobby finished on 19. The doubled positions
+were eating the board's length: with `double_frequency` at 30% and seed 42 the
+generator produced
+
+    1, 2, 3a, 3b, 4, 5, 6a, 6b, 7, 8, 9, 10a, 10b, 11, 12a, 12b, 13,
+    14a, 14b, 15, 16, 17, 18, 19
+
+— twenty-four *fields*, nineteen *positions*, meta on 19.
+
+### Cause
+`make_rows()` budgeted FIELDS, not positions:
+
+```python
+cell_num += 2 if row_type == "double" else 1
+```
+
+A widened row spent two units of the board-size budget while producing one
+logical position, so each 4a/4b pair shortened the board by one. `_place_tiles()`
+enforced the same field budget a second time (`if len(self.tiles) >=
+self.cell_count: break`), which is why the truncation survived any change to the
+row list alone. Since `victory.is_at_finish()` and movement both read
+`last_position`, the short board was the real board — not a labelling slip.
+
+### Fixed
+`cell_count` is now a count of POSITIONS and therefore the number the meta
+stands on. `make_rows()` emits exactly one row per position and the field budget
+in `_place_tiles()` is gone. `double_frequency` now changes how many FIELDS the
+board holds and never how long it is:
+
+    24 @ 0.0 → 24 tiles, 24 positions, meta 24
+    24 @ 0.3 → 31 tiles, 24 positions, meta 24
+    24 @ 1.0 → 47 tiles, 24 positions, meta 24
+    20 @ 0.3 → 25 tiles, 20 positions, meta 20
+
+No post-hoc `+N` correction: the budget itself carries the meaning, which is why
+it holds for every size and every frequency rather than for the cases somebody
+remembered to offset.
+
+The final row is still forced to `single`, so the meta is never half of a pair —
+checked to frequency 1.0, where every other row widens. The frequency draw
+happens on every row including the last, so the RNG stream depends only on the
+board size and not on where the doubles fell; determinism is preserved.
+
+### Changed
+- `board/board.py` — `make_rows()` loops over positions instead of accumulating
+  a field budget; the `len(self.tiles) >= self.cell_count` truncation removed
+  from `_place_tiles()`; `cell_count` documented as the logical length; new
+  `meta_number` property ("which number is the meta" was the question the lobby
+  setting answers, and it used to have a different answer from the one chosen).
+- `tests/test_board.py` — four assertions re-pointed from tiles to positions;
+  new block "logical positions vs physical fields" (7 tests, incl. the reported
+  4a/4b + 14a/14b case and a 5×3 size/frequency sweep).
+- `tests/test_engine.py` — `test_positions_and_fields_are_different_counts`
+  re-pointed; lobby-size-to-meta end to end (3×3); two replicas from one config
+  agreeing field for field.
+- `LLM_Instructions.txt` — "POSITIONS VS FIELDS" corrected (it said `cell_count`
+  counts fields) and "THE BOARD SIZE IS A LOGICAL LENGTH" added.
+
+### Untouched deliberately
+Nothing downstream needed changing, and that is the point of the positions layer
+existing: movement, `route_between()`, victory, the a/b choice prompt, rendering
+and undo already worked in positions or in tile indices. Multiplayer needed
+nothing either — the board still reduces to `(board_cells, seed,
+double_frequency)` and both peers rebuild it locally. Boards are now physically
+longer for the same lobby number, which is correct and was the ask.
+
+### Verification
+- **1940 pass, 0 fail** (stage 44 ended at 1909; +31 tests, none deleted).
+- `verify_spacing()` is `None` across the size × frequency sweep, so the longer
+  roads did not reintroduce the stage-2 overlap.
+
+### One pre-existing test bug found and fixed
+`test_nothing_grows_inside_the_starting_camp` hand-copied the camp keep-out box
+as ±80/±90 while `camp_bounds` promises ±86/±86 — it asserted four pixels of
+clearance nobody guaranteed. On the pre-stage-45 code **58 of 300 seeds already
+violate it**; the four hard-coded seeds simply missed the gap. The longer boards
+shifted the decor RNG and landed seed 42 on it. The test now asserts
+`model.camp_bounds` — the generator's own contract — verified clean across 400
+seeds. The generator was NOT changed for this: it was a test asserting a promise
+that was never made.
