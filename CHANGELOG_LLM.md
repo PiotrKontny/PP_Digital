@@ -6508,3 +6508,315 @@ shifted the decor RNG and landed seed 42 on it. The test now asserts
 `model.camp_bounds` — the generator's own contract — verified clean across 400
 seeds. The generator was NOT changed for this: it was a test asserting a promise
 that was never made.
+
+---
+
+## Stage 46 — Kingmaker: the role changes seats
+**Date:** 2026-08-14
+
+### Goal
+Give Gamechanger's hunter face a rule. `Kingmaker` had a title, a text and a
+presentation since stage 28 and `"effect": {"type": "manual"}` underneath —
+it announced itself, said what the table should do by hand, and did nothing.
+
+Its printed text:
+
+> Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta
+
+The hunter who plays it and the current Piotrek **exchange roles**. The new
+Piotrek then picks a **new** colour; the old one is published on the way past.
+
+### The short version
+Almost nothing was built. Alter Ego (stage 28) had already built the hard half
+— the machinery for handing the hidden identity back — and stage 45's brief
+asked, correctly, that it be reused rather than duplicated. What was missing
+was moving the ROLE, and the role turned out to be one field.
+
+New code, in total: one Operation, one handler, one executor, one event.
+
+### Implemented
+
+**1. `swap_roles`, and where it lives.**
+`cards.json`, inside the Gamechanger presentation's `hunter` variant:
+
+```json
+"hunter": {
+  "title": "Kingmaker",
+  "text": "Oprawca i Piotrek zamieniają się rolami, ...",
+  "effect": { "type": "swap_roles" }
+}
+```
+
+Three lines changed in the data file, and that is the whole of "Kingmaker is
+the hunter-side variant". `_after_draw` already transformed the card by role
+(`presentation.type == "role_reveal"`) and `_variant_effect` already carried a
+variant's own effect across — the stage-28 comment there says in as many words
+that when Alter Ego and Kingmaker get a rule it will be a JSON entry and not a
+change in that method. It was.
+
+Piotrek's copy still transforms into Alter Ego with `swap_identity`. Neither
+face knows the other exists.
+
+**2. The role IS the character card.**
+`Player.role` is derived from `character.is_piotrek`; `players/roles.py` exists
+precisely so that "is this player Piotrek" is asked once. So the exchange is
+literally:
+
+```python
+piotrek.character, challenger.character = challenger.character, piotrek.character
+```
+
+and everything that reads the role moves with it, none of it touched:
+`piotrek_seat`, `seat_order` (the every-third-slot cadence), the chest limit,
+the Mod Patusa factions, the win conditions, `swap_identity`'s own "only
+Piotrek" refusal, the right-hand panel, the ability button and the notepad.
+**There is deliberately no second "who is Piotrek" flag to fall out of step.**
+
+**3. The identity question is Alter Ego's, unmodified.**
+The plan is two operations:
+
+```python
+Plan((SwapPiotrekRole(hunter_seat=actor.index), RequestIdentitySwap()), ...)
+```
+
+and then the existing five steps run untouched: the colourless flag stops the
+table → the authority answers through `victory.review` with `RevealIdentity` →
+the notepad is wiped down to the revealed colour → the room re-sends
+`identity_required` to one peer → `set_identity` → `FinishIdentitySwap`.
+
+Not one line of that flow changed. The new Piotrek is asked with the same
+message, the same overlay and the same shortened pawn list Alter Ego produced,
+because the room asks `state.piotrek_seat` — and by then that is him.
+
+**THE ORDER OF THE TWO OPERATIONS IS THE DESIGN.** The role moves first. Raise
+the pause first and `victory.review` answers it about the man who is about to
+stop being Piotrek, and the room asks the wrong peer for a colour.
+
+**4. The secret is moved without being read.**
+`SwapPiotrekRole` swaps `secret_pawn` between the two seats. On a replica that
+moves `None` onto `None`; on the authority and on the outgoing Piotrek's own
+machine it moves the real colour. The operation never names one, so it builds
+identically everywhere (N72), and the colour it moved is given up a moment
+later by `RevealIdentity` and replaced by the new Piotrek's own choice. **It is
+never inherited** — that is the shortcut the whole shape of this exists to
+avoid.
+
+**5. What travels with the role, and what does not.**
+
+| | Travels | Why |
+|---|---|---|
+| `character` | yes | it *is* the role |
+| `skill` (Umiejętność Piotrka) | yes | belongs to the Piotrek seat; the hunter had none, so the outgoing Piotrek correctly ends with none |
+| `secret_pawn` | moved, then given up | see above |
+| `marks` (the notepad) | **no** | it is the player's own working-out |
+
+The notepad staying put is a rule, not an omission. Swapping it would put one
+player's private deductions on another player's screen — from the one card in
+the game whose entire job is to move hidden information about carefully.
+
+Ability CHARGES travel because they are counted on the physical card
+(`cards/base_card.py`: "hand it to somebody else and the remaining uses go with
+it"). Kingmaker is deliberately not an exception to a rule the project already
+states. The new Piotrek may exchange the skill through the ordinary
+Umiejętności deck on his panel, like any Piotrek.
+
+**6. No UI was written.** `CharacterPanel` has always branched on
+`player.is_piotrek`, so the identity badge, the skill card, the Umiejętności
+deck section, the ability button's source and the hunter pawn grid all follow
+the role by themselves. Six UI tests exist to prove that nothing was
+special-cased.
+
+### Two safety holes closed on the way past
+
+**`piotrek_seat` is now in the snapshot.** Before this stage the role could not
+move, so nothing needed to notice it moving — and nothing did. `piotrek_name`
+is a character TITLE and the set of titles in play is identical before and
+after an exchange; `has_character` is true on both seats either way;
+`ability_uses` is keyed by seat. Two machines that disagreed about who Piotrek
+is would therefore have agreed about **every field in the fingerprint** while
+disagreeing about the turn order, the win condition and every "only Piotrek"
+rule in the game. A seat number, never a colour.
+
+**`can_undo` now refuses while `awaiting_identity`.** A checkpoint records
+hands, piles, charges and a listed set of scalars — it does not record who
+holds which character card, and `secret_pawn` was never in it either. `UndoMove`
+is exempt from `_phase_refusal`, so without this an exchange could be torn in
+half from underneath. **This also closes the same pre-existing hole under Alter
+Ego**, where an undo mid-swap already lost a secret that had been given up.
+`SwapPiotrekRole` additionally closes the window outright, the way
+`GrantExtraTurn` does — Kingmaker is not undoable, and says so in one place.
+
+### A conflict in the brief, decided and recorded
+The brief's HIDDEN INFORMATION section says the former Piotrek's old identity
+"must not become visible merely because the role changed". The card's own
+printed text — preserved verbatim in the same brief — says
+*tożsamość Piotrka jest odkryta*: it **is** revealed.
+
+Resolved in favour of the card text, for two reasons. The reveal is a RULE of
+this card rather than a side effect of the mechanism, and it is exactly what
+the wording describes. And suppressing it is not cheap: `RevealIdentity` is
+what clears the secret and what makes `swap_forbidden_pawn` (= `eliminated_pawns[-1]`)
+mean anything, so a silent exchange would need a second path for giving up an
+identity — the second identity-selection system the brief explicitly forbade.
+
+The brief's requirement is honoured in the sense that matters: nothing leaks
+*accidentally*. The played command carries no colour, the new colour never
+travels, the outgoing Piotrek's replica holds no secret afterwards, and no
+machine learns anything the card does not say out loud.
+
+**If the intended rule is a silent exchange, this is the decision to revisit —
+it is contained, and the tests name it.**
+
+### Changed
+- `pedzacy_piotrek/data/cards.json` — the Kingmaker variant's effect.
+- `engine/effects.py` — `SwapPiotrekRole` operation; `@effect("swap_roles")`.
+- `engine/game_state.py` — `_op_swap_piotrek_role` + registration;
+  `piotrek_seat` in `snapshot()`; `can_undo` refuses during a swap.
+- `engine/events.py` — `RolesSwapped(from_seat, to_seat)`.
+- `tests/test_final_chest_cards.py` — `deal_gamechanger` helper (and `alter_ego`
+  re-pointed at it); the obsolete `test_kingmaker_is_playable_and_does_nothing`
+  replaced by two variant tests; 24 new Kingmaker tests.
+- `tests/test_final_chest_cards_sync.py` — 12 new multiplayer tests.
+- `tests/test_ui.py` — 6 new panel tests.
+- `LLM_Instructions.txt` — "ALTER EGO..." section extended into
+  "...AND KINGMAKER"; CURRENT IMPLEMENTATION and KNOWN LIMITATIONS updated.
+
+### Untouched deliberately
+`victory.py`, `server/room.py`, `net/`, `ui/hud.py`, `ui/layout.py`,
+`ui/game_screen.py`, `engine/turn_order.py`, `engine/setup.py`. Kingmaker adds
+**no command of its own** — it replays from the `play_card` that caused it plus
+the two authority commands Alter Ego already used, which is why it cannot
+desync and why a reconnecting player reaches the same table from the log.
+
+### Verification
+- **1982 pass, 0 fail** (stage 45 ended at 1940; +42 tests, one obsolete test
+  replaced by two).
+- Confirmed end to end against the real in-process server: role moves on every
+  replica, skill follows, old colour published and cleared, only the new
+  Piotrek's peer is asked, old colour excluded from his options, new colour
+  absent from the command log, fingerprints identical, play resumes.
+
+### Known limitations
+- **Hand sizes do not re-deal.** Piotrek opens with five movement cards and a
+  hunter with three; after an exchange each player keeps the hand they were
+  holding and converges on the new size through the ordinary end-of-turn refill
+  (`_refill_movement_hand` reads `setup.starting_hand_size`, which reads the
+  role). Nothing is wrong, but the new Piotrek is briefly short. Left alone
+  because a forced re-deal mid-match would move cards between hands and piles
+  for reasons no card printed.
+- **Two Kingmakers cannot meet.** One copy is printed, and a second exchange
+  while one is running is refused (`identity_swap` is already set). Sequential
+  exchanges are fine and tested.
+- **The notepad does not come back.** A player who is Piotrek and later becomes
+  a hunter again keeps the marks he had before — they were never cleared — but
+  he made no notes while he was Piotrek. Correct, and worth knowing.
+
+---
+
+## Stage 47 — Card backs are artwork
+**Date:** 2026-08-14
+
+### Goal
+Replace the code-generated card backs with five supplied pictures, and — the
+larger half of the task — make the backs **asset-driven**, so that replacing
+one later is a file and a line rather than a hunt through rendering code.
+
+### What was there before
+`CardRenderer.back()` painted a bound cover procedurally: a rounded gradient in
+`theme.deck_colors[deck_id]`, a brass frame, four corner diamonds and a diamond
+emblem. The deck's identity reached it only as a **colour**, passed down from
+`ui/hud.py::_deck_section`, so the five decks differed by hue and by nothing
+else.
+
+The good news on inspection: there is exactly **one** card-back rendering path
+in the whole game, and `_deck_section` is shared by the left column and the
+character panel, so all five decks go through it. Hands, the card library, the
+reveal overlay and the mod rack draw fronts only. No hunt was needed.
+
+### Implemented
+**The five pictures.** `assets/card_backs/`, named after their deck ids:
+`movement.png` (Karty Ruchu — blue, winged shoe), `mods.png` (Mody Patusa —
+green, gear and puzzle piece), `chest.png` (Karty Skrzyni — orange, treasure
+chest), `piotrek_skills.png` (Umiejętności — purple sigil), `characters.png`
+(the character-**exchange** deck — gold, three profiles). The uploads' Polish
+filenames made the mapping unambiguous and the artwork agrees with it.
+
+**One table, and only one.** `settings.CARD_BACKS` maps deck id to file name.
+Nothing in `render/` or `ui/` names a card-back file, and a test greps both
+folders to keep it that way.
+
+**`render/card_back.py`.** `CardBackLibrary`, deliberately shaped like
+`CardArtLibrary`: lazy per-deck loading, cached surfaces, injectable folder and
+table, and `None` on every failure path. It is a **table, not a scan** — five
+decks are five constants, and scanning would have meant a second name-folding
+convention for names that already exist.
+
+**`CardRenderer.back()` branches on its first line**, the way `face()` has
+branched since stage 30: picture present → `_picture_back`, otherwise the drawn
+cover. `_picture_back` cover-scales through the same `_cover` a Signature face
+uses, rounds the corners to the card's radius, and adds `BACK_HOVER_LIGHT ×
+brightness` for the deck-panel hover — additive, since a picture has no base
+colour to `lighten`. Cached under `("picture_back", deck_id, size, step)`.
+
+**One line in the UI.** `_deck_section` already held the deck object, so
+`deck_id=deck.id` on the existing `draw_pile` call was the entire change to
+`ui/`.
+
+### Architecture notes
+`card_art.py`'s private `_load` was promoted to a module-level `load_image` and
+is now shared by both libraries. One loader, one failure policy — a picture
+cannot become able to crash the game by arriving through a different door.
+`CardArtLibrary._load` delegates to it; its behaviour is unchanged.
+
+The two systems stay strictly separate: different folders, different modules,
+different addressing (a card art file is found by the CARD's name, a back
+belongs to a DECK), and a test asserts neither library can resolve through the
+other's directory. `DECK_CHARACTERS` is a **deck**, not a role — nothing about
+hidden information is touched, and a picture on a face-up pile could not carry
+any in the first place.
+
+The drawn back survives as the **fallback**: a missing or corrupt file, and a
+clean checkout with no binary assets, both get the bound cover in the deck's
+theme colour. That is the project's standing rule for `assets/`, and it is why
+the `color` parameter stays on `back()`.
+
+### Changed
+- `pedzacy_piotrek/assets/card_backs/` — five new pictures + `README.md`.
+- `pedzacy_piotrek/config/settings.py` — `CARD_BACK_DIR`, `CARD_BACKS`.
+- `pedzacy_piotrek/render/card_back.py` — new; `CardBackLibrary`.
+- `pedzacy_piotrek/render/card_art.py` — `_load` promoted to `load_image`.
+- `pedzacy_piotrek/render/card_renderer.py` — `backs` library injected;
+  `back()` branches; `_picture_back`; `BACK_HOVER_LIGHT`; `deck_id` threaded
+  through `draw_back` and `draw_pile`.
+- `pedzacy_piotrek/ui/hud.py` — one line: `deck_id=deck.id`.
+- `pedzacy_piotrek/assets/README.md` — the `card_backs/` row and the
+  front-versus-back distinction.
+- `tests/test_card_backs.py` — new, 25 tests.
+- `tests/test_visual_style.py` — the themed-colour test renamed to say it now
+  covers the fallback; a new test that the decks on screen show the artwork.
+- `LLM_Instructions.txt` — "CARD BACKS" section; module map; CURRENT
+  IMPLEMENTATION.
+
+### Untouched deliberately
+Every deck mechanic, `cards/deck.py`, `engine/`, `net/`, `ui/layout.py`, the
+card library, the hand fan, and the whole Signature Card path. This stage moves
+no card and changes no rule; `deck_id` was already available at the one call
+site that needed it, which is why the UI change is a single argument.
+
+### Verification
+- **2008 pass, 0 fail** (stage 46 ended at 1982; +26 tests — 25 in
+  `test_card_backs.py`, 1 in `test_visual_style.py`).
+- Rendered headlessly and inspected: all three table decks and both of
+  Piotrek's piles show their own back, five distinct pictures, correct
+  silhouette and rounded corners, card fronts unchanged.
+
+### Known limitations
+- **The files are large.** ~2.7 MB each, ~13.5 MB for the set, at ~1060×1490 —
+  the same class as the shipped card art, and far more resolution than a pile
+  a few hundred pixels wide will ever use. Shrinking them is safe and is noted
+  in `card_backs/README.md`; left alone here because the task was to use the
+  supplied artwork, not to re-encode it.
+- **Replacing a back needs a restart.** Pictures are loaded once and cached.
+  `CardBackLibrary.refresh()` exists for a live reload; nothing calls it.
+- **A discard pile shows a front, not a back.** Unchanged behaviour — the top
+  discard is face up, which is what it always was.

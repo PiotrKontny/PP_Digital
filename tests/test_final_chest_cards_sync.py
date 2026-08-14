@@ -325,3 +325,317 @@ def test_a_reconnecting_player_replays_the_swap(library):
     assert not replica.state.awaiting_identity
     assert replica.state.piotrek_pawn is None
     table.close()
+
+
+# ── Kingmaker ────────────────────────────────────────────────────────────────
+#
+# The role swap is the OTHER half of Gamechanger, and across a server it asks a
+# different question from Alter Ego's.  Alter Ego's question was "does the
+# secret stay secret"; this one is "does every machine agree who Piotrek IS".
+#
+# The two are not the same fact and they are protected differently.  WHO
+# Piotrek is has always been public — the turn order announces him every round
+# — so the role moving is ordinary shared state and travels in the command
+# every replica replays.  The COLOUR is not, so it goes on riding the same
+# private road it always did, and the fact that the role moved underneath it
+# must not shake it loose.
+def hunter_seat_on_turn(table, host, clients):
+    """Walk the table on until an actual hunter is holding the turn.
+
+    Kingmaker is played by a hunter, and the round opens on Piotrek — so a
+    test that dealt the card to whoever was active would be dealing it to the
+    wrong man on the first turn of the match.
+    """
+    while host.state.active_player_index == host.state.piotrek_seat:
+        take_a_turn(table, host, clients)
+    return host.state.active_player_index
+
+
+def start_kingmaker(table, host, clients):
+    """Deal Gamechanger to the hunter on turn and play it.
+
+    Returns ``(old_seat, new_seat, actor)`` — the seat that was Piotrek, the
+    seat that played the card, and the service that owns the latter.
+    """
+    room = table.room(host.room_code)
+    parties = [host, *clients]
+    old_seat = room.state.piotrek_seat
+    new_seat = hunter_seat_on_turn(table, host, clients)
+    uid = deal_chest(room, parties, new_seat, "Gamechanger")
+    actor = table.by_seat(host, clients)[new_seat]
+    actor.session.submit(cmd.PlayCard(player_index=new_seat, card_uid=uid))
+    table.pump()
+    return old_seat, new_seat, actor
+
+
+def test_a_hunters_gamechanger_is_kingmaker_on_every_machine(library):
+    """The transformation is data, so it happens identically everywhere."""
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+
+    seat = hunter_seat_on_turn(table, host, clients)
+    uid = deal_chest(room, parties, seat, "Gamechanger")
+    for state in everywhere(room, parties):
+        card = state.player(seat).card_by_uid(uid)
+        assert card is not None and card.title == "Kingmaker"
+    table.close()
+
+
+def test_the_role_moves_on_every_machine(library):
+    """The heart of it: one command, and five replicas agree who Piotrek is."""
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+
+    old_seat, new_seat, _ = start_kingmaker(table, host, clients)
+
+    assert old_seat != new_seat
+    for state in everywhere(room, parties):
+        assert state.piotrek_seat == new_seat
+        assert state.player(new_seat).is_piotrek
+        assert not state.player(old_seat).is_piotrek
+    assert all_agree(host, *clients)
+    table.close()
+
+
+def test_the_role_swap_needs_no_command_of_its_own(library):
+    """It replays from the ``play_card`` that caused it, like every mechanic.
+
+    The reveal that follows is the authority's, exactly as under Alter Ego —
+    two commands, both already in the game before this card had a rule.
+    """
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    room = table.room(host.room_code)
+
+    hunter_seat_on_turn(table, host, clients)
+    before = len(room.command_log)
+    start_kingmaker(table, host, clients)
+
+    kinds = [e["kind"] for e in room.command_log[before:]]
+    assert kinds == ["play_card", "reveal_identity"]
+    table.close()
+
+
+def test_the_played_card_carries_no_colour(library):
+    """N72 again, and it matters more here: the handler moves the secret.
+
+    It moves it WITHOUT READING IT, which is the whole design — on a replica
+    the swap moves ``None`` onto ``None``.  If the colour had travelled in the
+    command instead, every client would learn it from the log, and so would
+    anybody who reconnected months later.
+    """
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    room = table.room(host.room_code)
+    colour = room.state.piotrek_pawn
+    assert colour, "the server knows the colour"
+
+    hunter_seat_on_turn(table, host, clients)
+    before = len(room.command_log)
+    start_kingmaker(table, host, clients)
+
+    played = room.command_log[before]
+    assert played["kind"] == "play_card"
+    assert colour not in repr(played), "the colour is not in the command"
+    table.close()
+
+
+def test_only_the_new_piotrek_is_asked_for_a_colour(library):
+    """The private message goes to the man who now holds the role.
+
+    Asking the OUTGOING Piotrek is the mistake this guards against, and it is
+    the easy one to make: he is the one the question used to belong to.
+    """
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+    colour = room.state.piotrek_pawn
+
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+
+    asked = [s for s in parties if s.identity_request]
+    assert asked == [actor], "exactly one machine was asked"
+    assert actor.session.seat == new_seat, "and it is the NEW Piotrek's"
+    offered = {p["id"] for p in actor.identity_request}
+    assert colour not in offered, "not the colour just given up"
+    assert len(offered) == len(room.state.library.pawns) - 1
+    table.close()
+
+
+def test_the_old_colour_is_not_inherited_across_the_wire(library):
+    """Between the exchange and the answer NOBODY holds an identity."""
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+
+    for state in everywhere(room, parties):
+        assert state.piotrek_pawn is None
+        assert state.player(old_seat).secret_pawn is None
+        assert state.player(new_seat).secret_pawn is None
+    table.close()
+
+
+def test_the_new_piotreks_colour_never_travels(library):
+    """The second secret is as private as the first, and belongs to a new seat."""
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+    old = room.state.piotrek_pawn
+
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+    chosen = next(p["id"] for p in actor.identity_request if p["id"] != old)
+    before = len(room.command_log)
+    actor.choose_identity(chosen)
+    table.pump()
+
+    assert room.state.piotrek_pawn == chosen, "the authority knows"
+    assert actor.state.piotrek_pawn == chosen, "and so does its owner"
+    kinds = [e["kind"] for e in room.command_log[before:]]
+    assert kinds == ["finish_identity_swap"]
+    assert chosen not in repr(room.command_log[before:])
+
+    for service in [s for s in parties if s is not actor]:
+        assert service.state.piotrek_pawn is None, "and nobody else does"
+    assert all_agree(host, *clients)
+    table.close()
+
+
+def test_the_outgoing_piotrek_is_told_nothing_extra(library):
+    """He knew a colour a moment ago.  He must not still be holding it.
+
+    The seat he now occupies is an ordinary hunter's, and his replica has to
+    look exactly like the other hunters' — otherwise the man who was Piotrek
+    would spend the rest of the match knowing something they do not.
+    """
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+    old = room.state.piotrek_pawn
+
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+    outgoing = table.by_seat(host, clients)[old_seat]
+    chosen = next(p["id"] for p in actor.identity_request if p["id"] != old)
+    actor.choose_identity(chosen)
+    table.pump()
+
+    assert outgoing is not actor
+    assert outgoing.state.piotrek_pawn is None
+    assert all(p.secret_pawn is None for p in outgoing.state.players)
+    table.close()
+
+
+def test_the_table_is_stopped_for_the_whole_exchange(library):
+    """The pause holds against a client that simply does not draw the overlay."""
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+    old = room.state.piotrek_pawn
+
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+    for state in everywhere(room, parties):
+        assert state.awaiting_identity, "everybody is paused"
+
+    before = len(room.command_log)
+    seat = room.state.active_player_index
+    assert room.state.authorise_remote(cmd.EndTurn(player_index=seat), seat)
+    assert len(room.command_log) == before, "and nothing got through"
+
+    chosen = next(p["id"] for p in actor.identity_request if p["id"] != old)
+    actor.choose_identity(chosen)
+    table.pump()
+    for state in everywhere(room, parties):
+        assert not state.awaiting_identity, "and everybody resumed together"
+
+    take_a_turn(table, host, clients)
+    assert all_agree(host, *clients)
+    table.close()
+
+
+def test_the_fingerprint_follows_the_role(library):
+    """Two machines that disagreed about the role used to agree about the hash.
+
+    ``piotrek_name`` is a character TITLE and the titles in play are the same
+    after an exchange as before it, so before stage 45 nothing in the snapshot
+    would have noticed the role sitting on a different seat.  It notices now,
+    and — this is the other half — the secret still does not move it.
+    """
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    room = table.room(host.room_code)
+    old = room.state.piotrek_pawn
+    assert all_agree(host, *clients)
+
+    before = room.state.snapshot()["piotrek_seat"]
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+    chosen = next(p["id"] for p in actor.identity_request if p["id"] != old)
+    actor.choose_identity(chosen)
+    table.pump()
+
+    assert before == old_seat
+    assert room.state.snapshot()["piotrek_seat"] == new_seat
+    assert room.state.snapshot() == host.state.snapshot(), \
+        "the server knows two colours and the host none, and they still match"
+    assert all_agree(host, *clients)
+    table.close()
+
+
+def test_a_reconnecting_player_replays_the_exchange(library):
+    """The log alone has to reach the same table — and teach nothing extra."""
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+    old = room.state.piotrek_pawn
+
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+    chosen = next(p["id"] for p in actor.identity_request if p["id"] != old)
+    actor.choose_identity(chosen)
+    table.pump()
+
+    log = [e["kind"] for e in room.command_log]
+    assert "play_card" in log and "reveal_identity" in log \
+        and "finish_identity_swap" in log
+    assert chosen not in repr(room.command_log)
+
+    replica = [s for s in parties if s is not actor][0]
+    assert replica.state.piotrek_seat == new_seat, "the role moved for him too"
+    assert replica.state.eliminated_pawns == [old]
+    assert replica.state.piotrek_pawn is None
+    assert not replica.state.awaiting_identity
+    table.close()
+
+
+def test_turn_permissions_follow_the_role(library):
+    """Point 10 over the wire: the cadence is recomputed from the new owner."""
+    table = Table(library)
+    host, clients = straight(table, "Kuba", "Ola", "Antek")
+    parties = [host, *clients]
+    room = table.room(host.room_code)
+    old = room.state.piotrek_pawn
+
+    old_seat, new_seat, actor = start_kingmaker(table, host, clients)
+    chosen = next(p["id"] for p in actor.identity_request if p["id"] != old)
+    actor.choose_identity(chosen)
+    table.pump()
+
+    # Everybody computes the same round from the same new ownership.
+    orders = [state.seat_order(state.round_number)
+              for state in everywhere(room, parties)]
+    assert all(order == orders[0] for order in orders)
+
+    # And play carries on through the ordinary path for several turns.
+    for _ in range(6):
+        take_a_turn(table, host, clients)
+    assert all_agree(host, *clients)
+    table.close()

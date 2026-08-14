@@ -3192,6 +3192,80 @@ class GameState:
         self.identity_swap = self.SWAP_REVEALING
         return [ev.IdentitySwapStarted(self.piotrek_seat)]
 
+    def _op_swap_piotrek_role(
+        self, op: effects.SwapPiotrekRole, actor: int
+    ) -> List[ev.GameEvent]:
+        """Kingmaker: hand the character cards across the table.
+
+        THE ROLE IS THE CHARACTER CARD AND NOTHING ELSE.  ``Player.role`` is
+        derived from ``character.is_piotrek`` (players/roles.py exists so that
+        the question is asked once), so moving the two cards is the whole of
+        the role swap: ``piotrek_seat``, ``seat_order``, the chest limit, the
+        Mod Patusa factions, every ability that says "only Piotrek", the win
+        conditions, the right-hand panel and the ability button all read that
+        one fact and all move together.  There is deliberately no second
+        "who is Piotrek" flag to fall out of step with it.
+
+        WHAT TRAVELS, AND WHY EACH:
+
+        * ``character`` — the role itself, both ways.
+        * ``skill`` — the Umiejętność Piotrka belongs to the Piotrek seat, so
+          it goes with the role.  The hunter had none, so the outgoing Piotrek
+          is left with none, which is exactly what a hunter should have.
+          Handing the CARD over rather than dealing a fresh one is the rule the
+          project already states: uses are counted on the physical card, and
+          "hand it to somebody else and the remaining uses go with it"
+          (cards/base_card.py).  The new Piotrek may exchange it through the
+          ordinary Umiejętności deck on his panel, like any Piotrek.
+        * ``secret_pawn`` — swapped WITHOUT BEING READ.  On a replica this
+          moves ``None`` onto ``None``; on the authority and on the outgoing
+          Piotrek's own machine it moves the real colour, so that the pause
+          raised immediately after still has a colour to give up.  It is given
+          up a moment later: ``RevealIdentity`` publishes it and clears it, and
+          the new Piotrek chooses his own.  It is never inherited.
+
+        WHAT DOES NOT TRAVEL: ``marks``.  The notepad is a player's own
+        working-out, not part of the role, and swapping it would show one
+        player another player's private deductions on his own screen — a real
+        leak, from a card whose entire job is to move hidden information about
+        carefully.  Each seat keeps its own; the outgoing Piotrek's is empty
+        because he has had no notepad to write on.
+
+        THE UNDO WINDOW CLOSES.  A checkpoint records hands, piles, charges and
+        scalars — it does not record who holds which character card, and a
+        rewind that put the cards back but not the roles would leave the table
+        quietly wrong.  Kingmaker is therefore not undoable, and says so by
+        closing the window the way ``GrantExtraTurn`` already does rather than
+        by a new rule somewhere else.
+        """
+        old_seat = self.piotrek_seat
+        challenger = self.player(int(op.hunter_seat))
+        piotrek = self.player(old_seat) if old_seat is not None else None
+        if piotrek is None:
+            return [ev.ActionRejected("Przy tym stole nie ma Piotrka",
+                                      "swap_roles")]
+        if challenger is None or challenger is piotrek:
+            return [ev.ActionRejected("Nie ma z kim zamienić się rolami",
+                                      "swap_roles")]
+
+        piotrek.character, challenger.character = \
+            challenger.character, piotrek.character
+        piotrek.skill, challenger.skill = challenger.skill, piotrek.skill
+        # Colourless on every machine that is not entitled to the colour.
+        piotrek.secret_pawn, challenger.secret_pawn = \
+            challenger.secret_pawn, piotrek.secret_pawn
+
+        self._close_turn_window()
+        return [
+            ev.RolesSwapped(from_seat=piotrek.index, to_seat=challenger.index),
+            ev.CharacterChanged(piotrek.index, piotrek.display_character),
+            ev.CharacterChanged(challenger.index, challenger.display_character),
+            ev.SkillChanged(piotrek.index,
+                            piotrek.skill.title if piotrek.skill else None),
+            ev.SkillChanged(challenger.index,
+                            challenger.skill.title if challenger.skill else None),
+        ]
+
     def _op_draw_cards(self, op: effects.DrawCards, actor: int) -> List[ev.GameEvent]:
         """Draw into a hand as part of an effect (Troll's replacement, Spy's)."""
         player = self.player(op.player_index)
@@ -4457,11 +4531,21 @@ class GameState:
         self.turn_window = None
 
     def can_undo(self, seat: int) -> bool:
-        """Whether this seat may rewind its last turn right now."""
+        """Whether this seat may rewind its last turn right now.
+
+        NOT WHILE THE TABLE IS WAITING FOR A COLOUR.  ``UndoMove`` is exempt
+        from ``_phase_refusal`` (it is authority-only, and the gate runs before
+        that exemption), so without this an Alter Ego or Kingmaker pause could
+        be rewound from underneath: the checkpoint restores ``identity_swap``
+        and the hands, but a secret that has already been given up is not in it
+        and neither is who holds which character card.  The window is still
+        there when the swap finishes; it is only closed to the middle of one.
+        """
         window = self.turn_window
         return (window is not None and not window.spent
                 and window.seat == int(seat)
-                and self.phase.playable)
+                and self.phase.playable
+                and not self.awaiting_identity)
 
     def _undo_move(self, command: cmd.UndoMove) -> List[ev.GameEvent]:
         """Rewind the last played card as though it had never been played.
@@ -4605,6 +4689,17 @@ class GameState:
             # must agree that it is — but nothing here says what it is stopped
             # waiting for a decision ABOUT.
             "identity_swap": self.identity_swap,
+            # WHICH SEAT HOLDS THE ROLE.  Public — the turn order announces
+            # Piotrek every round — and in the fingerprint since Kingmaker made
+            # it something a match can CHANGE.  Nothing else here would notice:
+            # ``piotrek_name`` is the character title and the titles in play are
+            # the same after a swap as before it, ``has_character`` is true on
+            # both seats either way, and ``ability_uses`` is keyed by seat.  Two
+            # machines disagreeing about who Piotrek is would therefore have
+            # agreed about everything in this dictionary while disagreeing about
+            # the turn order, the win condition and every "only Piotrek" rule.
+            # A seat number, never a colour.
+            "piotrek_seat": self.piotrek_seat,
             "victory": self.victory.to_dict() if self.victory else None,
             "piotrek_name": self.piotrek_name,
             "hunter_names": list(self.hunter_names),
@@ -4687,6 +4782,7 @@ class GameState:
         effects.MoveAndCollect: _op_move_and_collect,
         effects.TransferStack: _op_transfer_stack,
         effects.RequestIdentitySwap: _op_request_identity_swap,
+        effects.SwapPiotrekRole: _op_swap_piotrek_role,
         effects.ReplaceMods: _op_replace_mods,
         effects.DrawCards: _op_draw_cards,
         effects.TransferCard: _op_transfer_card,

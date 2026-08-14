@@ -90,6 +90,32 @@ def slugify(text: str) -> str:
     return "".join(out).strip("_")
 
 
+def load_image(path: Path) -> Optional[pygame.Surface]:
+    """Read one picture file, or answer ``None``.
+
+    Broad on purpose.  ``pygame.image.load`` raises ``pygame.error`` for a
+    truncated PNG, ``FileNotFoundError`` for a file deleted between the scan
+    and now, and has been known to raise ``ValueError`` on a file whose
+    extension lies about its contents.  None of those may reach the frame
+    loop, and the answer to all three is the same.
+
+    Module level rather than a method because ``render/card_back.py`` wants the
+    identical behaviour for the same reason: a hand-filled asset folder that
+    must never be able to stop a game.  One loader, one failure policy.
+    """
+    try:
+        image = pygame.image.load(str(path))
+    except Exception:
+        return None
+    try:
+        # ``convert_alpha`` needs a display; without one (headless tests, a
+        # screenshot tool) the unconverted surface draws correctly, just more
+        # slowly.
+        return image.convert_alpha()
+    except pygame.error:
+        return image
+
+
 def _scoped(scope: str, name: str) -> str:
     return f"{scope}/{name}" if scope else name
 
@@ -244,22 +270,5 @@ class CardArtLibrary:
 
     @staticmethod
     def _load(path: Path) -> Optional[pygame.Surface]:
-        """Read one file, or answer ``None``.
-
-        Broad on purpose.  ``pygame.image.load`` raises ``pygame.error`` for a
-        truncated PNG, ``FileNotFoundError`` for a file deleted between the
-        scan and now, and has been known to raise ``ValueError`` on a file
-        whose extension lies about its contents.  None of those may reach the
-        frame loop, and the answer to all three is the same.
-        """
-        try:
-            image = pygame.image.load(str(path))
-        except Exception:
-            return None
-        try:
-            # ``convert_alpha`` needs a display; without one (headless tests,
-            # a screenshot tool) the unconverted surface draws correctly, just
-            # more slowly.
-            return image.convert_alpha()
-        except pygame.error:
-            return image
+        """Read one file, or answer ``None``.  See :func:`load_image`."""
+        return load_image(path)

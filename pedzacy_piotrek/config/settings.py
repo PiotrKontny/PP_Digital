@@ -27,6 +27,11 @@ SOUND_DIR = ASSETS_DIR / "sounds"
 CARD_ART_DIR = ASSETS_DIR / "card_art"
 #: Extensions the card-art scanner accepts.  Lower case; the scan folds case.
 CARD_ART_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+#: The BACK of a card, one picture per deck.  A third folder rather than a
+#: subfolder of ``card_art`` because the two are addressed differently: a
+#: card-art file is found by the CARD's name, a file here belongs to a DECK and
+#: is named in ``CARD_BACKS`` below.  See ``render/card_back.py``.
+CARD_BACK_DIR = ASSETS_DIR / "card_backs"
 
 CARDS_FILE = DATA_DIR / "cards.json"
 CHARACTERS_FILE = DATA_DIR / "characters.json"
@@ -48,6 +53,23 @@ DECK_SKILLS = "piotrek_skills"
 
 TABLE_DECKS = (DECK_MOVEMENT, DECK_MODS, DECK_CHEST)
 PIOTREK_TITLE = "Piotrek"
+
+#: WHICH PICTURE IS THE BACK OF WHICH DECK.  This table is the whole of the
+#: configuration: the value is a FILE NAME under ``CARD_BACK_DIR``, and swapping
+#: one deck's card back means putting a new file in that folder and changing
+#: the one line here — or, if the new file keeps the old name, changing nothing
+#: at all.  No rendering code names a card-back file.
+#:
+#: A deck missing from this table, or naming a file that is absent or will not
+#: load, falls back to the drawn back ``CardRenderer.back`` has always painted,
+#: exactly as a card without artwork falls back to the parchment face.
+CARD_BACKS: Mapping[str, str] = {
+    DECK_MOVEMENT: "movement.png",       # Karty Ruchu
+    DECK_MODS: "mods.png",               # Mody Patusa
+    DECK_CHEST: "chest.png",             # Karty Skrzyni
+    DECK_SKILLS: "piotrek_skills.png",   # Umiejętności Piotrka
+    DECK_CHARACTERS: "characters.png",   # the character-exchange deck
+}
 
 
 @dataclass(frozen=True)

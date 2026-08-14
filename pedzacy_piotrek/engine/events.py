@@ -225,6 +225,20 @@ class IdentitySwapStarted(GameEvent):
 
 
 @dataclass
+class RolesSwapped(GameEvent):
+    """Kingmaker: the Piotrek character card moved from one seat to another.
+
+    Two seat numbers and no colour.  WHO Piotrek is has always been public —
+    the turn order names him every round — so this reaches every machine and
+    tells it nothing it was not entitled to.  The colour that used to belong to
+    ``from_seat`` is dealt with by the Alter Ego events that follow this one.
+    """
+
+    from_seat: int
+    to_seat: int
+
+
+@dataclass
 class IdentityRevealed(GameEvent):
     """The colour Piotrek WAS hiding behind, now public and ruled out forever.
 

@@ -1,10 +1,13 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 44 — THE MODAL STACK.  One ordered list decides both what
-              is painted on top and what receives the click, so the two can no
-              longer disagree; Mod Patusa windows that open a second window
-              wait for the whole selection phase; Esc resolves the active
-              window with a valid random choice
+Last updated: stage 46 — KINGMAKER.  Gamechanger's hunter face now moves the
+              PIOTREK ROLE to the hunter who played it, who then chooses a new
+              hidden colour through Alter Ego's existing machinery, unaltered.
+              The role is the character card and nothing else, so every rule
+              that reads it followed for free and no UI was written.
+              ``piotrek_seat`` joined the snapshot, because until now the role
+              could not move and nothing in the fingerprint would have noticed
+              it moving
               (see CHANGELOG_LLM.md)
 ================================================================================
 
@@ -115,11 +118,15 @@ WORKING:
   Balbinka moves every pawn two forward or back with no tower rule; Gambit
   Patusa reverses every movement card for the WHOLE OF THE NEXT ROUND; Gejtos
   pulls both neighbouring fields onto a pawn or pushes them one further away;
-  Alter Ego hands Piotrek's hidden identity back to him mid-match.  See "HOW THE
-  CHEST CARD EFFECTS WORK".
+  Alter Ego hands Piotrek's hidden identity back to him mid-match; and since
+  stage 46 KINGMAKER — Alter Ego's other face — moves the Piotrek ROLE to the
+  hunter who played it, who then chooses a new identity.  See "HOW THE CHEST
+  CARD EFFECTS WORK" and "ALTER EGO, KINGMAKER, AND HOW TO TOUCH THE HIDDEN
+  IDENTITY".
 - EVERY CHEST CARD IS PLAYABLE (stage 28), including the ones whose rule is
-  still settled at the table (Nie masz Rosji, Shady, Kingmaker).  They declare
-  ``manual``, which resolves to nothing and says so.  A card with NO ``effect``
+  still settled at the table (Shady, and Nie masz Rosji's chest copy).  They
+  declare ``manual``, which resolves to nothing and says so.  Kingmaker was one
+  of them until stage 46 and is no longer.  A card with NO ``effect``
   field is not playable at all — ``Card.is_playable`` reads exactly that — so
   "undesigned" used to mean "unclickable", which at the chest limit meant a
   player could hold two dead cards.  Never leave a card without an effect.
@@ -268,22 +275,28 @@ WORKING:
   finds the card titled "Troll" — so illustrating a card is dropping a file in
   a folder, with no JSON and no renderer change.  Troll is the worked example
   and the only illustrated card so far.  See "HOW SIGNATURE CARDS WORK".
+- CARD BACKS ARE ARTWORK (stage 47): every deck's back is a picture in
+  ``assets/card_backs``, and which picture belongs to which deck is one table,
+  ``settings.CARD_BACKS``.  The drawn cover that used to be painted per deck
+  colour survives only as the fallback for a missing file.  See "CARD BACKS".
 - 1243 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
   mod slot, but has no gameplay effect yet — its text still needs a ruling from
   the owner. The other seven all work (stages 24-25).
-- THREE Chest RULES are still settled at the table: Nie masz Rosji, Shady (the
-  chest one, not the mod) and Kingmaker.  The CARDS are not inert — since stage
-  28 they are played, shown and discarded like any other, and their text reaches
-  the status bar.  What is missing is a mechanic, and for two of the three that
-  is a RULING the owner has to make rather than code somebody can write:
+- TWO Chest RULES are still settled at the table: Nie masz Rosji (the chest
+  one, not the mod) and Shady.  The CARDS are not inert — since stage 28 they
+  are played, shown and discarded like any other, and their text reaches the
+  status bar.  What is missing is a mechanic, and it is a RULING the owner has
+  to make rather than code somebody can write:
     * "Nie masz Rosji" — blocking and burning an opponent's move has to say
       WHICH move, chosen WHEN, and what happens if that player has none.
-    * Kingmaker — swapping roles mid-match touches the hidden identity.  Alter
-      Ego (stage 28) built most of the machinery it would need; read "ALTER EGO"
-      below before attempting it.
+    * "Shady" — the printed text does not yet say what it does to whom.
+  Kingmaker was the third of these until stage 46.  It is now implemented and
+  is the worked example of what "reuse the existing machinery" means: read
+  "ALTER EGO, KINGMAKER, AND HOW TO TOUCH THE HIDDEN IDENTITY" before going
+  anywhere near the secret.
 - Turn enforcement: any player can act at any time (deliberate, for testing).
 - Sound and music.
 
@@ -363,7 +376,14 @@ pedzacy_piotrek/
                      ``assets/card_art`` once, folds filenames and card titles
                      to the same key, and loads on demand.  Nothing in it may
                      raise: every failure path answers None and the card falls
-                     back to the parchment face.
+                     back to the parchment face.  ``load_image`` lives here and
+                     is shared with card_back.py — one loader, one policy.
+    card_back.py     WHICH PICTURE IS THE BACK OF WHICH DECK.  A TABLE, not a
+                     scan: ``settings.CARD_BACKS`` maps deck id -> file name
+                     under ``assets/card_backs``, and nothing else in the
+                     codebase names a card-back file.  Loads lazily, caches per
+                     deck, and answers None on every failure, in which case the
+                     drawn back is painted instead.
     renderer.py      Primitive drawing + text cache + shadows, shape/ring glows,
                      premium_panel / interactive_panel, text fitting.
     highlight.py     THE HIGHLIGHT SYSTEM.  Every number behind hover,
@@ -435,6 +455,10 @@ pedzacy_piotrek/
     card_art/        FULL-CARD artwork, named after the card.  Its own
                      README.md is the owner-facing workflow document; keep it
                      current, it is the file they will actually open.
+    card_backs/      THE BACK of a card, one picture per deck, named in
+                     ``settings.CARD_BACKS``.  Not card_art: that is the FRONT
+                     of one card, this is the back of a whole deck.  Its own
+                     README.md is the owner-facing document.
   main.py            Entry point and CLI.
 
 tests/               test_engine, test_board, test_session, test_ui,
@@ -1665,10 +1689,12 @@ Past the FAR end it does clamp, because the card does not name that edge and
 every other rule in the game clamps there.
 
 
-ALTER EGO, AND HOW TO TOUCH THE HIDDEN IDENTITY
-------------------------------------------------
+ALTER EGO, KINGMAKER, AND HOW TO TOUCH THE HIDDEN IDENTITY
+------------------------------------------------------------
 READ THIS BEFORE GOING NEAR THE SECRET.  It is the most delicate thing in the
-project and Kingmaker will want the same machinery.
+project.  Alter Ego (stage 28) built the machinery; Kingmaker (stage 46) reused
+it without changing a line of it, which is what the rest of this section is
+really evidence for.
 
 The hidden colour is the one fact the server has and the clients do not (N71,
 N73).  Alter Ego makes it change hands mid-match.
@@ -1713,6 +1739,89 @@ pause already used — rather than a second one.
 ``identity_swap`` is in the snapshot because the table is STOPPED and every
 machine has to agree that it is.  It never names a colour, which is what lets a
 replica hold the same value as the authority.
+
+
+KINGMAKER: THE ROLE CHANGES SEATS  (stage 46)
+---------------------------------------------
+The other face of the same physical card.  Piotrek's copy is Alter Ego and
+keeps the role where it is; a hunter's copy is Kingmaker and MOVES it, and the
+new Piotrek then picks a colour through the five steps above, unaltered.
+
+THE ROLE IS THE CHARACTER CARD AND NOTHING ELSE.  ``Player.role`` is derived
+from ``character.is_piotrek`` — ``players/roles.py`` exists so the question is
+asked once — so the whole of the role swap is:
+
+    piotrek.character, challenger.character = challenger.character, piotrek.character
+
+and every rule that reads the role moves with it, none of them touched:
+``piotrek_seat``, ``seat_order`` (the every-third-slot cadence), the chest
+limit, the Mod Patusa factions, the win conditions, ``swap_identity``'s own
+"only Piotrek" refusal, the right-hand panel, the ability button and the
+hunter notepad.  If you are ever tempted to add a "who is Piotrek" flag, this
+is the reason not to: there is one fact and everything reads it.
+
+THE TWO OPERATIONS ARE ORDERED, AND THE ORDER IS THE DESIGN::
+
+    Plan((SwapPiotrekRole(hunter_seat=actor.index), RequestIdentitySwap()), ...)
+
+The role moves FIRST.  Raise the pause first and ``victory.review`` answers it
+about the man who is about to stop being Piotrek, and ``ask_for_new_identity``
+sends ``identity_required`` to the wrong peer.  Because the role has already
+moved, both of them read ``state.piotrek_seat`` and both find the new owner —
+which is why neither ``victory.py`` nor ``server/room.py`` needed a line.
+
+THE SECRET IS MOVED WITHOUT BEING READ.  ``SwapPiotrekRole`` swaps
+``secret_pawn`` between the two seats.  On a replica that is ``None`` onto
+``None``; on the authority and on the outgoing Piotrek's own machine it is the
+real colour.  The operation never NAMES a colour, so it builds identically
+everywhere (N72), and the colour it moved is given up a moment later by
+``RevealIdentity``.  IT IS NEVER INHERITED — the new Piotrek chooses his own,
+and the one just published is refused him by ``swap_forbidden_pawn``.
+
+WHAT TRAVELS WITH THE ROLE:
+
+  character   yes — it IS the role.
+  skill       yes — the Umiejętność Piotrka belongs to the Piotrek seat.  The
+              hunter had none, so the outgoing Piotrek correctly ends with
+              none.  The CARD is handed over rather than a fresh one dealt,
+              because uses are counted on the physical card (base_card.py).
+  marks       NO.  The notepad is the player's own working-out.  Swapping it
+              would put one player's private deductions on another player's
+              screen — from the one card whose whole job is to move hidden
+              information about carefully.  This is a rule, not an omission.
+
+WHY WHO-PIOTREK-IS IS PUBLIC AND THE COLOUR IS NOT.  These are two different
+facts with two different protections, and conflating them is the mistake to
+avoid here.  The turn order announces Piotrek every round, so the role moving
+is ordinary shared state and rides the ``play_card`` command every replica
+replays.  The colour has never been in a command and still is not.
+
+``piotrek_seat`` IS IN THE SNAPSHOT, and had to be added for this.  Nothing
+else in the fingerprint notices the role moving: ``piotrek_name`` is a
+character TITLE and the titles in play are identical before and after,
+``has_character`` is true on both seats either way, and ``ability_uses`` is
+keyed by seat.  Two machines that disagreed about who Piotrek is used to agree
+about every field in the fingerprint.
+
+NO UI WAS WRITTEN, and none should be.  ``CharacterPanel`` branches on
+``player.is_piotrek``, so the identity badge, the skill card, the Umiejętności
+deck section, the ability button's source and the hunter pawn grid all follow
+the role by themselves.  A "Kingmaker panel" would be a bug.
+
+NOT UNDOABLE.  A checkpoint holds hands, piles, charges and a listed set of
+scalars; it does not hold who has which character card, and ``secret_pawn`` was
+never in it either.  ``SwapPiotrekRole`` closes the turn window outright, and
+``can_undo`` additionally refuses while ``awaiting_identity`` — which also
+closes the same hole under Alter Ego, where an undo mid-swap already lost a
+secret that had been given up.
+
+THE REVEAL IS A RULE OF THE CARD.  Its printed text says the identity is
+revealed (``tożsamość Piotrka jest odkryta``), so the exchange goes through
+``RevealIdentity`` and the notepad resets to the published colour exactly as
+under Alter Ego.  A silent exchange would need a second way of giving up an
+identity, which is the one thing this design exists to avoid.  If the rule at
+the table turns out to be a silent swap, that is the decision to revisit and
+the tests name it.
 
 
 ================================================================================
@@ -2096,10 +2205,12 @@ NOTHING HERE MAY RAISE
 The card-art folder is filled in by hand over months.  It WILL be incomplete,
 one file WILL be a renamed .psd, and none of that may reach the frame loop.
 Every failure path in ``card_art.py`` answers ``None`` and the card renders as
-it always did.  ``_load`` catches broadly ON PURPOSE — pygame raises
+it always did.  ``load_image`` catches broadly ON PURPOSE — pygame raises
 ``pygame.error`` for a truncated PNG, ``FileNotFoundError`` for a file deleted
 since the scan, and ``ValueError`` for a file whose extension lies — and the
-answer to all three is the same one.
+answer to all three is the same one.  It is module level and card backs use it
+too (stage 47): one loader with one failure policy, so a picture cannot become
+able to crash the game by arriving through a different door.
 
 
 TYPOGRAPHY
@@ -2110,6 +2221,99 @@ UI face when none is installed.  The project ships without one: dropping
 not bundle anything proprietary — the project is non-commercial and
 redistributed from GitHub.  Whatever goes in must cover Latin Extended-A or
 Polish titles render as boxes.
+
+
+================================================================================
+CARD BACKS  (stage 47 — the other side of the card)
+================================================================================
+
+Every deck's back is a PICTURE in ``assets/card_backs``.  Five decks, five
+files, and one table that says which is which:
+
+    settings.CARD_BACKS = {
+        DECK_MOVEMENT:  "movement.png",        # Karty Ruchu
+        DECK_MODS:      "mods.png",            # Mody Patusa
+        DECK_CHEST:     "chest.png",           # Karty Skrzyni
+        DECK_SKILLS:    "piotrek_skills.png",  # Umiejętności Piotrka
+        DECK_CHARACTERS:"characters.png",      # the character-EXCHANGE deck
+    }
+
+THAT TABLE IS THE WHOLE CONFIGURATION.  Replacing one back is overwriting a
+file, or changing one line to point at a different one.  ``test_card_backs.py``
+does exactly that and asserts the other four decks come out byte-identical, and
+a second test greps ``render/`` and ``ui/`` for the file names to prove none of
+them leaked into rendering code.  If you ever want to name a card-back file
+outside ``settings.CARD_BACKS``, the answer is no — that is the whole feature.
+
+A TABLE, NOT A SCAN.  ``card_art.py`` scans its folder and folds filenames to
+card titles, because cards are numerous, arrive over months and are addressed
+by a name the owner already knows.  Decks are five constants that will not
+change, so a scan would have meant inventing a second name-folding convention
+and making "which file is the chest back?" a question you answer by listing a
+directory.  Do not "unify" the two systems on the grounds that both load
+pictures.
+
+``DECK_CHARACTERS`` IS A DECK.  Its back is the back of the character-changing
+cards.  It is not a character, not a role, and says nothing about who anybody
+is — a picture on a pile that every player can see cannot carry hidden
+information, and nothing about HIDDEN INFORMATION is touched by any of this.
+
+WHERE IT IS DRAWN
+-----------------
+One place, and it was one place before this stage too:
+
+    ui/hud.py::_deck_section  ->  cards.draw_pile(..., deck_id=deck.id)
+                              ->  draw_back(..., deck_id)
+                              ->  CardRenderer.back(size, color, brightness, deck_id)
+
+``_deck_section`` is shared by the left column (movement, mods, chest) and the
+character panel (piotrek_skills, characters), so all five decks are covered by
+that one call.  Nothing else in the game draws a card back: hands, the card
+library, the reveal overlay and the mod rack all draw FRONTS through
+``draw_in``/``face``.  If a new screen ever needs a back, it passes a deck id
+and gets the right picture with no branch of its own — the same contract
+``face()`` gives Signature Cards.
+
+``back()`` BRANCHES ON ITS FIRST LINE, like ``face()``.  Picture present ->
+``_picture_back``; otherwise the drawn cover it has always painted.  Callers do
+not know which they got.
+
+WHAT HAPPENS TO THE PICTURE, AND WHAT DOES NOT
+----------------------------------------------
+``_picture_back`` does three things and nothing else:
+
+  1. COVER-SCALES through the same ``_cover`` a Signature face uses — cropped,
+     never letterboxed and never stretched.  The shipped backs are ~1060x1490
+     against a card's 1:1.43, so a few pixels come off the long edge.
+  2. Rounds the corners to the card's own radius, so a back has the same
+     silhouette as every other card.
+  3. Adds ``BACK_HOVER_LIGHT * brightness`` to every channel for the deck-panel
+     hover — ADDITIVE, because unlike the drawn back there is no base colour to
+     ``lighten``.
+
+NOTHING IS DRAWN OVER A CARD BACK.  No title, no count, no badge, no frame.
+A back carries no state, which is why it needs none of ``_signature_face``'s
+layout.  The counts live in the panel heading above the pile, where they were.
+
+CACHING
+-------
+``_picture_back`` caches into ``_faces`` under ``("picture_back", deck_id,
+size, step)``, and ``CardBackLibrary`` caches the loaded file per deck.  The
+deck id is in the key because it is what chose the picture: without it the
+movement and chest piles, identical in size, would share one surface.  A pile
+draws three backs and the frame loop draws it sixty times a second; all of that
+is one blit each and zero disk reads after the first.
+
+THE DRAWN BACK IS NOW THE FALLBACK
+----------------------------------
+The bound-cover drawing — gradient, brass frame, corner diamonds, emblem, all
+in ``theme.deck_colors[deck_id]`` — is still there and still tested, but it is
+no longer what the game shows.  It is what a deck gets when its file is missing
+or will not load, and what a clean checkout with no binary assets shows, which
+is the project's standing rule for everything under ``assets/``.  Do not delete
+it, and do not "simplify" ``back()`` by removing the colour parameter: the
+fallback needs it, and ``theme.deck_colors`` is still doing four other jobs
+(discard borders, reveal rings, the recently-played strip).
 
 
 ================================================================================
@@ -3634,8 +3838,10 @@ L4. OUT OF DATE, kept for the history: those four movement cards were finished
     in stage 19, the mods in stages 24-25 and the Chest in stages 27-28. Nothing
     is INERT any more — every card is played and discarded normally; three Chest
     rules and AKO are carried out by the players rather than the engine.
-L4a. Gamechanger, Alter Ego and Kingmaker are PRESENTATION ONLY — they have no
-    gameplay effect yet, as the stage brief specified.
+L4a. OUT OF DATE: Alter Ego got its rule in stage 28 and Kingmaker in stage 46.
+    Gamechanger itself is still presentation only, and correctly so — it is
+    never held as Gamechanger, it becomes one of the two on the way into a
+    hand.
 L4b. PARTLY OUT OF DATE: SKIP_TURN has been enforced since stage 19. EXTRA_TURN
     is still informational, and FORBIDDEN_ADJACENCY is still unread — which by
     N80 means Dług u Tomasza looks implemented and is not.
@@ -3643,9 +3849,9 @@ L5. OUT OF DATE: win detection landed in stage 17 (engine/victory.py) and the
     turn loop in stage 8. What is still missing is turn ENFORCEMENT as an
     optional rule switch, and scoring.
 L6. OUT OF DATE: seven of the eight mods work (stages 24-25) and the Chest is
-    finished (stages 27-28). Every card in the game is PLAYABLE. Three Chest
-    rules are still settled at the table — Nie masz Rosji, chest-Shady and
-    Kingmaker — plus AKO outside it.
+    finished (stages 27-28). Every card in the game is PLAYABLE. TWO Chest
+    rules are still settled at the table — Nie masz Rosji and chest-Shady —
+    plus AKO outside it. Kingmaker was the third until stage 46.
 L7. "hindmost" ties are broken by (position index, stack depth, pawn order).
     This is deterministic but arbitrary; the paper game would have players
     decide.
@@ -4681,6 +4887,32 @@ N139. Never quote a library card's size as a flat share of the viewport. The
    needs and 1280x760 has few of them. A flat share left a card smaller than the
    one in the player's own hand.
 
+N140. Never record who Piotrek is anywhere but the character card. The role is
+   derived from `character.is_piotrek` and NOTHING else, which is the only
+   reason Kingmaker could move it with one assignment and have the turn
+   cadence, the chest limit, the Mod Patusa factions, the win conditions, every
+   "only Piotrek" refusal and the whole right-hand panel follow for free. A
+   cached `piotrek_seat`, a `role` field on Player or an `is_piotrek` boolean
+   set at setup would each be a second copy to fall out of step with it — and
+   the state it would disagree in is the one nobody would look at.
+
+N141. Never move a role, a character or an ability without asking what is in the
+   turn checkpoint. `undo.capture` stores hands, piles, charges, statuses and a
+   LISTED set of scalars; it does not store who holds which character card, and
+   never stored `secret_pawn`. Anything that changes those has to close the
+   window (`_close_turn_window`, as GrantExtraTurn does) rather than leave one
+   open over a state it cannot describe. `_SCALARS` is a list rather than a
+   discovery for exactly this reason: a new field is a deliberate decision
+   about whether a turn may change it.
+
+N142. Never assume the fingerprint notices new shared state. It notices what
+   `snapshot()` names, and nothing else. `piotrek_seat` had to be ADDED in stage
+   46: the character titles in play, `has_character` and the seat-keyed
+   `ability_uses` are all identical before and after a role swap, so two
+   machines that disagreed about who Piotrek is would have agreed about every
+   field in the dictionary. When a stage makes something CHANGEABLE that used
+   to be fixed, that is the moment to ask whether the snapshot can tell.
+
 N104. Never add a rule to `_move_pawn` without asking whether `_move_pawns`
    needs it too. Plagiat! moves backwards through the second handler, so
    Speedrun, Masa solna and Halloween all had to be applied twice. A rule added
@@ -4743,8 +4975,8 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    (double_frequency, edit_mode).  Both normalised() and create_game() use
    dataclasses.replace now, and a test walks every field — keep it that way.
 
-1. THE THREE REMAINING RULINGS — and they are RULINGS, not code. Every card in
-   the game is now playable; what is missing is three mechanics the owner has to
+1. THE TWO REMAINING RULINGS — and they are RULINGS, not code. Every card in
+   the game is now playable; what is missing is two mechanics the owner has to
    specify before anybody can write them:
      * "Nie masz Rosji" — blocking and burning an opponent's move has to say
        WHICH move, chosen WHEN, and what happens if that player has none. The
@@ -4752,10 +4984,11 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
      * Chest "Shady" — taking a special card off another player. `TransferCard`
        already exists (Spy), so this is mostly a question of what "specjalną"
        means and whether the victim chooses.
-     * Kingmaker — swapping roles mid-match. Alter Ego (stage 28) built most of
-       the machinery: a colourless flag, an authority-answered reveal and a
-       reopened colour question. Read "ALTER EGO, AND HOW TO TOUCH THE HIDDEN
-       IDENTITY" before attempting it, and N127 in particular.
+   Kingmaker was the third and was built in stage 46. It is worth reading as
+   the worked example for the two above: the rule was expressible entirely in
+   existing machinery, and the implementation is one Operation, one handler,
+   one executor and one event. See "ALTER EGO, KINGMAKER, AND HOW TO TOUCH THE
+   HIDDEN IDENTITY", and N127 in particular.
    Before writing ANY of them, read TURN INTERRUPTS, FORCED PLAYS AND
    MULTI-SELECT: "act when drawn", "take over a turn", "look into another
    hand", "move several pawns in order" and "steal a card" ALL ALREADY EXIST

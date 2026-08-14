@@ -297,6 +297,30 @@ class RequestIdentitySwap(Operation):
 
 
 @dataclass(frozen=True)
+class SwapPiotrekRole(Operation):
+    """Kingmaker: the Piotrek CHARACTER CARD changes seats.
+
+    Carries a seat and nothing else, and like ``RequestIdentitySwap`` it names
+    NO COLOUR — for the same reason and with an extra one on top.
+
+    The reason it shares: this runs on every replica, and only the authority
+    and Piotrek himself hold the secret, so an operation that mentioned a
+    colour would build differently on different machines.
+
+    The reason it does not need to: WHO Piotrek is has always been public (the
+    turn order literally announces him), so moving the role is an ordinary
+    deterministic change of shared state.  Only the COLOUR is secret, and this
+    operation moves whatever is in the box without looking into it —
+    ``None`` on a replica, the real colour on the two machines entitled to it.
+    ``RequestIdentitySwap`` then follows in the same plan and the colour is
+    given up a moment later through the Alter Ego machinery.
+    """
+
+    #: The hunter who played Kingmaker, and who is about to become Piotrek.
+    hunter_seat: int
+
+
+@dataclass(frozen=True)
 class DrawCards(Operation):
     """Draw cards into a hand, through the ordinary draw path.
 
@@ -3569,3 +3593,51 @@ def _swap_identity(spec: EffectSpec, ctx: EffectContext) -> Resolution:
     if state.identity_swap:
         return Refusal("Zmiana tożsamości już trwa")
     return Plan((RequestIdentitySwap(),), "Alter Ego — nowa tożsamość Piotrka")
+
+
+@effect("swap_roles")
+def _swap_roles(spec: EffectSpec, ctx: EffectContext) -> Resolution:
+    """Kingmaker: the hunter who played it and Piotrek exchange roles.
+
+    THE OTHER HALF OF GAMECHANGER.  Piotrek's copy is Alter Ego and keeps the
+    role where it is; a hunter's copy is Kingmaker and moves it.  Both are the
+    same physical card and both are declared in ``cards.json`` — there is no
+    branch on a title anywhere.
+
+    TWO OPERATIONS, IN THIS ORDER, AND THE ORDER IS THE DESIGN.  The role moves
+    first, so that by the time the pause is raised ``piotrek_seat`` is already
+    the NEW Piotrek: the authority then answers the pause about the seat that
+    now holds the role, and the room asks that seat's peer for a colour.  Doing
+    it the other way round would have asked the question of the man who has
+    just stopped being Piotrek.
+
+    THE COLOUR IS NOT CHOSEN HERE, AND NOT EVEN LOOKED AT.  Kingmaker reuses
+    Alter Ego's machinery wholesale (``RequestIdentitySwap`` → the authority's
+    ``RevealIdentity`` → ``identity_required`` → ``set_identity`` →
+    ``FinishIdentitySwap``), which is why no second identity-selection system
+    exists and why the new Piotrek is asked with the SAME message and the SAME
+    overlay the opening uses.
+
+    ONLY A HUNTER MAY PLAY IT, which is not a formality: the card in Piotrek's
+    hand is Alter Ego and has a different effect, so the only way this handler
+    can see a Piotrek actor is a forged command or a transformation that did
+    not happen.  A Refusal rather than a Fizzle — the card stays in the hand
+    for whoever it belongs to (N99).
+    """
+    state = ctx.state
+    actor = state.player(ctx.actor)
+    if actor is None:
+        return Refusal("Nieznany gracz")
+    if actor.is_piotrek:
+        return Refusal("Piotrek nie zamieni się rolami sam ze sobą")
+    seat = state.piotrek_seat
+    if seat is None:
+        return Refusal("Przy tym stole nie ma Piotrka")
+    if seat == actor.index:
+        return Refusal("Piotrek nie zamieni się rolami sam ze sobą")
+    if state.identity_swap:
+        return Refusal("Zmiana tożsamości już trwa")
+    return Plan(
+        (SwapPiotrekRole(hunter_seat=int(actor.index)), RequestIdentitySwap()),
+        "Kingmaker — zamiana ról i nowa tożsamość Piotrka",
+    )

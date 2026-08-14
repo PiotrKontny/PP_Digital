@@ -92,6 +92,22 @@ def rejection(events):
     return next((e for e in events if isinstance(e, ev.ActionRejected)), None)
 
 
+def deal_gamechanger(game, player):
+    """Deal Gamechanger through the REAL transformation path.
+
+    Deliberately not ``give``: ``give`` puts the printed card in the hand, and
+    what makes this card interesting is that ``_after_draw`` turns it into a
+    different one on the way in.  A test that skipped that would be testing a
+    card no player can ever hold.
+    """
+    deck = game.decks[settings.DECK_CHEST]
+    card = next(c for c in deck.draw_pile if c.title == "Gamechanger")
+    deck.draw_pile.remove(card)
+    game._after_draw(player, card)
+    player.add_card(card)
+    return card
+
+
 # ── part 1: every Chest card is playable ─────────────────────────────────────
 def test_every_chest_card_can_be_played(library):
     """The point of the stage, in one assertion.
@@ -149,24 +165,41 @@ def test_an_undesigned_card_changes_nothing(library):
         [uid for uid in hands[0] if uid != card.uid]
 
 
-def test_kingmaker_is_playable_and_does_nothing(library):
-    """The presentation and the title stay; no mechanic was invented."""
+def test_gamechanger_still_branches_on_the_role(library):
+    """The presentation is the whole of "which card is this" — both ways.
+
+    Stage 45 gave Kingmaker a mechanic; what must NOT have happened is a second
+    road to it.  A hunter's copy is Kingmaker and a Piotrek's copy is Alter Ego
+    because of the ``role_reveal`` entry in cards.json and nothing else.
+    """
     game = make(library)
     hunter = next(p for p in game.players if not p.is_piotrek)
-    deck = game.decks[settings.DECK_CHEST]
-    card = next(c for c in deck.draw_pile if c.title == "Gamechanger")
-    deck.draw_pile.remove(card)
-    game._after_draw(hunter, card)
-    hunter.add_card(card)
+    card = deal_gamechanger(game, hunter)
 
     assert card.title == "Kingmaker", "a hunter's Gamechanger is Kingmaker"
+    assert card.text.startswith("Oprawca i Piotrek")
     assert card.is_playable
-    before = game.snapshot()
-    play(game, hunter.index, card)
-    after = game.snapshot()
+    assert card.definition.effect.type == "swap_roles"
 
-    assert not game.identity_swap, "Kingmaker must not touch the identity"
-    assert after["eliminated"] == before["eliminated"]
+    other = make(library)
+    piotrek = piotrek_of(other)
+    twin = deal_gamechanger(other, piotrek)
+    assert twin.title == "Alter Ego", "and Piotrek's is Alter Ego"
+    assert twin.definition.effect.type == "swap_identity"
+
+
+def test_kingmaker_goes_back_to_the_deck_as_a_gamechanger(library):
+    """One copy is printed, so the pile must not slowly fill with Kingmakers."""
+    game = make(library)
+    hunter = next(p for p in game.players if not p.is_piotrek)
+    card = deal_gamechanger(game, hunter)
+    play(game, hunter.index, card)
+
+    deck = game.decks[settings.DECK_CHEST]
+    assert deck.find_discarded(card.uid) is card
+    assert card.title == "Gamechanger", "restored on the way back"
+    assert game.deck_card_count(settings.DECK_CHEST, "Gamechanger") == 1
+    assert game.deck_card_count(settings.DECK_CHEST, "Kingmaker") == 0
 
 
 # ── part 2: Gejtos ───────────────────────────────────────────────────────────
@@ -354,12 +387,7 @@ def piotrek_of(game):
 
 def alter_ego(game):
     """Deal Gamechanger to Piotrek through the real transformation path."""
-    player = piotrek_of(game)
-    deck = game.decks[settings.DECK_CHEST]
-    card = next(c for c in deck.draw_pile if c.title == "Gamechanger")
-    deck.draw_pile.remove(card)
-    game._after_draw(player, card)
-    player.add_card(card)
+    card = deal_gamechanger(game, piotrek_of(game))
     assert card.title == "Alter Ego"
     return card
 
@@ -580,3 +608,415 @@ def test_a_pending_lead_check_does_not_survive_the_swap(library):
         game.apply(followed, local=False)
 
     assert game.pending_lead_check is None
+
+
+# ── part 4: Kingmaker ────────────────────────────────────────────────────────
+#
+# The other face of Gamechanger, built in stage 45 on top of everything Alter
+# Ego already had.  Alter Ego keeps the role where it is and changes the
+# colour; Kingmaker MOVES THE ROLE and then changes the colour by exactly the
+# same road.  So most of what is tested above is tested again here implicitly,
+# and what follows is the part that is new: which seat holds the Piotrek
+# character card afterwards, what went with it, and what deliberately did not.
+def kingmaker(game, hunter=None):
+    """Deal Gamechanger to a hunter, who therefore receives Kingmaker."""
+    hunter = hunter or next(p for p in game.players if not p.is_piotrek)
+    card = deal_gamechanger(game, hunter)
+    assert card.title == "Kingmaker"
+    return hunter, card
+
+
+def answer_authority(game):
+    """Let the authority answer whatever the last command asked of it."""
+    for followed in victory.review(game):
+        game.apply(followed, local=False)
+
+
+def run_kingmaker(game, new_colour: str, hunter=None):
+    """Play Kingmaker and carry the exchange through, as a table would.
+
+    Returns ``(old_seat, new_seat)`` — the seat that WAS Piotrek and the seat
+    that is now.
+    """
+    old_seat = game.piotrek_seat
+    hunter, card = kingmaker(game, hunter)
+    new_seat = hunter.index
+    play(game, new_seat, card)
+    answer_authority(game)
+    assert game.set_piotrek_pawn(new_colour)
+    game.apply(cmd.FinishIdentitySwap(), local=False)
+    return old_seat, new_seat
+
+
+# ── the role actually moves ──────────────────────────────────────────────────
+def test_the_hunter_who_plays_kingmaker_becomes_piotrek(library):
+    """Point 3 of the brief, and the reason the card exists."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+
+    assert old_seat != new_seat
+    assert game.piotrek_seat == new_seat
+    assert game.player(new_seat).is_piotrek
+    assert game.player(new_seat).role.is_piotrek
+
+
+def test_the_old_piotrek_becomes_the_hunter_who_played_it(library):
+    """Not "a hunter" — THAT hunter.  The two character cards change hands."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter = next(p for p in game.players if not p.is_piotrek)
+    was = hunter.display_character
+    assert was != "Piotrek"
+
+    old_seat, new_seat = run_kingmaker(game, "zielony", hunter)
+
+    assert game.player(old_seat).display_character == was
+    assert not game.player(old_seat).is_piotrek
+    assert game.player(new_seat).display_character == "Piotrek"
+
+
+def test_nobody_becomes_a_character_called_kingmaker(library):
+    """Kingmaker is a CARD.  The characters in play are the ones that were dealt."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    before = sorted(p.display_character for p in game.players)
+
+    run_kingmaker(game, "zielony")
+
+    assert sorted(p.display_character for p in game.players) == before
+    assert "Kingmaker" not in before
+    assert game.deck_card_count(settings.DECK_CHARACTERS, "Kingmaker") == 0
+
+
+def test_exactly_one_player_is_piotrek_at_every_step(library):
+    """Never both, never neither — including halfway through the exchange."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+
+    def counted():
+        return sum(1 for p in game.players if p.is_piotrek)
+
+    assert counted() == 1
+    play(game, hunter.index, card)
+    assert counted() == 1, "the role moved atomically with the play"
+    answer_authority(game)
+    assert counted() == 1
+    game.set_piotrek_pawn("zielony")
+    game.apply(cmd.FinishIdentitySwap(), local=False)
+    assert counted() == 1
+
+
+# ── the new identity ─────────────────────────────────────────────────────────
+def test_the_new_piotrek_is_asked_for_a_fresh_colour(library):
+    """Point 5: the same pending-selection state the opening and Alter Ego use."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+
+    play(game, hunter.index, card)
+    assert game.identity_swap == game.SWAP_REVEALING
+    answer_authority(game)
+    assert game.identity_swap == game.SWAP_CHOOSING
+    assert game.awaiting_identity, "the table is waiting for the answer"
+    assert game.piotrek_seat == hunter.index, "and it is HIM being waited on"
+
+
+def test_the_old_colour_is_not_inherited(library):
+    """Point 6, stated as bluntly as the brief states it.
+
+    The failure this guards against is the obvious shortcut — moving the
+    character card and leaving the colour attached to it — which would hand the
+    new Piotrek an identity the hunters have already been told about.
+    """
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+
+    play(game, hunter.index, card)
+    answer_authority(game)
+
+    assert game.piotrek_pawn is None, "between the two there is no identity at all"
+    assert game.player(hunter.index).secret_pawn is None
+    assert game.swap_forbidden_pawn() == "czerwony"
+    assert not game.set_piotrek_pawn("czerwony"), "and he may not take it back"
+    assert game.set_piotrek_pawn("zielony")
+    assert game.player(hunter.index).secret_pawn == "zielony"
+
+
+def test_the_colour_is_left_behind_on_neither_seat(library):
+    """The outgoing Piotrek does not keep it either — he is a hunter now."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+
+    assert game.player(old_seat).secret_pawn is None
+    assert game.player(new_seat).secret_pawn == "zielony"
+
+
+def test_the_card_itself_names_no_colour(library):
+    """N72: the handler runs on machines that have never been told the secret."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+
+    events = play(game, hunter.index, card)
+    swapped = next(e for e in events if isinstance(e, ev.RolesSwapped))
+    started = next(e for e in events if isinstance(e, ev.IdentitySwapStarted))
+
+    assert "czerwony" not in repr(events)
+    assert (swapped.from_seat, swapped.to_seat) == (game.piotrek_seat, hunter.index) \
+        or swapped.to_seat == hunter.index
+    assert started.piotrek_seat == hunter.index, "the NEW Piotrek is asked"
+
+
+def test_a_replica_decides_nothing_during_a_kingmaker(library):
+    """The same safety net Alter Ego has: no colour, no verdict."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+    play(game, hunter.index, card)
+    # A replica has never been told the colour, wherever it now lives.
+    for player in game.players:
+        player.secret_pawn = None
+
+    assert victory.review(game) == []
+
+
+# ── abilities and permissions ────────────────────────────────────────────────
+def test_the_piotrek_skill_goes_with_the_role(library):
+    """Umiejętności Piotrka belong to the Piotrek seat, and only to it."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    skill = piotrek_of(game).skill
+    assert skill is not None, "Piotrek starts with one"
+
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+
+    assert game.player(new_seat).skill is skill, "the same physical card"
+    assert game.player(old_seat).skill is None, "a hunter has no skill"
+
+
+def test_the_former_piotrek_loses_piotrek_only_controls(library):
+    """Point 9.  The refusals are the engine's, not the interface's."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+
+    events = game.apply(cmd.DrawSkill(player_index=old_seat))
+    assert rejection(events) is not None, "only Piotrek draws a skill"
+    assert game.player(old_seat).skill is None
+
+    events = game.apply(cmd.DrawSkill(player_index=new_seat))
+    assert rejection(events) is None, "and the new one may"
+
+
+def test_alter_ego_follows_the_role_to_its_new_owner(library):
+    """The clearest proof that permissions moved: the OTHER face of this card.
+
+    Alter Ego refuses anybody who is not Piotrek.  After a Kingmaker it must
+    refuse the man who used to be and accept the man who now is.
+    """
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+
+    spec = effects.EffectSpec(type="swap_identity")
+    assert isinstance(
+        effects.resolve_spec(game, spec, actor=old_seat), effects.Refusal)
+    assert isinstance(
+        effects.resolve_spec(game, spec, actor=new_seat), effects.Plan)
+
+
+def test_a_hunters_character_ability_moves_with_its_card(library):
+    """Uses are counted on the physical card, so they travel with it (N.B.).
+
+    This is the project's existing rule — "hand it to somebody else and the
+    remaining uses go with it" — and Kingmaker is deliberately not an exception
+    to it.  What matters for the swap is that the CHARGES did not silently
+    reset and did not stay behind on the wrong seat.
+    """
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter = next(p for p in game.players
+                  if not p.is_piotrek and p.character is not None
+                  and p.character.uses_left is not None)
+    card = hunter.character
+    card.spend_use()
+    left = card.uses_left
+
+    old_seat, new_seat = run_kingmaker(game, "zielony", hunter)
+
+    assert game.player(old_seat).character is card
+    assert game.player(old_seat).character.uses_left == left
+    assert game.player(new_seat).character.is_piotrek
+
+
+def test_only_a_hunter_may_play_kingmaker(library):
+    """Piotrek's copy is Alter Ego; a forged swap_roles from him is refused."""
+    game = make(library)
+    seat = game.piotrek_seat
+    piotrek_of(game).secret_pawn = "czerwony"
+
+    spec = effects.EffectSpec(type="swap_roles")
+    result = effects.resolve_spec(game, spec, actor=seat)
+    assert isinstance(result, effects.Refusal)
+    assert not game.identity_swap
+
+
+def test_a_second_kingmaker_is_refused_while_one_is_running(library):
+    """Two exchanges at once would leave nobody able to say who Piotrek is."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+    play(game, hunter.index, card)
+
+    other = next(p for p in game.players
+                 if not p.is_piotrek and p.index != hunter.index)
+    spec = effects.EffectSpec(type="swap_roles")
+    assert isinstance(
+        effects.resolve_spec(game, spec, actor=other.index), effects.Refusal)
+
+
+# ── role-dependent game logic ────────────────────────────────────────────────
+def test_the_turn_order_follows_the_role(library):
+    """Piotrek acts on every third slot — and it is the new one who does."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+
+    order = game.seat_order(game.round_number)
+    piotrek_slots = [i for i, seat in enumerate(order) if seat == new_seat]
+    assert len(piotrek_slots) > 1, "the Piotrek seat holds several slots"
+    assert all(i % RULES.piotrek_turn_period == 0 for i in piotrek_slots)
+    assert order.count(old_seat) >= 1, "and the old one is an ordinary hunter"
+
+
+def test_victory_is_judged_against_the_new_owner(library):
+    """Point 10: the win condition reads the role, not a remembered seat."""
+    game = make(library)
+    clear_board(game)
+    piotrek_of(game).secret_pawn = "czerwony"
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+
+    place(game, "zielony", game.board.last_position)
+    followed = victory.review(game)
+    assert followed and isinstance(followed[0], cmd.DeclareVictory)
+    assert followed[0].pawn_id == "zielony"
+    assert followed[0].piotrek_seat == new_seat, "the seat that holds the role"
+
+
+def test_the_chest_limit_follows_the_role(library):
+    """Piotrek and a hunter are allowed different numbers of Chest cards.
+
+    Compared against the limit the ORIGINAL Piotrek had rather than against
+    ``RULES`` directly, because the limit is role plus whatever the held skill
+    overrides — and the skill travels with the role, so the new Piotrek is
+    entitled to exactly the number the old one was.  Asserting the raw rule
+    would be asserting that the skill did NOT travel.
+    """
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    was = game.chest_limit(piotrek_of(game))
+    hunter = next(p for p in game.players if not p.is_piotrek)
+    hunter_was = game.chest_limit(hunter)
+
+    old_seat, new_seat = run_kingmaker(game, "zielony", hunter)
+
+    assert game.chest_limit(game.player(new_seat)) == was
+    assert game.chest_limit(game.player(old_seat)) == hunter_was
+
+
+# ── the pause, and hidden information ────────────────────────────────────────
+def test_the_table_cannot_move_before_the_new_colour_is_chosen(library):
+    """Point 13, and it holds against a client that draws no overlay."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+    play(game, hunter.index, card)
+
+    for seat in (hunter.index, game.active_player_index):
+        problem = game.authorise_remote(cmd.EndTurn(player_index=seat), seat)
+        assert problem is not None and "tożsamość" in problem
+
+    answer_authority(game)
+    game.set_piotrek_pawn("zielony")
+    game.apply(cmd.FinishIdentitySwap(), local=False)
+    assert not game.awaiting_identity
+    assert game.authorise_remote(
+        cmd.EndTurn(player_index=game.active_player_index),
+        game.active_player_index) is None
+
+
+def test_the_exchange_cannot_be_half_undone(library):
+    """A checkpoint holds cards and scalars, not who holds which character.
+
+    So the window is closed by the exchange rather than left open over a state
+    it cannot describe.  This also closes the same hole under Alter Ego.
+    """
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter, card = kingmaker(game)
+    play(game, hunter.index, card)
+
+    assert not game.can_undo(hunter.index)
+    events = game.apply(cmd.UndoMove(player_index=hunter.index), local=False)
+    assert rejection(events) is not None
+    assert game.piotrek_seat == hunter.index, "the exchange stands"
+
+
+def test_nobodys_notepad_changes_hands(library):
+    """The marks are a player's own working-out, not part of the role.
+
+    Swapping them would put one player's private deductions on another
+    player's screen, which is the one thing this card must not do.
+    """
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    hunter = next(p for p in game.players if not p.is_piotrek)
+    hunter.marks = {"żółty", "niebieski"}
+
+    old_seat, new_seat = run_kingmaker(game, "zielony", hunter)
+
+    assert game.player(new_seat).marks == {"żółty", "niebieski"}, "his own"
+    assert game.player(old_seat).marks == set(), "and none of somebody else's"
+
+
+def test_the_snapshot_notices_the_role_moving_and_names_no_colour(library):
+    """Every replica has to agree who Piotrek is, and learn nothing else."""
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    before = game.snapshot()
+    old_seat, new_seat = run_kingmaker(game, "zielony")
+    after = game.snapshot()
+
+    assert before["piotrek_seat"] == old_seat
+    assert after["piotrek_seat"] == new_seat
+    assert before != after, "a role swap moves the fingerprint"
+    # A SEAT NUMBER, never a colour.  The pawn ids in ``tokens`` are the board
+    # and are there in every snapshot ever taken, so the honest question is
+    # whether any field CARRIES the secret — and none does.
+    assert isinstance(after["piotrek_seat"], int)
+    assert "secret" not in after and "piotrek_pawn" not in after
+    assert all("secret" not in seat for seat in after["players"])
+    # The colour just given up is public by the card's own text; the new one
+    # is not, and the only place a snapshot names colours is the notepad.
+    assert after["eliminated"] == ["czerwony"]
+
+
+def test_the_notepad_resets_the_way_the_card_says(library):
+    """The printed text: "tożsamość Piotrka jest odkryta".
+
+    The reveal is a RULE of this card, not an accident of the mechanism, and it
+    runs through Alter Ego's machinery — so the crossings about an identity
+    that no longer exists go, and the one that survives is the colour just
+    given up.
+    """
+    game = make(library)
+    piotrek_of(game).secret_pawn = "czerwony"
+    game.eliminated_pawns = ["żółty", "różowy"]
+
+    run_kingmaker(game, "zielony")
+
+    assert game.eliminated_pawns == ["czerwony"]

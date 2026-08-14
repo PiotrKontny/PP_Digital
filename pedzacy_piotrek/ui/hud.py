@@ -136,8 +136,14 @@ def _deck_section(
     for rect in (draw_rect, disc_rect):
         r.inset_well(rect.inflate(6, 6), surface, radius=max(6, rect.height // 14))
 
+    # ``deck_id`` is what picks the card back — every deck has its own picture,
+    # configured in ``settings.CARD_BACKS``.  Passing the deck's identity rather
+    # than naming an asset is what keeps this file out of the business of
+    # knowing which file is which; ``color`` still dresses the discard pile and
+    # the drawn fallback back.
     ctx.cards.draw_pile(draw_rect.x, draw_rect.y - int(3 * hover), deck.draw_count,
-                        color, surface, size=size, brightness=hover)
+                        color, surface, size=size, brightness=hover,
+                        deck_id=deck.id)
 
     top = deck.top_discard
     if top is not None:

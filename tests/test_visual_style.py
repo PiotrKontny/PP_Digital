@@ -137,7 +137,16 @@ def test_a_card_is_shaded_rather_than_flat(rendered):
     assert luminance(top) > luminance(bottom) + 4, "lit from above"
 
 
-def test_deck_backs_use_the_themed_colours(rendered):
+def test_the_drawn_fallback_back_uses_the_themed_colours(rendered):
+    """The back painted when a deck has NO picture (stage 47).
+
+    Since stage 47 the back of a card is artwork from ``assets/card_backs`` and
+    this is the fallback — what a deck gets when its file is missing, and what
+    a clean checkout with no binary assets shows.  It is still held to the
+    concept's palette, because a deck that loses its picture must still look
+    like this game.  Passing no ``deck_id`` is what selects it; the pictures
+    themselves are covered by ``tests/test_card_backs.py``.
+    """
     app, screen = rendered
     for deck_id in settings.TABLE_DECKS:
         colour = THEME.deck_colors[deck_id]
@@ -146,6 +155,23 @@ def test_deck_backs_use_the_themed_colours(rendered):
         assert luminance(middle) < 150, "a deck back is a bound cover, not paper"
         dominant = max(range(3), key=lambda i: middle[i])
         assert dominant == max(range(3), key=lambda i: colour[i])
+
+
+def test_the_decks_on_screen_show_their_artwork_backs(rendered):
+    """And the NORMAL path is the artwork, not the drawing above.
+
+    A back that quietly stopped resolving its picture would leave every test
+    here passing, because the fallback is themed to look right.  This is the
+    one that notices.
+    """
+    app, screen = rendered
+    for deck_id in settings.TABLE_DECKS:
+        assert screen.cards.backs.has_back(deck_id), f"{deck_id} has no artwork"
+        picture = screen.cards.back((120, 171), None, 0.0, deck_id)
+        drawn = screen.cards.back((120, 171), THEME.deck_colors[deck_id])
+        assert (pygame.image.tostring(picture, "RGBA")
+                != pygame.image.tostring(drawn, "RGBA")), \
+            f"{deck_id} is still painting the generated back"
 
 
 # ── consistency ──────────────────────────────────────────────────────────────

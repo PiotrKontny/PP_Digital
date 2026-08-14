@@ -2974,3 +2974,164 @@ def test_clicking_the_button_is_not_swallowed_by_the_board(screen):
     click(screen, screen.app.layout.undo_button_rect().center)
     assert screen.state.board.position_of_pawn("żółty") == where - 1
     assert screen.board_view.dragging is None, "and the board did not start a drag"
+
+
+# ── Kingmaker: the panels swap over with the role (stage 45) ─────────────────
+#
+# The point of these is that NO Kingmaker UI was written.  The right-hand panel
+# has always branched on ``player.is_piotrek``; the role swap changes that fact
+# and the interface is supposed to follow it without being told.  So what is
+# under test is really that nothing here is special-cased — the new Piotrek
+# gets the ordinary Piotrek panel, the old one gets the ordinary hunter panel,
+# and the Piotrek-only controls move with them.
+def kingmaker_seats(screen: GameScreen):
+    """Play a Kingmaker and finish the exchange.  Returns (old, new) seats.
+
+    Driven through the ordinary command path — the same road the card takes in
+    a real match — because a test that set ``player.character`` by hand would
+    prove only that the panel reads a field.
+    """
+    state = screen.state
+    old_seat = state.piotrek_seat
+    state.player(old_seat).secret_pawn = "czerwony"
+    hunter = next(p for p in state.players if not p.is_piotrek)
+
+    deck = state.deck(settings.DECK_CHEST)
+    card = next(c for c in deck.draw_pile if c.title == "Gamechanger")
+    deck.draw_pile.remove(card)
+    state._after_draw(hunter, card)
+    hunter.add_card(card)
+    assert card.title == "Kingmaker"
+
+    screen.submit(cmd.PlayCard(player_index=hunter.index, card_uid=card.uid))
+    assert state.set_piotrek_pawn("zielony")
+    screen.submit(cmd.FinishIdentitySwap())
+    return old_seat, hunter.index
+
+
+def test_the_new_piotrek_gets_the_ordinary_piotrek_panel(screen):
+    """Same panel, same badge, same skill deck — nothing built for this card."""
+    old_seat, new_seat = kingmaker_seats(screen)
+    screen.view_seat = new_seat
+    frame(screen)
+
+    player = screen.state.player(new_seat)
+    assert player.is_piotrek
+    assert player.display_character == "Piotrek"
+    # ``show_skill`` IS the Piotrek panel: the identity badge above it, the
+    # Umiejętności deck below it and the skill card in it all hang off this.
+    rects = screen.app.layout.character_panel(player.is_piotrek)
+    assert "identity" in rects and "skill_draw" in rects
+    assert player.secret_pawn == "zielony", "the badge has a colour to show"
+
+
+def test_the_former_piotrek_gets_the_ordinary_hunter_panel(screen):
+    """And loses the badge, the skill card and the Umiejętności deck with it."""
+    old_seat, new_seat = kingmaker_seats(screen)
+    screen.view_seat = old_seat
+    frame(screen)
+
+    player = screen.state.player(old_seat)
+    assert not player.is_piotrek
+    assert player.display_character != "Piotrek"
+    assert player.skill is None, "no Piotrek skill card left in the panel"
+    # ``skill_draw`` is the Umiejętności deck and exists only on a Piotrek
+    # panel.  The identity RECT is always computed — the badge is only PAINTED
+    # when the seat is Piotrek's — so what is asserted here is the fact the
+    # painting hangs off, not the geometry.
+    rects = screen.app.layout.character_panel(player.is_piotrek)
+    assert "skill_draw" not in rects and "skill_label_y" not in rects
+    assert player.secret_pawn is None, "and no colour to show"
+
+
+def test_the_notepad_appears_for_the_former_piotrek(screen):
+    """The pawn grid is drawn for hunters only, so it arrives with the role."""
+    old_seat, new_seat = kingmaker_seats(screen)
+    layout = screen.app.layout
+
+    screen.view_seat = old_seat
+    frame(screen)
+    assert layout.pawn_grid_top(screen.state.player(old_seat).is_piotrek)
+
+    # And the man who now hides behind a colour does not get one.
+    screen.view_seat = new_seat
+    frame(screen)
+    assert screen.state.player(new_seat).is_piotrek
+
+
+def test_the_skill_deck_click_moves_to_the_new_piotrek(screen):
+    """The Piotrek-only exchange control, tested by CLICKING it.
+
+    This is the one that would catch a panel that had merely been hidden: the
+    rect is only offered on a Piotrek panel, and the engine only accepts
+    ``DrawSkill`` from a Piotrek seat, so the two have to agree about who that
+    is.
+    """
+    old_seat, new_seat = kingmaker_seats(screen)
+    state = screen.state
+
+    screen.view_seat = new_seat
+    frame(screen)
+    was = state.player(new_seat).skill
+    rects = screen.app.layout.character_panel(True)
+    click(screen, rects["skill_draw"].center)
+    assert state.player(new_seat).skill is not None
+    assert state.player(new_seat).skill is not was, "he exchanged it"
+
+    # The former Piotrek has no such rect on his panel at all.
+    screen.view_seat = old_seat
+    frame(screen)
+    assert "skill_draw" not in screen.app.layout.character_panel(False)
+
+
+def test_the_ability_button_follows_the_role(screen):
+    """It reads ``skill`` for Piotrek and ``character`` for a hunter.
+
+    Two different cards, two different decks and two different rects — and the
+    only thing that chooses between them is the role that just moved.
+    """
+    old_seat, new_seat = kingmaker_seats(screen)
+    state = screen.state
+
+    screen.view_seat = new_seat
+    frame(screen)
+    assert state.player(new_seat).is_piotrek
+    assert screen.app.layout.ability_button_rect(True)
+
+    screen.view_seat = old_seat
+    frame(screen)
+    assert not state.player(old_seat).is_piotrek
+    assert screen.app.layout.ability_button_rect(False)
+
+
+def test_the_identity_overlay_opens_for_the_new_piotrek(screen):
+    """The pending selection is the EXISTING overlay, reached the existing way.
+
+    ``match_start`` is the opening overlay; Alter Ego already reused it, and
+    Kingmaker reuses it again without either of them knowing about the other.
+    """
+    state = screen.state
+    old_seat = state.piotrek_seat
+    state.player(old_seat).secret_pawn = "czerwony"
+    hunter = next(p for p in state.players if not p.is_piotrek)
+    deck = state.deck(settings.DECK_CHEST)
+    card = next(c for c in deck.draw_pile if c.title == "Gamechanger")
+    deck.draw_pile.remove(card)
+    state._after_draw(hunter, card)
+    hunter.add_card(card)
+
+    screen.submit(cmd.PlayCard(player_index=hunter.index, card_uid=card.uid))
+    frame(screen)
+
+    assert state.awaiting_identity
+    assert screen.match_start.active, "the table is asking for a colour"
+    offered = {p["id"] for p in screen.match_start.pawns}
+    assert "czerwony" not in offered, "minus the one just given up"
+    assert state.piotrek_seat == hunter.index
+
+    # Answering it through the overlay resumes the table, as at the opening.
+    screen._choose_identity("zielony")
+    frame(screen)
+    assert not state.awaiting_identity
+    assert not screen.match_start.active
+    assert state.player(hunter.index).secret_pawn == "zielony"

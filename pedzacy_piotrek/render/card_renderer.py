@@ -31,6 +31,7 @@ from ..cards.loader import ContentLibrary
 from ..config import settings
 from ..config.theme import darken, lighten, mix
 from .card_art import CardArtLibrary
+from .card_back import CardBackLibrary
 from .renderer import Renderer
 
 Color = Tuple[int, int, int]
@@ -81,6 +82,14 @@ SIGNATURE_VEIL_ALPHA = 86
 #: is exactly the mistake ``SIZE_STEP`` exists to prevent one axis over.
 REVEAL_STEPS = 8
 
+# ── card backs ───────────────────────────────────────────────────────────────
+#: How much light a fully hovered deck pile gains, added to every channel of
+#: the printed back.  The drawn back lightens its base colour by 22%; this is
+#: the equivalent for a picture, which has no single base colour to lighten.
+#: Kept low on purpose — the shipped backs are already bright metal, and past
+#: about 60 the brass frame clips to white and the emblem disappears into it.
+BACK_HOVER_LIGHT = 42
+
 _CACHE_LIMIT = 320
 
 
@@ -97,7 +106,8 @@ def _lerp(low: float, high: float, t: float) -> float:
 
 class CardRenderer:
     def __init__(self, renderer: Renderer, library: ContentLibrary,
-                 art: Optional[CardArtLibrary] = None) -> None:
+                 art: Optional[CardArtLibrary] = None,
+                 backs: Optional[CardBackLibrary] = None) -> None:
         self.r = renderer
         self.library = library
         self.theme = renderer.theme
@@ -107,6 +117,10 @@ class CardRenderer:
         #: Which cards have full-card artwork.  Injectable so a test can point
         #: at a folder of its own without touching the shipped one.
         self.art = art if art is not None else CardArtLibrary()
+        #: Which picture is the back of which deck.  Injectable for the same
+        #: reason ``art`` is, and SEPARATE from it: a card back is not card
+        #: art, and neither may ever resolve through the other's folder.
+        self.backs = backs if backs is not None else CardBackLibrary()
 
     def clear_cache(self) -> None:
         """Drop cached faces — called when the window resizes."""
@@ -529,9 +543,20 @@ class CardRenderer:
 
     def back(
         self, size: Size = NATIVE_SIZE, color: Optional[Color] = None,
-        brightness: float = 0.0,
+        brightness: float = 0.0, deck_id: Optional[str] = None,
     ) -> pygame.Surface:
         """The back of a card.
+
+        ``deck_id`` selects the PICTURE — the back of a card is the artwork
+        configured for its deck in ``settings.CARD_BACKS``.  This method
+        branches on that at its first line, the way ``face()`` branches on card
+        artwork, so no caller needs to know whether a deck has a picture and no
+        caller ever names a file.
+
+        Without a deck id, or when that deck's picture is missing or will not
+        load, the drawn back below is painted instead: a bound cover in the
+        deck's own colour.  That path is the fallback and the development
+        placeholder, not the normal game path.
 
         ``brightness`` (0..1) lightens the whole back. Deck hovering uses it:
         lifting the card's own colour reads as "this is live" far better than
@@ -539,6 +564,11 @@ class CardRenderer:
         like a rendering artefact.
         """
         step = round(max(0.0, min(1.0, brightness)) * 10) / 10
+
+        picture = self.backs.surface(deck_id)
+        if picture is not None:
+            return self._picture_back(deck_id, picture, size, step)
+
         key = ("back", size, color, step)
         cached = self._faces.get(key)
         if cached is not None:
@@ -573,6 +603,53 @@ class CardRenderer:
                          theme.card_back_deco, 1, surface)
         self.r.diamond((cx, cy), emblem, mix(base, theme.card_back_deco, 0.55), surface)
         self.r.diamond((cx, cy), max(2, emblem // 2), darken(base, 0.5), surface)
+        return self._store(key, surface)
+
+    def _picture_back(
+        self, deck_id: Optional[str], art: pygame.Surface, size: Size, step: float,
+    ) -> pygame.Surface:
+        """A deck whose back is a picture.
+
+        Three things happen to the artwork and nothing else does — a card back
+        carries no text, no badge and no state, so unlike ``_signature_face``
+        there is nothing to lay out over it:
+
+        1. COVER-SCALED through the same ``_cover`` a Signature face uses, so a
+           back is cropped rather than letterboxed or stretched.  The shipped
+           backs are about 1060x1490 against a card's 1:1.43, so the crop is a
+           few pixels off the long edge.
+        2. Corners rounded to the card's own radius, so a picture back has the
+           same silhouette as every other card in the game.
+        3. Brightness added, for the deck-panel hover.  An ADDITIVE wash rather
+           than ``lighten`` on a base colour, because there is no base colour
+           here to lighten — and additive light on the printed brass reads as
+           the same "this pile is live" the drawn back gave.
+
+        Cached by ``(deck_id, size, step)``, so a pile of three backs and the
+        sixty frames a second behind them are one blit each.  ``deck_id`` is in
+        the key because it is what chose the picture: without it the movement
+        and chest piles, identical in size, would share one surface.
+        """
+        key = ("picture_back", deck_id, size, step)
+        cached = self._faces.get(key)
+        if cached is not None:
+            return cached
+
+        w, h = size
+        radius = max(5, int(h * 0.05))
+        surface = self._cover(art, size)
+
+        if step:
+            glow = int(round(BACK_HOVER_LIGHT * step))
+            if glow:
+                wash = pygame.Surface(size, pygame.SRCALPHA)
+                wash.fill((glow, glow, glow, 0))
+                surface.blit(wash, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+
+        mask = pygame.Surface(size, pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), pygame.Rect(0, 0, w, h),
+                         border_radius=radius)
+        surface.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
         return self._store(key, surface)
 
     def empty(self, size: Size = NATIVE_SIZE, label: Optional[str] = None) -> pygame.Surface:
@@ -727,14 +804,14 @@ class CardRenderer:
     def draw_back(
         self, x: int, y: int, color: Optional[Color] = None,
         surface: Optional[pygame.Surface] = None, size: Size = NATIVE_SIZE,
-        brightness: float = 0.0,
+        brightness: float = 0.0, deck_id: Optional[str] = None,
     ) -> pygame.Rect:
         target = self.r.target(surface)
         rect = pygame.Rect(x, y, size[0], size[1])
         self.r.drop_shadow(rect, radius=max(4, int(size[1] * 0.036)),
                            spread=5 + int(4 * brightness), alpha=100,
                            offset=(0, 3), surface=target)
-        target.blit(self.back(size, color, brightness), rect.topleft)
+        target.blit(self.back(size, color, brightness, deck_id), rect.topleft)
         return rect
 
     def draw_empty(
@@ -755,11 +832,16 @@ class CardRenderer:
         empty_label: str = "pusto",
         size: Size = NATIVE_SIZE,
         brightness: float = 0.0,
+        deck_id: Optional[str] = None,
     ) -> pygame.Rect:
         """A draw pile: up to three stacked backs so depth is visible.
 
         Only the top card takes the hover brightness — the ones underneath stay
         in its shadow, which is what stops the effect looking like a light bulb.
+
+        ``deck_id`` is passed straight down to ``back()``, which is where the
+        deck's own picture is chosen.  Every card in a pile belongs to the same
+        deck, so all three backs are the same surface out of the cache.
         """
         if count <= 0:
             return self.draw_empty(x, y, surface, empty_label, size)
@@ -768,7 +850,7 @@ class CardRenderer:
             top = depth == 0
             self.draw_back(
                 x + depth * 2, y + depth * 2 - (lift if top else 0), color, surface,
-                size, brightness if top else 0.0,
+                size, brightness if top else 0.0, deck_id,
             )
         return pygame.Rect(x, y, size[0], size[1])
 

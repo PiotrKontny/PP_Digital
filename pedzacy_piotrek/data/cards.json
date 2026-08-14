@@ -710,7 +710,7 @@
                 "title": "Kingmaker",
                 "text": "Oprawca i Piotrek zamieniają się rolami, tożsamość Piotrka jest odkryta",
                 "effect": {
-                  "type": "manual"
+                  "type": "swap_roles"
                 }
               }
             }

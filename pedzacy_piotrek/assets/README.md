@@ -10,6 +10,7 @@ drawn placeholder steps aside.
 | Folder | What goes in it | How it gets picked up |
 |---|---|---|
 | `card_art/` | **full-card artwork** (Signature Cards) | named after the card — `Troll.png`. See `card_art/README.md` |
+| `card_backs/` | **the back of a card**, one per deck | listed in `settings.CARD_BACKS`. See `card_backs/README.md` |
 | `images/cards/` | small in-card illustrations | set `"image": "cards/kolos.png"` on the card in `data/cards.json` |
 | `images/characters/` | character portraits | same, in `data/characters.json` |
 | `images/board/` | tiles, trees, rocks, huts, bridges | referenced from a board theme in `data/board.json` |
@@ -30,6 +31,11 @@ drawn placeholder steps aside.
 A card may use either, neither, or both; if both, the Signature face wins and
 `image` is simply unused. Everything about the first column is in
 `card_art/README.md`; the rest of this file is about the second.
+
+**Neither of them is `card_backs/`.** Those two are the FRONT of a card and
+belong to one card each; a file in `card_backs/` is the BACK and belongs to a
+whole deck. They never resolve through each other — a card cannot borrow its
+deck's back, and a deck cannot show a card's art. See `card_backs/README.md`.
 
 ## Adding a card with a picture
 
