@@ -41,8 +41,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..cards.loader import ContentLibrary
+from ..config import settings
 from ..config.settings import (RULES, SessionConfig, clamp_ability_uses,
-                               clamp_card_counts, clamp_mod_counts)
+                               clamp_card_counts, clamp_mod_counts,
+                               clean_card_variants)
 from ..engine import commands as cmd
 from ..engine import events as ev
 from ..engine import victory
@@ -243,6 +245,60 @@ class Room:
                 out.extend(self.leave(peer_id))
         return out
 
+    def expire_decisions(self) -> List[Outbound]:
+        """End a Nie masz Rosji window whose time is up.
+
+        THE AUTHORITY OWNS THE CLOCK.  The engine holds how LONG the window is
+        (configuration, identical everywhere and in the snapshot); when it
+        started is wall-clock time, which is different on every machine, so it
+        is noted here and nowhere else.  A client's countdown is a picture of
+        the command this produces arriving.
+
+        Called from the same periodic tick that releases absent players, so it
+        does not depend on anybody happening to send a message — which is
+        precisely the situation a decision window times out in.
+        """
+        state = self.state
+        if state is None or not self.started:
+            return []
+        now = self._clock()
+        # Checking variant 2's two-second pause before the tower comes apart.
+        # Same tick, same clock, no sleep.
+        breakup = state.pending_breakup
+        if breakup is not None:
+            if breakup.opened_at is None:
+                breakup.opened_at = now
+                return []
+            if now - breakup.opened_at < breakup.seconds:
+                return []
+            out = self._authoritative(cmd.ResolveTowerBreakup())
+            out.extend(self.review_victory())
+            return out
+        # Ice Block's window is timed the same way and on the same tick, so a
+        # check cannot sit open for ever because nobody happened to send a
+        # message — which is exactly the situation a timeout exists for.
+        check = state.pending_check
+        if check is not None:
+            if check.opened_at is None:
+                check.opened_at = now
+                return []
+            if now - check.opened_at < check.seconds:
+                return []
+            out = self._authoritative(cmd.ExpireCheckDecision())
+            out.extend(self.review_victory())
+            return out
+        decision = state.pending_movement
+        if decision is None:
+            return []
+        if decision.opened_at is None:
+            decision.opened_at = now
+            return []
+        if now - decision.opened_at < decision.seconds:
+            return []
+        out = self._authoritative(cmd.ExpireMovementDecision())
+        out.extend(self.review_victory())
+        return out
+
     # ── lobby changes a client may ask for ───────────────────────────────────
     def set_nickname(self, peer_id: str, nickname: str) -> List[Outbound]:
         seat = self.lobby.seat_of(peer_id)
@@ -313,13 +369,36 @@ class Room:
         # The other three mappings merge on exactly the same terms, through one
         # loop rather than three copies of the block above — four hand-written
         # merges differing only in their clamp is how one of them stops merging.
+        # ``card_variants`` joins them on exactly the same terms — merged so a
+        # panel that names one card does not wipe the settings of the others,
+        # and cleaned here as well as in the panel because the server settles
+        # what the settings ARE.
         for key, clamp in (("movement_counts", clamp_card_counts),
                            ("chest_counts", clamp_card_counts),
-                           ("ability_uses", clamp_ability_uses)):
+                           ("ability_uses", clamp_ability_uses),
+                           ("card_variants", clean_card_variants)):
             if key in payload:
                 merged = dict(getattr(lobby, key))
                 merged.update(clamp(payload.get(key)))
                 setattr(lobby, key, clamp(merged))
+        if "block_decision_seconds" in payload:
+            lobby.block_decision_seconds = max(
+                RULES.block_decision_min,
+                min(RULES.block_decision_max,
+                    int(payload["block_decision_seconds"])))
+        if "check_decision_seconds" in payload:
+            lobby.check_decision_seconds = max(
+                RULES.block_decision_min,
+                min(RULES.block_decision_max,
+                    int(payload["check_decision_seconds"])))
+        # An unknown variant id is ignored rather than accepted: the lobby
+        # keeps whatever it had, which is a legal table, instead of taking a
+        # value the engine would have to fall back on anyway.
+        for key, table in (("check_variant", settings.CHECK_VARIANTS),
+                           ("victory_variant", settings.VICTORY_VARIANTS)):
+            name = str(payload.get(key, ""))
+            if name in table:
+                setattr(lobby, key, name)
         if "double_percent" in payload:
             lobby.double_percent = max(0, min(100, int(payload["double_percent"])))
         if "debug_version" in payload:

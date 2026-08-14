@@ -108,10 +108,16 @@ def test_every_chest_card_can_be_played(library):
 
 
 def test_an_undesigned_card_resolves_and_is_discarded(library):
-    """Played, said, discarded.  Nothing pretends the rule was applied."""
+    """Played, said, discarded.  Nothing pretends the rule was applied.
+
+    Aimed at Shady, which is still ``manual``.  It used to use Nie masz Rosji,
+    which has since been implemented — a test of "the undesigned path" has to
+    name a card that is actually still on it, or it quietly stops testing
+    anything the day that card is built.
+    """
     game = make(library)
     deck = game.decks[settings.DECK_CHEST]
-    card = give(game, 0, "Nie masz Rosji")
+    card = give(game, 0, "Shady")
     events = play(game, 0, card)
 
     assert game.player(0).card_by_uid(card.uid) is None, "it left the hand"
@@ -121,7 +127,7 @@ def test_an_undesigned_card_resolves_and_is_discarded(library):
     # and it arrives as MoveFizzled rather than ActionRejected — the card was
     # PLAYED, not refused, and the difference is whether it stays in the hand.
     spoken = next((e for e in events if isinstance(e, ev.MoveFizzled)), None)
-    assert spoken is not None and "ruch przeciwnika" in spoken.reason
+    assert spoken is not None and "specjalną kartę" in spoken.reason
 
 
 def test_an_undesigned_card_changes_nothing(library):

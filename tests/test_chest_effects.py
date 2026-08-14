@@ -104,11 +104,12 @@ def test_the_chest_deck_ships_the_counts_the_owner_asked_for(library):
         "Balbinka": 2,
         "Nie masz Rosji": 2,
         "Gambit Patusa": 3,
+        "Herold": 1,
         "Shady": 2,
         "Gejtos": 3,
         "Gamechanger": 1,
     }
-    assert sum(counts.values()) == 17
+    assert sum(counts.values()) == 18
 
 
 def test_the_lobby_defaults_are_the_printed_counts(library):
@@ -171,7 +172,7 @@ def test_every_chest_title_can_still_be_dealt(library):
                                           keep_uids=tuple(uids[-limit:])))
         # Nothing may leak: every card is in a hand, the draw pile or the discard.
         held = sum(len(game.chest_cards(p)) for p in game.players)
-        assert held + deck.draw_count + deck.discard_count == 17, round_number
+        assert held + deck.draw_count + deck.discard_count == 18, round_number
 
     printed = {c.title for c in library.deck(settings.DECK_CHEST).cards}
     assert seen == printed, f"never dealt: {sorted(printed - seen)}"
@@ -470,7 +471,7 @@ def test_rage_quit_runs_the_departure_half(library):
     clear_board(game)
     for offset, pawn_id in enumerate(pawns(game)):
         place(game, pawn_id, 1 + offset)
-    install(game, "Shady", 0)
+    install(game, "Obóz Harcerski", 0)
     hidden = game.hidden_pawn_ids
     assert len(hidden) == 1
 

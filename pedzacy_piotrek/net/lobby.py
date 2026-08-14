@@ -25,11 +25,12 @@ from __future__ import annotations
 import random
 import string
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..config import settings
 from ..config.settings import (RULES, SessionConfig, clamp_ability_uses,
-                               clamp_card_counts, clamp_mod_counts)
+                               clamp_card_counts, clamp_mod_counts,
+                               clean_card_variants)
 
 #: What a player is called when they do not say.
 DEFAULT_NICKNAME = "Player"
@@ -56,6 +57,16 @@ def clean_room_code(code: str) -> str:
     text = (code or "").strip().upper()
     text = "".join(ch for ch in text if ch.isalnum())
     return text.translate(str.maketrans({"0": "O", "1": "I", "L": "I"}))[:CODE_LENGTH]
+
+
+def _one_of(value: Any, table: Mapping[str, str], fallback: str) -> str:
+    """A named choice, or the default when the name is not one we know.
+
+    A lobby packet can come from an older or a newer build, and an unknown
+    variant id is a reason to play the default rather than to crash the table.
+    """
+    name = str(value or "")
+    return name if name in table else fallback
 
 
 @dataclass
@@ -125,6 +136,21 @@ class LobbyState:
     movement_counts: Dict[str, int] = field(default_factory=dict)
     chest_counts: Dict[str, int] = field(default_factory=dict)
     ability_uses: Dict[str, int] = field(default_factory=dict)
+    #: Card title → chosen variant id, for the cards that have variants.  The
+    #: fifth member of the family above and it means what they mean: EMPTY IS
+    #: "as printed", so a host on an older build that sends none of it seats a
+    #: table playing every card's first variant rather than no cards at all.
+    card_variants: Dict[str, str] = field(default_factory=dict)
+    #: Seconds an opponent gets to answer a blockable movement (Nie masz Rosji).
+    block_decision_seconds: int = RULES.block_decision_default
+    #: Ice Block's window, and the two rule variants.  Carried through the
+    #: lobby the same way everything else is, so the host's choice reaches
+    #: every client and the fingerprint covers it.
+    check_decision_seconds: int = RULES.check_decision_default
+    check_variant: str = "continue"
+    victory_variant: str = "own_pawn"
+    #: Skills whose owner also pays when Herold copies them.
+    copy_consumes_use: Tuple[str, ...] = ()
     double_percent: int = RULES.double_frequency_default
     #: Development option: a two-player table is enough to start.  Set by the
     #: host and broadcast, so every client shows the same requirement.
@@ -216,6 +242,12 @@ class LobbyState:
             movement_counts=dict(self.movement_counts),
             chest_counts=dict(self.chest_counts),
             ability_uses=dict(self.ability_uses),
+            card_variants=dict(self.card_variants),
+            block_decision_seconds=self.block_decision_seconds,
+            check_decision_seconds=self.check_decision_seconds,
+            check_variant=self.check_variant,
+            victory_variant=self.victory_variant,
+            copy_consumes_use=tuple(self.copy_consumes_use),
             character_choices=[s.character or None for s in ordered],
             double_frequency=self.double_percent / 100.0,
             debug_version=self.debug_version,
@@ -248,6 +280,12 @@ class LobbyState:
             "movement_counts": clamp_card_counts(self.movement_counts),
             "chest_counts": clamp_card_counts(self.chest_counts),
             "ability_uses": clamp_ability_uses(self.ability_uses),
+            "card_variants": clean_card_variants(self.card_variants),
+            "block_decision_seconds": self.block_decision_seconds,
+            "check_decision_seconds": self.check_decision_seconds,
+            "check_variant": self.check_variant,
+            "victory_variant": self.victory_variant,
+            "copy_consumes_use": list(self.copy_consumes_use),
             "double_percent": self.double_percent,
             "debug_version": self.debug_version,
             "started": self.started,
@@ -270,6 +308,21 @@ class LobbyState:
             movement_counts=clamp_card_counts(raw.get("movement_counts")),
             chest_counts=clamp_card_counts(raw.get("chest_counts")),
             ability_uses=clamp_ability_uses(raw.get("ability_uses")),
+            card_variants=clean_card_variants(raw.get("card_variants")),
+            block_decision_seconds=int(raw.get(
+                "block_decision_seconds", RULES.block_decision_default)),
+            check_decision_seconds=int(raw.get(
+                "check_decision_seconds", RULES.check_decision_default)),
+            # An unknown id from an older or newer build falls back to the
+            # default rather than crashing the lobby.
+            check_variant=_one_of(raw.get("check_variant"),
+                                  settings.CHECK_VARIANTS, "continue"),
+            victory_variant=_one_of(raw.get("victory_variant"),
+                                    settings.VICTORY_VARIANTS, "own_pawn"),
+            # A list of skill NAMES, so an unknown one from another build is
+            # simply a name nothing matches rather than an error.
+            copy_consumes_use=tuple(
+                str(name) for name in (raw.get("copy_consumes_use") or ())),
             double_percent=int(raw.get("double_percent",
                                        RULES.double_frequency_default)),
             debug_version=bool(raw.get("debug_version", False)),

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Tuple
 
 # ── paths ────────────────────────────────────────────────────────────────────
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -119,6 +119,22 @@ class Rules:
 
     #: Piotrek acts on every Nth turn slot of a round (slot 0, 3, 6, ...).
     piotrek_turn_period: int = 3
+
+    #: How long an opponent has to decide whether to block a movement (Nie
+    #: masz Rosji), in seconds.  A NUMBER and not a constant in the gameplay
+    #: code, because the table has to be able to try 3 seconds and 12 — which
+    #: is the whole reason the lobby can set it.
+    block_decision_default: int = 7
+    block_decision_min: int = 1
+    block_decision_max: int = 30
+    #: Ice Block's window.  A separate default from the movement one because
+    #: the brief asks for ten seconds and because refusing a check is a bigger
+    #: decision than letting a pawn move; the LIMITS are shared, so one clamp
+    #: and one lobby control cover both.
+    check_decision_default: int = 10
+    #: How long a failed check under variant 2 waits before the tower comes
+    #: apart.  A deadline on the authority's clock, never a sleep.
+    tower_breakup_seconds: float = 2.0
 
     max_name_length: int = 16
 
@@ -249,6 +265,30 @@ SHOW_TILE_NUMBERS = True
 NETWORK_FILE = DATA_DIR / "network.json"
 
 
+# ── match variants ───────────────────────────────────────────────────────────
+# Two lobby choices that change a RULE rather than a number.  Declared as
+# id -> label so the lobby, the settings panel and the config all read the same
+# list: adding a third answer is one entry here, not a new control.
+#
+# THE FIRST ENTRY OF EACH IS THE GAME AS IT SHIPPED, and is what an older
+# client, a saved match or a test that never opened the panel gets.
+# Each entry is ``id -> (short name, description)``.  TWO STRINGS, NOT ONE, and
+# the split is the whole point: the stepper's well is a small box between -1 and
+# +1 and only ever holds the NAME, exactly as a card variant's well holds
+# "Wariant 1".  The description belongs in the row's help line under the title,
+# where every other tab already puts it.  Folding them into one string is what
+# put a sentence inside the well and pushed it over both buttons.
+CHECK_VARIANTS: dict[str, tuple[str, str]] = {
+    "continue": ("Wariant 1", "nieudany check nic nie zmienia"),
+    "break_tower": ("Wariant 2", "nieudany check rozbija wieżę"),
+}
+
+VICTORY_VARIANTS: dict[str, tuple[str, str]] = {
+    "own_pawn": ("Wariant 1", "wygrywa pionek Piotrka"),
+    "any_pawn": ("Wariant 2", "wygrywa dowolny pionek"),
+}
+
+
 @dataclass
 class SessionConfig:
     """Everything chosen in the pre-game menu / future lobby.
@@ -281,6 +321,18 @@ class SessionConfig:
     #: "as printed", exactly as the count mappings do, so a table that never
     #: opened the panel gets the values in characters.json.
     ability_uses: dict[str, int] = field(default_factory=dict)
+    #: Card title → the id of the variant this match plays it under.  EMPTY
+    #: MEANS "as printed", exactly as the four mappings above do, so a match
+    #: built by an older client or by a test that never opened the panel plays
+    #: every card's FIRST variant — which is the behaviour that shipped before
+    #: variants existed.  A title with no variants, or an id the card does not
+    #: declare, is ignored rather than applied.
+    card_variants: dict[str, str] = field(default_factory=dict)
+    #: Seconds an eligible opponent gets to answer a movement they may block.
+    #: Configured in the lobby; the ENGINE holds the number and the interface
+    #: only draws the countdown, so a client with a fast clock cannot give
+    #: itself longer to think.
+    block_decision_seconds: int = RULES.block_decision_default
     character_choices: list[str | None] = field(default_factory=list)
     #: Probability that a row of the board is widened into a doubled position
     #: (12a / 12b).  ``None`` keeps the board theme's fixed pattern.
@@ -301,6 +353,34 @@ class SessionConfig:
     #: this off and the colour is dealt from the seed as it always was — with
     #: everybody at one keyboard there is no secret to keep and nobody to ask.
     piotrek_picks_pawn: bool = False
+    #: Seconds Piotrek gets to answer a check he may refuse with Ice Block.
+    #: Same shape and the same clamp as ``block_decision_seconds``: the ENGINE
+    #: holds the number, the interface only draws the countdown.
+    check_decision_seconds: int = RULES.check_decision_default
+    #: What a FAILED check does to the tower.
+    #:
+    #: ``"continue"`` is the game as it has always been — the colour is crossed
+    #: off and play goes on.  ``"break_tower"`` adds the breakup on top of
+    #: that; it does not replace the crossing-off.  A string rather than a bool
+    #: because a third answer is likelier here than in most places, and an
+    #: unknown value falls back to the default rather than to a crash.
+    check_variant: str = "continue"
+    #: What it takes for Piotrek to win by escaping.
+    #:
+    #: ``"own_pawn"`` is the game as it has always been — the colour he is
+    #: actually hiding behind has to reach the finish.  ``"any_pawn"`` lets any
+    #: pawn do it.  THIS CHANGES THE VICTORY CONDITION AND NOTHING ELSE: the
+    #: hidden colour is still hidden, still checked the same way, and still the
+    #: thing a check is asking about.
+    victory_variant: str = "own_pawn"
+    #: Skills whose ORIGINAL owner also loses a use when Herold copies them.
+    #:
+    #: A per-match setting, never a rule in the code and never a change to the
+    #: printed ability.  The default names Glockboy, because borrowing a
+    #: one-shot guess that can end the match or knock its owner out should cost
+    #: the owner something — but the table decides, and nothing assumes
+    #: Glockboy is the only one.
+    copy_consumes_use: Tuple[str, ...] = ("Where are you Marcus?",)
 
     @property
     def min_players(self) -> int:
@@ -338,6 +418,21 @@ class SessionConfig:
             movement_counts=clamp_card_counts(self.movement_counts),
             chest_counts=clamp_card_counts(self.chest_counts),
             ability_uses=clamp_ability_uses(self.ability_uses),
+            card_variants=clean_card_variants(self.card_variants),
+            block_decision_seconds=max(
+                RULES.block_decision_min,
+                min(RULES.block_decision_max, int(self.block_decision_seconds))),
+            check_decision_seconds=max(
+                RULES.block_decision_min,
+                min(RULES.block_decision_max, int(self.check_decision_seconds))),
+            check_variant=(self.check_variant
+                           if self.check_variant in CHECK_VARIANTS
+                           else "continue"),
+            copy_consumes_use=tuple(str(name) for name in
+                                    (self.copy_consumes_use or ())),
+            victory_variant=(self.victory_variant
+                             if self.victory_variant in VICTORY_VARIANTS
+                             else "own_pawn"),
             local_seat=max(0, min(players - 1, self.local_seat)),
         )
 
@@ -381,3 +476,27 @@ def clamp_card_counts(counts: "Mapping[str, int] | None") -> dict[str, int]:
 def clamp_ability_uses(uses: "Mapping[str, int] | None") -> dict[str, int]:
     """Legal charges for a character ability."""
     return clamp_title_map(uses, RULES.ability_uses_min, RULES.ability_uses_max)
+
+
+def clean_card_variants(variants: "Mapping[str, str] | None") -> dict[str, str]:
+    """Tidy a title → variant-id mapping the way the count maps are clamped.
+
+    A variant id is a NAME, not a number, so there is no range to clamp it
+    into: this drops junk, stringifies both sides and sorts by title for the
+    same reason :func:`clamp_title_map` does — this mapping goes into the lobby
+    snapshot every client compares against the host's, and two dictionaries
+    with the same pairs in a different order are the same settings.
+
+    Whether an id is one the CARD actually declares is settled where the cards
+    are, in ``DeckDef.with_variants`` and ``GameState``: an id no card knows is
+    ignored there, so a stale entry left by a renamed variant costs that one
+    card its setting rather than the match.
+    """
+    if not variants:
+        return {}
+    clean: dict[str, str] = {}
+    for title, value in variants.items():
+        if value is None:
+            continue
+        clean[str(title)] = str(value)
+    return {title: clean[title] for title in sorted(clean)}

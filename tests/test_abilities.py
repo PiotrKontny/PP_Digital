@@ -107,7 +107,48 @@ def place(game, pawn_id: str, position: int):
     game._sync_token_positions()
 
 
+def leave_start(game) -> None:
+    """Walk every pawn that is still in the camp onto an empty field.
+
+    NO CHARACTER ABILITY MAY BE ACTIVATED while any pawn is still on START —
+    the global rule — so a test about an ability has to clear the camp before
+    it can activate anything.  Pawns a test has already placed are left exactly
+    where the test put them, and the rest are parked on fields nobody is using,
+    so \"stands alone\" and \"furthest behind\" still mean what the test meant.
+    """
+    def taken() -> set:
+        return {game.board.position_of_pawn(pawn.id)
+                for pawn in game.library.pawns}
+
+    for pawn in game.library.pawns:
+        if game.board.position_of_pawn(pawn.id) is not None:
+            continue
+        used = taken()
+        # NOT the finish.  Parking a pawn on the last position is Piotrek
+        # winning, and a test about an ability should not end the match on its
+        # way to the interesting line.
+        spot = next(index for index in range(game.board.last_position - 1, 0, -1)
+                    if index not in used)
+        place(game, pawn.id, spot)
+
+
 def use(game, player_index: int, source: str = "character", **choices):
+    """Activate an ability, having first got every pawn out of the camp.
+
+    The global \"no abilities while a pawn is on START\" rule is tested on its
+    own, deliberately and for all four abilities, in
+    ``test_abilities_start_rule.py``.  Every OTHER ability test is about what
+    the ability does once it is allowed to run, so clearing the camp here keeps
+    that one rule from having to be restated in forty places.
+    """
+    leave_start(game)
+    return game.apply(
+        cmd.UseAbility(player_index=player_index, source=source, choices=choices)
+    )
+
+
+def use_raw(game, player_index: int, source: str = "character", **choices):
+    """Activate an ability exactly as asked, camp or no camp."""
     return game.apply(
         cmd.UseAbility(player_index=player_index, source=source, choices=choices)
     )
@@ -163,6 +204,10 @@ def test_using_an_ability_spends_one_use(game):
     card = game.players[SEAT].character
     assert card.uses_left == 1
 
+    # Liskowy Konkurs needs a turn to attach itself to — either his own, or
+    # the window just after his card.  This is the first case.
+    leave_start(game)
+    game.apply(cmd.SetActivePlayer(player_index=SEAT))
     events = use(game, SEAT)
     used = next(e for e in events if isinstance(e, ev.AbilityUsed))
     assert used.uses_left == 0
@@ -172,6 +217,8 @@ def test_using_an_ability_spends_one_use(game):
 def test_an_exhausted_ability_is_refused(game):
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Atencjusz")
+    leave_start(game)
+    game.apply(cmd.SetActivePlayer(player_index=SEAT))
     use(game, SEAT)
     events = use(game, SEAT)
     assert any(isinstance(e, ev.ActionRejected) for e in events)
@@ -197,15 +244,22 @@ def test_big_d_randy_freezes_a_lone_pawn(game):
     assert game.statuses.pawn_has(StatusKind.FROZEN, "żółty")
 
 
-def test_big_d_randy_refuses_a_pawn_in_a_tower(game):
+def test_big_d_randy_does_not_offer_a_pawn_in_a_tower(game):
+    """A pawn sharing a field is filtered OUT of the question, not refused.
+
+    It used to be offered and then rejected, which asks the player a question
+    the engine already knows the answer to.
+    """
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Big D Randy")
     place(game, "żółty", 5)
     place(game, "różowy", 5)
     events = use(game, SEAT, pawn="żółty")
-    assert any(isinstance(e, ev.ActionRejected) for e in events)
+    asked = next(e for e in events if isinstance(e, ev.ChoiceRequired))
+    offered = {option[0] for option in asked.options}
+    assert "żółty" not in offered and "różowy" not in offered
     assert not game.statuses.pawn_has(StatusKind.FROZEN, "żółty")
-    assert game.players[SEAT].character.uses_left == 1, "a refused ability costs nothing"
+    assert game.players[SEAT].character.uses_left == 1, "asking costs nothing"
 
 
 def test_a_frozen_pawn_cannot_be_moved_by_a_card(game):
@@ -224,10 +278,14 @@ def test_a_frozen_pawn_cannot_be_moved_by_a_card(game):
     assert game.board.position_of_pawn("żółty") == 5
 
 
-def test_lubin_freezes_piotrek(game):
+def test_lubin_skips_piotreks_next_turn(game):
     seat = hunter_seat(game)
     give_character(game, seat, "Lubin")
     piotrek = next(p for p in game.players if p.is_piotrek)
+    leave_start(game)
+    # Not during Piotrek's own turn — the ability takes a FUTURE turn, so the
+    # table has to be standing somewhere else for it to be legal at all.
+    game.apply(cmd.SetActivePlayer(player_index=seat))
     use(game, seat)
     assert game.statuses.player_has(StatusKind.SKIP_TURN, piotrek.index)
 
@@ -244,26 +302,34 @@ def test_mitoman_moves_the_front_pawn_onto_the_back_one(game):
     assert tower[-1] == "żółty" and "czerwony" in tower
 
 
-def test_norbur_restricts_movement_to_the_span_between_pawns(game):
+def test_norbur_is_deliberately_a_no_op(game):
+    """Plac is activated, costs its charge, and changes nothing.
+
+    The rule printed on the card is not implemented yet, on the owner's
+    instruction.  These assertions are the SPECIFICATION of that: the ability
+    must not quietly grow a movement restriction back.
+    """
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Norbur")
     place(game, "czerwony", 3)
     place(game, "żółty", 9)
+    leave_start(game)
+    before = {pawn.id: game.board.position_of_pawn(pawn.id)
+              for pawn in game.library.pawns}
+    order_before = game.seat_order()
+
     events = use(game, SEAT)
-    assert any(isinstance(e, ev.StatusGranted) for e in events)
-    assert game.statuses.movement_range() == (3, 9)
+    assert not any(isinstance(e, ev.ActionRejected) for e in events)
+    assert game.players[SEAT].character.uses_left == 0, "the use is spent"
+    assert game.statuses.movement_range() is None, "no movement restriction"
+    assert not game.statuses.of_kind(StatusKind.RESTRICTED_MOVEMENT)
+    assert game.seat_order() == order_before, "turn order untouched"
+    for pawn_id, position in before.items():
+        assert game.board.position_of_pawn(pawn_id) == position
 
 
-def test_norbur_needs_a_wide_enough_gap(game):
-    SEAT = hunter_seat(game)
-    give_character(game, SEAT, "Norbur")
-    place(game, "czerwony", 3)
-    place(game, "żółty", 4)
-    events = use(game, SEAT)
-    assert any(isinstance(e, ev.ActionRejected) for e in events)
-
-
-def test_restricted_movement_blocks_a_card_that_leaves_the_span(game):
+def test_plac_leaves_movement_completely_alone(game):
+    """A card that would have broken Norbur's old span still resolves."""
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Norbur")
     place(game, "czerwony", 3)
@@ -275,7 +341,8 @@ def test_restricted_movement_blocks_a_card_that_leaves_the_span(game):
     deck.draw_pile.remove(card)
     game.players[SEAT].add_card(card)
     events = game.apply(cmd.PlayCard(player_index=SEAT, card_uid=card.uid))
-    assert any(isinstance(e, ev.ActionRejected) for e in events)
+    assert not any(isinstance(e, ev.ActionRejected) for e in events)
+    assert game.board.position_of_pawn("żółty") == 11
 
 
 def test_dziad_asks_which_pawn_and_how_far(game):
@@ -298,13 +365,16 @@ def test_dziad_asks_which_pawn_and_how_far(game):
 
 
 def test_ondrej_links_two_pawns_so_they_travel_together(game):
+    """Radar now asks ONE ordered question, the way Plagiat! does."""
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Ondrej")
     place(game, "żółty", 6)
     place(game, "zielony", 2)
-    use(game, SEAT, pawn="żółty", pawn_b="zielony")
+    use(game, SEAT, pawns="żółty,zielony")
     assert game.statuses.linked_partners("żółty") == ["zielony"]
     assert game.statuses.linked_partners("zielony") == ["żółty"]
+    # The pawn further behind has walked onto the one further ahead.
+    assert game.board.position_of_pawn("zielony") == 6
 
     deck = game.deck(settings.DECK_MOVEMENT)
     card = next(c for c in deck.draw_pile if c.title == "Zerówka - żółty")
@@ -316,19 +386,29 @@ def test_ondrej_links_two_pawns_so_they_travel_together(game):
     assert game.board.position_of_pawn("zielony") == 7, "the link drags it along"
 
 
-def test_atencjusz_grants_an_extra_turn(game):
+def test_atencjusz_gets_a_second_play_on_his_own_turn(game):
+    """Used BEFORE his move, Liskowy Konkurs is an extra card and a second
+    play — not a status that some later turn loop has to notice."""
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Atencjusz")
+    leave_start(game)
+    game.apply(cmd.SetActivePlayer(player_index=SEAT))
+    before = len(game.players[SEAT].hand)
+
     use(game, SEAT)
-    assert game.statuses.player_has(StatusKind.EXTRA_TURN, SEAT)
+    assert game.extra_play_pending(SEAT)
+    assert len(game.players[SEAT].hand) == before + 1, "an extra card, now"
 
 
-def test_abilities_that_need_checking_say_so_without_spending_a_use(game):
+def test_glockboy_needs_three_completed_checks_first(game):
+    """The ability now EXISTS; what it refuses is being used too early."""
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Glockboy")
     events = use(game, SEAT, pawn="żółty")
-    unavailable = next(e for e in events if isinstance(e, ev.AbilityUnavailable))
-    assert "sprawdzan" in unavailable.reason.lower()
+    assert any(isinstance(e, ev.ActionRejected) for e in events)
+    assert not any(isinstance(e, ev.AbilityUnavailable) for e in events), (
+        "the checking mechanic is no longer missing"
+    )
     assert game.players[SEAT].character.uses_left == 1
 
 
@@ -400,11 +480,18 @@ def test_chatgpt_may_be_used_five_times(game):
     assert any(isinstance(e, ev.ActionRejected) for e in events)
 
 
-def test_ice_block_reports_the_missing_mechanic(game):
+def test_ice_block_is_reactive_rather_than_a_button(game):
+    """The mechanic exists now; what the BUTTON does is explain itself.
+
+    Ice Block is offered when a check is about to happen, not pressed on
+    Piotrek's turn, so a button press has no check in front of it to refuse.
+    It costs nothing.
+    """
     piotrek = next(p for p in game.players if p.is_piotrek)
     skill = give_skill(game, "Ice Block")
     events = use(game, piotrek.index, source="skill")
-    assert any(isinstance(e, ev.AbilityUnavailable) for e in events)
+    rejected = next(e for e in events if isinstance(e, ev.ActionRejected))
+    assert "okno decyzji" in rejected.reason
     assert skill.uses_left == 1
 
 
@@ -417,17 +504,27 @@ def test_dlug_u_tomasza_records_its_state(game):
 
 
 # ── statuses over time ───────────────────────────────────────────────────────
-def test_a_status_lasting_one_turn_expires_when_the_seat_changes(game):
+def test_a_freeze_lasts_until_its_owner_plays_again(game):
+    """One full round is \"until the turn comes back to Big D Randy\".
+
+    NOT one global turn.  The seat changing twice used to be enough, which is
+    the reading the brief rules out by name.
+    """
     SEAT = hunter_seat(game)
     give_character(game, SEAT, "Big D Randy")
     place(game, "żółty", 5)
+    leave_start(game)
+    game.apply(cmd.SetActivePlayer(player_index=SEAT))
     use(game, SEAT, pawn="żółty")
     assert game.statuses.pawn_has(StatusKind.FROZEN, "żółty")
 
-    game.apply(cmd.SetActivePlayer(player_index=1))
-    assert game.statuses.pawn_has(StatusKind.FROZEN, "żółty"), "still this turn"
+    for seat in (index for index in range(len(game.players)) if index != SEAT):
+        game.apply(cmd.SetActivePlayer(player_index=seat))
+        assert game.statuses.pawn_has(StatusKind.FROZEN, "żółty"), (
+            "somebody else's turn does not end it"
+        )
 
-    events = game.apply(cmd.SetActivePlayer(player_index=2))
+    events = game.apply(cmd.SetActivePlayer(player_index=SEAT))
     assert not game.statuses.pawn_has(StatusKind.FROZEN, "żółty")
     assert any(isinstance(e, ev.StatusEnded) for e in events)
 

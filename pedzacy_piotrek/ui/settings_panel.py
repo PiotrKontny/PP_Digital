@@ -36,6 +36,7 @@ import pygame
 from ..cards.loader import ContentLibrary
 from ..config import settings
 from ..config.settings import RULES
+from ..engine.effects import COPY_ABILITY
 from .widgets import Button, Stepper
 
 #: Height of one row, and the space above the first one and below the last.
@@ -66,6 +67,11 @@ class SettingsTab:
     titles: List[str] = field(default_factory=list)
     low: int = 0
     high: int = 9
+    #: title -> the named choices the number is an INDEX into, for a tab whose
+    #: numbers are not quantities.  Empty for the four counting tabs, which is
+    #: what keeps every one of them drawing and behaving exactly as before.
+    #: Each entry is ``(id, label, description)``.
+    options: Dict[str, List[Tuple[str, str, str]]] = field(default_factory=dict)
     #: What the number means, for the line under the heading ("kart w talii").
     summary: Callable[["SettingsTab"], str] = lambda tab: ""
     #: Why this configuration will not work, or "".
@@ -83,8 +89,81 @@ class SettingsTab:
         self.values = dict(self.defaults)
 
     def bump(self, title: str, delta: int) -> None:
-        current = self.values.get(title, self.low)
-        self.values[title] = max(self.low, min(self.high, current + delta))
+        """Step one row, clamped to what THAT row can hold.
+
+        A CHOICE ROW IS BOUNDED BY ITS OWN LIST, not by the tab's numbers.  The
+        rules tab mixes two kinds of row — a decision timer that runs 1..30 and
+        a variant that runs 0..1 — and clamping the variant to the timer's
+        bounds is what made "Wariant 2, then -1" sit still: index 1 minus one
+        is 0, and 0 was below the tab's ``low`` of 1, so it clamped straight
+        back to 1.  It also let +1 walk the stored index up to 30 while the
+        display stopped at the last variant, so a row could look unchanged and
+        be far out of range.
+
+        The counting tabs are untouched: with no options for the row, this is
+        the tab's bounds exactly as before.
+        """
+        low, high = self.bounds_for(title)
+        current = self.values.get(title, low)
+        self.values[title] = max(low, min(high, current + delta))
+
+    def bounds_for(self, title: str) -> Tuple[int, int]:
+        """``(low, high)`` for one row — its own list, or the tab's numbers."""
+        choices = self.choices_for(title)
+        if choices:
+            return 0, len(choices) - 1
+        return self.low, self.high
+
+    # ── tabs whose numbers name a choice rather than count something ────────
+    @property
+    def is_choice(self) -> bool:
+        return bool(self.options)
+
+    def choices_for(self, title: str) -> List[Tuple[str, str, str]]:
+        return self.options.get(title, [])
+
+    def chosen(self, title: str) -> Optional[Tuple[str, str, str]]:
+        """The ``(id, label, description)`` this row is currently sitting on."""
+        choices = self.choices_for(title)
+        if not choices:
+            return None
+        index = max(0, min(len(choices) - 1, int(self.values.get(title, 0))))
+        return choices[index]
+
+    def value_text(self, title: str) -> str:
+        """What goes in the stepper's well.
+
+        A number for a quantity, and the choice's own NAME for a choice: "3"
+        answers "how many copies", and nothing answers "which variant" except
+        saying which one.
+        """
+        chosen = self.chosen(title)
+        if chosen is None:
+            return str(self.values.get(title, 0))
+        return chosen[1] or chosen[0]
+
+    def ids(self) -> Dict[str, str]:
+        """title -> chosen id, which is what a config actually wants."""
+        out: Dict[str, str] = {}
+        for title in self.titles:
+            chosen = self.chosen(title)
+            if chosen is not None:
+                out[title] = chosen[0]
+        return out
+
+    def merge_ids(self, incoming: Optional[Dict[str, str]]) -> None:
+        """Take chosen ids from outside and sit each row on that choice.
+
+        The counterpart of :meth:`merge` for a choice tab.  An id this build
+        does not know is ignored rather than stored, so a saved configuration
+        survives a variant being renamed — the row simply stays on its default.
+        """
+        for title, wanted in (incoming or {}).items():
+            choices = self.choices_for(title)
+            for index, (identifier, _label, _text) in enumerate(choices):
+                if identifier == str(wanted):
+                    self.values[title] = index
+                    break
 
     def merge(self, incoming: Optional[Dict[str, int]]) -> None:
         """Take values from outside, ignoring titles this tab does not have.
@@ -186,6 +265,120 @@ class GameSettingsPanel:
             low=low, high=high, summary=summary, problem=problem,
         )
 
+    def _variant_tab(self) -> SettingsTab:
+        """The cards that can be played more than one way.
+
+        ONLY cards that actually declare two or more variants appear, which is
+        the whole reason this is a tab of its own rather than a control beside
+        every deck row: twenty-nine of the thirty-one cards have nothing to
+        choose, and a selector offering them one choice would be a control that
+        cannot do anything.
+
+        The rows are gathered from EVERY deck, so ``AKO`` and ``Nie masz
+        Rosji`` — a Mod and a Chest card — will appear here the moment their
+        variants are written into cards.json, with no code change.
+
+        The number under the stepper is an INDEX into the card's variant list,
+        which is what lets a tab of named choices reuse the counting tab's
+        machinery whole: bump, clamp, reset and merge all still work on an int.
+        """
+        options: Dict[str, List[Tuple[str, str, str]]] = {}
+        defaults: Dict[str, int] = {}
+        titles: List[str] = []
+        for deck_id in self.library.deck_order:
+            for card in self.library.deck(deck_id).cards:
+                if not card.has_variants or card.title in options:
+                    continue
+                titles.append(card.title)
+                options[card.title] = [
+                    (variant.id, variant.label or variant.id,
+                     variant.text if variant.text is not None else card.text)
+                    for variant in card.variants
+                ]
+                defaults[card.title] = 0
+
+        def summary(tab: SettingsTab) -> str:
+            changed = sum(1 for title in tab.titles
+                          if tab.values.get(title, 0) != 0)
+            if not tab.titles:
+                return "Żadna karta nie ma wariantów"
+            return (f"Kart z wariantami: {len(tab.titles)}"
+                    + (f"  ·  zmienionych: {changed}" if changed else ""))
+
+        # No ``problem``: every combination of variants is a legal table.  The
+        # high bound is the longest variant list, and a row shorter than that
+        # is clamped by ``chosen`` rather than by the stepper, so two cards with
+        # different numbers of variants can share one tab.
+        high = max([len(items) - 1 for items in options.values()] + [0])
+        return SettingsTab(
+            id="variants", label="Warianty", heading="WARIANTY KART",
+            values=dict(defaults), defaults=dict(defaults), titles=titles,
+            low=0, high=high, options=options, summary=summary,
+        )
+
+    #: The row the rules tab holds.  A CONSTANT rather than a literal in two
+    #: places, because the panel reads its value back out by this exact name.
+    BLOCK_ROW = "Czas na decyzję o bloku (s)"
+    #: Ice Block's window, and the two rule VARIANTS that are a table choice
+    #: rather than a card's.  Constants for the same reason BLOCK_ROW is: the
+    #: panel reads each value back out by this exact name.
+    CHECK_ROW = "Czas na decyzję o checku (s)"
+    CHECK_VARIANT_ROW = "Nieudany check"
+    VICTORY_VARIANT_ROW = "Zwycięstwo Piotrka"
+
+    def _rules_tab(self) -> SettingsTab:
+        """Table rules that are one number each, rather than one per card.
+
+        Nie masz Rosji's decision window is the first: it is a number the table
+        wants to try at 3 and at 12, which is exactly why it is a setting and
+        not a constant in the gameplay code.  It lives in the panel rather than
+        as another row on the two setup screens because both of those lay
+        themselves out by measuring rows and shrinking the gaps, and the
+        changelog already records a fifth row pushing the Start button off a
+        1280x760 window.
+        """
+        low, high = RULES.block_decision_min, RULES.block_decision_max
+        defaults = {
+            self.BLOCK_ROW: RULES.block_decision_default,
+            self.CHECK_ROW: RULES.check_decision_default,
+            # Index 0 is the game as it shipped, on both rows.  A table that
+            # never opens this tab plays exactly what it played before.
+            self.CHECK_VARIANT_ROW: 0,
+            self.VICTORY_VARIANT_ROW: 0,
+        }
+        # THE SAME NAMED-OPTION MACHINERY THE VARIANTS TAB USES.  A rule
+        # variant is a choice between labelled answers, not a quantity, so it
+        # reuses ``options`` rather than growing a second kind of row: bump,
+        # clamp, reset and merge all still work on an int.
+        options = {
+            self.CHECK_VARIANT_ROW: [
+                (variant, name, description)
+                for variant, (name, description)
+                in settings.CHECK_VARIANTS.items()
+            ],
+            self.VICTORY_VARIANT_ROW: [
+                (variant, name, description)
+                for variant, (name, description)
+                in settings.VICTORY_VARIANTS.items()
+            ],
+        }
+
+        def summary(tab: SettingsTab) -> str:
+            changed = sum(1 for title in (self.CHECK_VARIANT_ROW,
+                                          self.VICTORY_VARIANT_ROW)
+                          if tab.values.get(title, 0) != 0)
+            base = "Czasy decyzji i warianty zasad"
+            return base + (f"  ·  zmienionych wariantów: {changed}"
+                           if changed else "")
+
+        return SettingsTab(
+            id="rules", label="Zasady", heading="ZASADY STOŁU",
+            values=dict(defaults), defaults=dict(defaults),
+            titles=[self.BLOCK_ROW, self.CHECK_ROW, self.CHECK_VARIANT_ROW,
+                    self.VICTORY_VARIANT_ROW],
+            low=low, high=high, options=options, summary=summary,
+        )
+
     def _build_tabs(self) -> List[SettingsTab]:
         cards_low, cards_high = RULES.card_count_min, RULES.card_count_max
         return [
@@ -205,7 +398,76 @@ class GameSettingsPanel:
                            "KARTY SKRZYNI — SKŁAD TALII", cards_low, cards_high,
                            minimum=0),
             self._ability_tab(),
+            self._variant_tab(),
+            self._rules_tab(),
+            self._copy_tab(),
         ]
+
+    #: The two answers every borrowable ability gets on the Herold tab.
+    KEEPS_USE = ("keeps", "Zachowuje", "właściciel nie traci użycia")
+    SPENDS_USE = ("spends", "Traci", "właściciel traci jedno użycie")
+
+    def _copy_tab(self) -> SettingsTab:
+        """Which abilities cost their OWNER a use when Herold copies them.
+
+        One row per borrowable ability, each a two-answer choice — the same
+        named-option machinery the variants and rules tabs use, so bump, clamp,
+        reset and merge all keep working on an int and this is not a third kind
+        of row.
+
+        THE LIST IS BUILT FROM THE CARDS, not typed out: a tenth character
+        appears here the day it is added, and anything that is itself a copier
+        is left out because it is not borrowable.  The default marks Glockboy,
+        matching ``SessionConfig.copy_consumes_use`` — and nothing here assumes
+        Glockboy is special beyond being the default, which is the whole point
+        of the setting existing.
+        """
+        titles: List[str] = []
+        options: Dict[str, List[Tuple[str, str, str]]] = {}
+        defaults: Dict[str, int] = {}
+        printed = set(settings.SessionConfig().copy_consumes_use or ())
+
+        for deck_id in (settings.DECK_CHARACTERS, settings.DECK_SKILLS):
+            deck = self.library.decks.get(deck_id)
+            if deck is None:
+                continue
+            for card in deck.cards:
+                ability = card.ability
+                if ability is None or str(ability.type) == COPY_ABILITY:
+                    continue
+                row = card.skill or card.title
+                if row in options:
+                    continue
+                titles.append(row)
+                options[row] = [self.KEEPS_USE, self.SPENDS_USE]
+                defaults[row] = 1 if row in printed else 0
+
+        def summary(tab: SettingsTab) -> str:
+            spending = [title for title in tab.titles
+                        if tab.values.get(title, 0) == 1]
+            if not tab.titles:
+                return "Brak umiejętności do skopiowania"
+            return (f"Umiejętności: {len(tab.titles)}"
+                    + (f"  ·  zabierają użycie: {len(spending)}" if spending
+                       else "  ·  żadna nie zabiera użycia"))
+
+        return SettingsTab(
+            id="copy", label="Herold", heading="HEROLD — KOPIOWANE UŻYCIA",
+            values=dict(defaults), defaults=dict(defaults), titles=titles,
+            low=0, high=1, options=options, summary=summary,
+        )
+
+    @property
+    def copy_consumes_use(self) -> Tuple[str, ...]:
+        """The skills whose owner also pays, as a config wants them: by NAME.
+
+        Translated at the boundary for the same reason every other choice row
+        is — the panel counts in indices, a config names things, and a number
+        would break the moment somebody reordered the tab.
+        """
+        tab = self.tabs[self._index_of("copy")]
+        return tuple(title for title in tab.titles
+                     if (tab.chosen(title) or self.KEEPS_USE)[0] == "spends")
 
     def _index_of(self, tab_id: str) -> int:
         for index, tab in enumerate(self.tabs):
@@ -236,6 +498,49 @@ class GameSettingsPanel:
     @property
     def ability_uses(self) -> Dict[str, int]:
         return self.values_of("abilities")
+
+    @property
+    def block_decision_seconds(self) -> int:
+        """The Nie masz Rosji window, in seconds, as the config wants it."""
+        tab = self.tabs[self._index_of("rules")]
+        return int(tab.values.get(self.BLOCK_ROW,
+                                  RULES.block_decision_default))
+
+    @property
+    def check_decision_seconds(self) -> int:
+        """Ice Block's window, in seconds, as the config wants it."""
+        tab = self.tabs[self._index_of("rules")]
+        return int(tab.values.get(self.CHECK_ROW,
+                                  RULES.check_decision_default))
+
+    @property
+    def check_variant(self) -> str:
+        return self._rule_choice(self.CHECK_VARIANT_ROW, "continue")
+
+    @property
+    def victory_variant(self) -> str:
+        return self._rule_choice(self.VICTORY_VARIANT_ROW, "own_pawn")
+
+    def _rule_choice(self, row: str, fallback: str) -> str:
+        """The chosen id of a named rule row, translated at the boundary.
+
+        The panel counts in indices because a stepper counts; a config names
+        ids because a number would break the moment somebody reordered the
+        table.  Same translation the variants tab does, in the same place.
+        """
+        chosen = self.tabs[self._index_of("rules")].chosen(row)
+        return chosen[0] if chosen is not None else fallback
+
+    @property
+    def card_variants(self) -> Dict[str, str]:
+        """Title -> chosen variant id, which is what a SessionConfig holds.
+
+        The panel counts in indices because a stepper counts; a config names
+        ids because a card names its variants and a number would break the
+        moment somebody reordered them in the JSON.  The translation happens
+        here, once, at the boundary.
+        """
+        return self.tabs[self._index_of("variants")].ids()
 
     #: The visible tab's numbers, its titles and whether everything is untouched.
     #: Named for what a reader of the panel sees rather than for a category, so
@@ -370,7 +675,9 @@ class GameSettingsPanel:
     def open(self, counts: Optional[Dict[str, int]] = None, *,
              movement_counts: Optional[Dict[str, int]] = None,
              chest_counts: Optional[Dict[str, int]] = None,
-             ability_uses: Optional[Dict[str, int]] = None) -> None:
+             ability_uses: Optional[Dict[str, int]] = None,
+             card_variants: Optional[Dict[str, str]] = None,
+             block_decision_seconds: Optional[int] = None) -> None:
         """Show the panel, optionally seeded from settings held elsewhere.
 
         ``counts`` is the Mody Patusa mapping and keeps its old name and
@@ -381,6 +688,10 @@ class GameSettingsPanel:
         self.tabs[self._index_of(settings.DECK_MOVEMENT)].merge(movement_counts)
         self.tabs[self._index_of(settings.DECK_CHEST)].merge(chest_counts)
         self.tabs[self._index_of("abilities")].merge(ability_uses)
+        self.tabs[self._index_of("variants")].merge_ids(card_variants)
+        if block_decision_seconds is not None:
+            self.tabs[self._index_of("rules")].merge(
+                {self.BLOCK_ROW: block_decision_seconds})
         self._lay_out()
         self.active = True
 
@@ -497,11 +808,27 @@ class GameSettingsPanel:
             # przedmiot - pomarańczowy", and a centred label would wander.
             left = self.panel.left + int(22 * scale)
             room = stepper.rects["minus1"].left - left - int(12 * scale)
-            font = r.fitted_font(title, max(40, room), int(15 * scale),
-                                 bold=False, spacing=0)
-            r.text(title, font, theme.text_light, surface,
-                   midleft=(left, centre_y))
-            stepper.draw(r, str(tab.values.get(title, 0)), mouse, surface)
+            if tab.is_choice:
+                # Two lines, because a variant is a SENTENCE and the whole
+                # point of choosing one is reading the difference: the title
+                # says which card, the line under it says what this reading of
+                # it does.  Rows are otherwise identical to a counting tab's.
+                chosen = tab.chosen(title)
+                r.text(title, r.fonts.get(int(14 * scale), bold=True),
+                       theme.text_light, surface,
+                       midleft=(left, centre_y - int(9 * scale)))
+                if chosen is not None:
+                    description = r.fitted_font(chosen[2], max(40, room),
+                                                int(11 * scale), bold=False,
+                                                spacing=0)
+                    r.text(chosen[2], description, theme.text_dim, surface,
+                           midleft=(left, centre_y + int(9 * scale)))
+            else:
+                font = r.fitted_font(title, max(40, room), int(15 * scale),
+                                     bold=False, spacing=0)
+                r.text(title, font, theme.text_light, surface,
+                       midleft=(left, centre_y))
+            stepper.draw(r, tab.value_text(title), mouse, surface)
 
         self._draw_scrollbar(r, surface, theme, scale)
 

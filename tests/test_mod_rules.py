@@ -91,7 +91,7 @@ def test_the_deck_holds_the_printed_number_of_copies(library):
     )
     assert counts == {
         "Speedrun": 2, "Masa solna": 2, "AKO": 1, "Halloween": 1,
-        "Sesja na PG": 2, "Paczka": 2, "Squid Game": 1, "Shady": 2,
+        "Sesja na PG": 2, "Paczka": 2, "Squid Game": 1, "Obóz Harcerski": 2,
     }
     assert sum(counts.values()) == 13
 
@@ -104,11 +104,11 @@ def test_every_mod_title_still_appears_exactly_once_in_the_data(library):
 
 # ── part 2: the lobby sets the counts ────────────────────────────────────────
 def test_the_lobby_can_resize_the_deck(library):
-    game = make(library, mod_counts={"Speedrun": 4, "Shady": 0})
+    game = make(library, mod_counts={"Speedrun": 4, "Obóz Harcerski": 0})
     counts = collections.Counter(c.title
                                  for c in game.decks[settings.DECK_MODS].draw_pile)
     assert counts["Speedrun"] == 4
-    assert "Shady" not in counts
+    assert "Obóz Harcerski" not in counts
     # Everything the lobby did not mention keeps the printed count.
     assert counts["Masa solna"] == 2
 
@@ -129,7 +129,7 @@ def test_counts_are_clamped_and_junk_is_dropped():
 
 def test_the_mapping_is_sorted_so_two_machines_compare_equal():
     """It travels in the lobby snapshot every client checks against the host."""
-    assert list(clamp_mod_counts({"Shady": 1, "AKO": 2})) == ["AKO", "Shady"]
+    assert list(clamp_mod_counts({"Obóz Harcerski": 1, "AKO": 2})) == ["AKO", "Obóz Harcerski"]
 
 
 def test_a_resized_deck_is_identical_on_two_machines(library):
@@ -508,15 +508,32 @@ def test_an_already_spent_ability_stays_spent_afterwards(library):
     assert not card.ability_available
 
 
-# ── part 7: the placeholders ─────────────────────────────────────────────────
-@pytest.mark.parametrize("title", ["AKO"])
-def test_the_placeholder_mods_change_nothing(library, title):
-    """Deliberately inert.  It draws, it sits in the rack, it does nothing.
+# ── part 7: there are no placeholders left ───────────────────────────────────
+def test_no_mod_is_a_placeholder_any_more(library):
+    """Every Mod Patusa now declares a rule.
 
-    AKO is the only one left; the other three gained their rules in stage 25.
+    AKO was the last one that did nothing; stage 35 gave it its two variants.
+    This replaces the test that used to assert AKO was inert — that fact was
+    worth pinning while it was true, and asserting it now would be pinning the
+    opposite of the card's behaviour.
     """
+    for card in library.deck(settings.DECK_MODS).cards:
+        declared = dict(card.passive or {})
+        for variant in card.variants:
+            declared.update(variant.passive or {})
+        # A mod's rule may be a PASSIVE it applies while racked or an ABILITY
+        # it fires as it arrives — Herold is the first of the second kind, and
+        # "declares nothing" has to mean neither rather than no passive.
+        assert declared or card.ability is not None, (
+            f"{card.title} declares no rule at all"
+        )
+
+
+def test_ako_changes_only_its_own_rule(library):
+    """It is a rule about which pawns move, and about nothing else."""
     game = make(library)
-    install(game, title)
+    install(game, "AKO")
+    assert game.carries_neighbour
     assert game.movement_cap is None
     assert not game.abilities_locked
     assert not game.requires_neighbour
@@ -526,7 +543,7 @@ def test_the_placeholder_mods_change_nothing(library, title):
     assert not game.hides_leader
 
 
-@pytest.mark.parametrize("title", ["AKO", "Paczka", "Squid Game", "Shady"])
+@pytest.mark.parametrize("title", ["AKO", "Paczka", "Squid Game", "Obóz Harcerski"])
 def test_every_mod_can_be_chosen(library, title):
     """Every mod has to reach the rack, effect or no effect."""
     game = make(library)

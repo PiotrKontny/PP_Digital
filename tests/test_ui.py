@@ -1144,7 +1144,28 @@ def seat_with_character(screen: GameScreen, title: str) -> int:
         deck.return_card(state.players[seat].character)
     state.players[seat].character = card
     screen.submit(cmd.SetActivePlayer(player_index=seat))
+    clear_start(screen)
     return seat
+
+
+def clear_start(screen: GameScreen) -> None:
+    """Walk every pawn still in the camp onto the board.
+
+    The interface greys the ability button — and the engine refuses the
+    command — while any pawn is on START.  A test about what the BUTTON does
+    has to get past that rule first; the rule itself is tested on its own.
+    """
+    state = screen.state
+    # Parked at the FAR end, descending, so the low fields a test places its
+    # own pawns on stay empty — otherwise clearing the camp would silently
+    # stack a parked pawn under the one the test cares about, and "stands
+    # alone" would stop meaning what the test meant.  Never the last position:
+    # that is the finish, and reaching it ends the match.
+    spot = state.board.last_position - 1
+    for pawn in state.library.pawns:
+        if state.board.position_of_pawn(pawn.id) is None:
+            place_pawn(screen, pawn.id, spot)
+            spot -= 1
 
 
 def place_pawn(screen: GameScreen, pawn_id: str, position: int) -> None:
@@ -1163,8 +1184,9 @@ def test_the_ability_button_activates_the_character(screen):
     click(screen, rect.center)
 
     assert card.uses_left == 0
-    from pedzacy_piotrek.engine.statuses import StatusKind
-    assert screen.state.statuses.player_has(StatusKind.EXTRA_TURN, seat)
+    # Liskowy Konkurs on his own turn is an extra card and a second play, not
+    # a status waiting for some later turn loop to notice it.
+    assert screen.state.extra_play_pending(seat)
 
 
 def test_the_ability_button_reports_when_it_is_spent(screen):
@@ -1261,8 +1283,8 @@ def test_the_prompt_blocks_the_rest_of_the_interface(screen):
     assert screen.state.deck(settings.DECK_MOVEMENT).draw_count == before
 
 
-def test_an_ability_waiting_on_checking_says_so(screen):
-    """Glockboy needs the checking rules, which do not exist yet."""
+def test_glockboy_says_how_many_checks_are_still_needed(screen):
+    """The checking rules exist now; what the button reports is the shortfall."""
     seat_with_character(screen, "Glockboy")
     place_pawn(screen, "żółty", 5)
     frame(screen)
@@ -1271,7 +1293,7 @@ def test_an_ability_waiting_on_checking_says_so(screen):
         assert answer_choice(screen)
 
     assert screen.status_bar.message is not None
-    assert "sprawdzan" in screen.status_bar.message.lower()
+    assert "3" in screen.status_bar.message, "it names the requirement"
     assert screen.state.players[screen.state.active_player_index].character.uses_left == 1
 
 
@@ -2502,3 +2524,378 @@ def test_choosing_a_new_colour_resumes_the_table(screen):
     assert not state.awaiting_identity
     assert piotrek.secret_pawn == target
     assert state.eliminated_pawns == ["czerwony"]
+
+
+# ── Radar: a reordered tower must be visible at once (stage 38 bugfix) ───────
+def _radar_tower(screen: GameScreen, order, position: int = 5) -> int:
+    """Stand a tower up on one field and give a seat Ondrej, ready to link."""
+    seat = seat_with_character(screen, "Ondrej")
+    for pawn_id in order:
+        screen.state.board.remove_pawn(pawn_id)
+    for pawn_id in order:
+        place_pawn(screen, pawn_id, position)
+    for pawn_id in order:
+        screen.board_view.visual[pawn_id] = screen.state.tokens[pawn_id].position
+    tile = screen.state.board.pawn_tile(order[0])
+    assert list(tile.stack) == list(order)
+    return seat
+
+
+def test_a_radar_reorder_shows_up_without_waiting_for_another_move(screen):
+    """The bug: the engine had the tower right and the screen did not.
+
+    ``board_view.visual`` is what the board actually DRAWS, and it was only
+    ever written by the two movement reactions.  A Radar reorder changes a
+    pawn's height without moving it between fields, so no walk and no glide was
+    emitted, nothing wrote the new heights, and the old order stayed on screen
+    until some later card happened to touch those pawns.
+
+    Asserted against ``display_position``, which is what the renderer asks, and
+    against the ENGINE's own numbers — so this cannot pass by the view
+    inventing positions of its own.
+    """
+    order = ["żółty", "różowy", "niebieski", "czerwony"]
+    seat = _radar_tower(screen, order)
+    before = {p: screen.board_view.display_position(p) for p in order}
+
+    screen.submit(cmd.UseAbility(player_index=seat, source="character",
+                                 choices={"pawns": "niebieski,różowy"}))
+    assert screen.state.board.pawn_tile("żółty").stack == [
+        "żółty", "niebieski", "różowy", "czerwony"
+    ], "the engine reordered it"
+
+    # Let the settle animation run out; the point is that it STARTS now.
+    for _ in range(90):
+        frame(screen)
+
+    for pawn_id in order:
+        assert screen.board_view.display_position(pawn_id) == pytest.approx(
+            screen.state.tokens[pawn_id].position, abs=0.5
+        ), f"{pawn_id} is not drawn where the engine says it is"
+
+    swapped = [p for p in ("niebieski", "różowy")
+               if screen.board_view.display_position(p) != before[p]]
+    assert len(swapped) == 2, "the two that changed height really moved"
+
+
+def test_the_two_pawns_that_swapped_are_drawn_at_each_others_heights(screen):
+    """The reorder is visible as a SWAP, not just as movement."""
+    order = ["żółty", "różowy", "niebieski", "czerwony"]
+    seat = _radar_tower(screen, order)
+    before = {p: screen.board_view.display_position(p)[1] for p in order}
+
+    screen.submit(cmd.UseAbility(player_index=seat, source="character",
+                                 choices={"pawns": "niebieski,różowy"}))
+    for _ in range(90):
+        frame(screen)
+
+    after = {p: screen.board_view.display_position(p)[1] for p in order}
+    assert after["niebieski"] == pytest.approx(before["różowy"], abs=0.5)
+    assert after["różowy"] == pytest.approx(before["niebieski"], abs=0.5)
+    assert after["żółty"] == pytest.approx(before["żółty"], abs=0.5)
+    assert after["czerwony"] == pytest.approx(before["czerwony"], abs=0.5)
+
+
+def test_a_reorder_that_changes_nothing_does_not_twitch_the_board(screen):
+    """Case D of the brief: already in order, so nothing is animated."""
+    order = ["żółty", "różowy", "niebieski", "czerwony"]
+    seat = _radar_tower(screen, order)
+    before = {p: screen.board_view.display_position(p) for p in order}
+
+    screen.submit(cmd.UseAbility(player_index=seat, source="character",
+                                 choices={"pawns": "żółty,różowy"}))
+    frame(screen)
+    for pawn_id in order:
+        assert screen.board_view.display_position(pawn_id) == before[pawn_id]
+
+
+# ── the turn window: undo, and Liskowy Konkurs (stage 41) ───────────────────
+def _simple_card(screen: GameScreen, seat: int, title: str):
+    """Trade a hand card for a named one, keeping the hand size the same."""
+    deck = screen.state.decks[settings.DECK_MOVEMENT]
+    player = screen.state.players[seat]
+    victim = next(c for c in player.hand
+                  if c.deck_id == settings.DECK_MOVEMENT and c.title != title)
+    player.remove_card(victim)
+    deck.draw_pile.insert(0, victim)
+    card = next(c for c in deck.draw_pile if c.title == title)
+    deck.draw_pile.remove(card)
+    player.add_card(card)
+    return card
+
+
+def _allow_every_seat(screen: GameScreen) -> None:
+    """Let this client act for every seat, which is what hot-seat play is.
+
+    Without it ``may_control`` allows only ``local_seat``, so a test driving a
+    second player's turn has its command silently refused — and the undo window
+    then looks as though it never moved.
+    """
+    screen.state.config.edit_mode = True
+
+
+def _play_card_fully(screen: GameScreen, seat: int, card) -> None:
+    """Play a card and answer whatever it asks.
+
+    A card landing on a widened row asks which half — an unanswered question
+    resolves nothing, opens no window, and makes an undo test quietly measure
+    the wrong thing.
+    """
+    screen.submit(cmd.PlayCard(player_index=seat, card_uid=card.uid))
+    for _ in range(4):
+        if screen.pending_choice is None:
+            return
+        assert answer_choice(screen)
+
+
+def _play_one(screen: GameScreen, title: str = "Zerówka - żółty"):
+    # Everybody on the board first: a card aimed at a pawn still in the camp
+    # refuses, and a refused card opens no window — which would make these
+    # tests pass or fail on where the pawns happened to start.
+    for index, pawn in enumerate(screen.state.library.pawns):
+        if screen.state.board.position_of_pawn(pawn.id) is None:
+            place_pawn(screen, pawn.id, index + 2)
+    seat = screen.state.active_player_index
+    screen.view_seat = seat
+    card = _simple_card(screen, seat, title)
+    _play_card_fully(screen, seat, card)
+    return seat, card
+
+
+def test_the_undo_button_appears_only_inside_the_window(screen):
+    """Its ABSENCE is the rule, so the test is mostly about when it is gone."""
+    frame(screen)
+    assert not screen.can_undo, "nothing has been played yet"
+
+    _allow_every_seat(screen)
+    seat, card = _play_one(screen)
+    frame(screen)
+    assert screen.can_undo, "the player who just moved is offered it"
+    assert screen.undo_seat == seat, "and it is HIS undo, not the view's"
+
+    # The view has already moved to the next player — which is exactly the
+    # case that made an earlier version hide the button the moment it was
+    # earned.  The offer follows the window, not the view.
+    assert screen.view_seat != seat
+    following = screen.state.active_player_index
+    second = _simple_card(screen, following, "Zerówka - zielony")
+    _play_card_fully(screen, following, second)
+    frame(screen)
+    # The window has MOVED, not closed: the new player has earned their own
+    # undo.  What must be gone is the first player's.
+    assert screen.undo_seat == following
+    assert not screen.state.can_undo(seat)
+
+
+def test_clicking_undo_rewinds_the_turn(screen):
+    seat, card = _play_one(screen)
+    where = screen.state.board.position_of_pawn("żółty")
+    frame(screen)
+
+    click(screen, screen.app.layout.undo_button_rect().center)
+    assert screen.state.players[seat].card_by_uid(card.uid) is card
+    assert screen.state.board.position_of_pawn("żółty") == where - 1
+    assert screen.state.active_player_index == seat
+    assert not screen.can_undo, "and the offer is gone"
+
+
+def test_the_first_players_move_can_no_longer_be_rewound(screen):
+    """Once the next player has played, the earlier turn is out of reach.
+
+    The button on screen now belongs to the SECOND player; clicking it must
+    rewind their card, never the first player's.
+    """
+    _allow_every_seat(screen)
+    seat, card = _play_one(screen)
+    where = screen.state.board.position_of_pawn("żółty")
+    following = screen.state.active_player_index
+    second = _simple_card(screen, following, "Zerówka - zielony")
+    _play_card_fully(screen, following, second)
+
+    frame(screen)
+    click(screen, screen.app.layout.undo_button_rect().center)
+    assert screen.state.board.position_of_pawn("żółty") == where, (
+        "the first player's pawn stayed where their card put it"
+    )
+    assert screen.state.players[seat].card_by_uid(card.uid) is None
+    assert screen.state.players[following].card_by_uid(second.uid) is second, (
+        "and the SECOND player's card is what came back"
+    )
+
+
+def test_the_undo_button_does_not_overlap_the_end_turn_button(screen):
+    frame(screen)
+    assert not screen.app.layout.undo_button_rect().colliderect(
+        screen.app.layout.end_turn_button)
+
+
+def test_the_ability_button_offers_liskowy_konkurs_inside_the_window(screen):
+    """Atencjusz may take the extra turn from the window, on somebody's else's
+    turn — which is the whole point of the ability."""
+    seat = screen.state.active_player_index
+    card = screen.state.deck(settings.DECK_CHARACTERS).take_titled(
+        "Atencjusz", include_discard=True)
+    if card is None:
+        for player in screen.state.players:
+            if player.character is not None and player.character.title == "Atencjusz":
+                card, player.character = player.character, None
+                break
+    screen.state.players[seat].character = card
+    _play_one(screen)
+    assert screen.state.active_player_index != seat, "his turn is over"
+
+    screen.view_seat = seat
+    frame(screen)
+    click(screen, screen.app.layout.ability_button_rect(False).center)
+    assert screen.state.active_player_index == seat, "he got the turn back"
+    assert card.uses_left == 0
+
+
+# ── the bug the state tests could not see: undo must redraw the board ────────
+def _drawn_vs_state(screen: GameScreen, pawn_id: str) -> float:
+    """How far the DRAWN pawn is from where the engine says it is."""
+    return math.dist(screen.board_view.display_position(pawn_id),
+                     screen.state.tokens[pawn_id].position)
+
+
+def test_undo_moves_the_pawn_back_on_the_RENDERED_board(screen):
+    """The regression that state-level tests are structurally blind to.
+
+    Undo restored the authoritative position correctly and the board went on
+    drawing the pawn where the card had put it: ``board_view.visual`` is the
+    board's own copy of where each pawn is drawn, and only the movement
+    reactions ever wrote it.  A rewind walks nobody, so nothing wrote it.
+
+    Asserted against ``display_position`` — what the renderer actually asks —
+    and against the ENGINE's own token position, so it cannot pass by the view
+    inventing coordinates of its own.
+    """
+    seat, card = _play_one(screen)
+    settle(screen, 120)
+    moved_to = screen.state.board.position_of_pawn("żółty")
+    drawn_after_move = screen.board_view.display_position("żółty")
+
+    frame(screen)
+    click(screen, screen.app.layout.undo_button_rect().center)
+    settle(screen, 120)
+
+    assert screen.state.board.position_of_pawn("żółty") == moved_to - 1
+    assert _drawn_vs_state(screen, "żółty") < 1.0, (
+        "the pawn is drawn where the engine no longer says it is"
+    )
+    assert screen.board_view.display_position("żółty") != drawn_after_move, (
+        "and it really did move on screen"
+    )
+
+
+def test_undo_redraws_every_pawn_not_just_the_one_that_moved(screen):
+    """A card can move several pawns, so the fix must not be per-pawn."""
+    seat, card = _play_one(screen)
+    settle(screen, 120)
+    frame(screen)
+    click(screen, screen.app.layout.undo_button_rect().center)
+    settle(screen, 120)
+    for pawn in screen.state.library.pawns:
+        assert _drawn_vs_state(screen, pawn.id) < 1.0, pawn.id
+
+
+def test_undo_restores_a_towers_drawn_order(screen):
+    """A tower is six drawn heights, not one position."""
+    state = screen.state
+    for pawn in state.library.pawns:
+        state.board.remove_pawn(pawn.id)
+    tile = state.board.positions[4].tiles[0]
+    order = [p.id for p in state.library.pawns]
+    for pawn_id in order:
+        state.board.place_pawn(pawn_id, tile.index)
+    state._sync_token_positions()
+    for pawn_id in order:
+        screen.board_view.visual[pawn_id] = state.tokens[pawn_id].position
+
+    seat = state.active_player_index
+    screen.view_seat = seat
+    card = _simple_card(screen, seat, "Zerówka - czerwony")
+    _play_card_fully(screen, seat, card)
+    settle(screen, 120)
+    assert state.board.position_of_pawn("czerwony") == 5
+
+    frame(screen)
+    click(screen, screen.app.layout.undo_button_rect().center)
+    settle(screen, 120)
+
+    assert list(state.board.pawn_tile(order[0]).stack) == order
+    for pawn_id in order:
+        assert _drawn_vs_state(screen, pawn_id) < 1.0, pawn_id
+    heights = [screen.board_view.display_position(p)[1] for p in order]
+    assert heights == sorted(heights, reverse=True), "drawn bottom-to-top"
+
+
+def test_an_in_flight_walk_does_not_survive_the_undo(screen):
+    """A tween still running would overwrite the corrected position later.
+
+    Clicked while the walk animation is mid-flight, which is exactly when a
+    real player would reach for the button.
+    """
+    seat, card = _play_one(screen)
+    frame(screen)                      # one frame only: the walk is still going
+    assert "żółty" in screen.board_view.walks, (
+        "the test is only meaningful while the pawn is actually mid-walk"
+    )
+    mid = screen.board_view.display_position("żółty")
+
+    click(screen, screen.app.layout.undo_button_rect().center)
+    assert "żółty" not in screen.board_view.walks, "the walk was abandoned at once"
+    settle(screen, 120)
+    assert _drawn_vs_state(screen, "żółty") < 1.0, (
+        "a surviving walk would have written the old destination back"
+    )
+    assert screen.board_view.display_position("żółty") != mid
+
+
+# ── where the button lives ──────────────────────────────────────────────────
+@pytest.mark.parametrize("size", [(1280, 760), (1600, 900), (1920, 1080), (2560, 1440)])
+def test_the_undo_button_is_anchored_inside_the_board(size):
+    layout = Layout(*size)
+    board = layout.board_viewport
+    rect = layout.undo_button_rect()
+    assert board.contains(rect), "inside the board area, not beside it"
+    assert not rect.colliderect(layout.turn_bar), "and off the turn-order bar"
+    # Upper-left, and in the SAME relative place at every resolution — which is
+    # what anchoring to the container rather than the screen buys.
+    assert (rect.left - board.left) / board.width < 0.05
+    assert (rect.top - board.top) / board.height < 0.06
+
+
+@pytest.mark.parametrize("cells", [18, 24, 40])
+def test_the_undo_button_covers_no_board_field(library, cells):
+    """Including START, which is the one the owner asked about by name."""
+    app = App(Layout(), headless=True, size=WINDOW)
+    state = create_game(SessionConfig(num_players=5, board_cells=cells, seed=77),
+                        library)
+    screen = GameScreen(app, LocalSession(state))
+    app.push(screen)
+    frame(screen)
+
+    rect = app.layout.undo_button_rect()
+    camera = screen.board_view.camera
+    radius = state.board.layout.tile_radius
+    for tile in state.board.tiles:
+        x, y = camera.world_to_screen(tile.position)
+        size = int(radius * camera.zoom)
+        assert not rect.colliderect(
+            pygame.Rect(x - size, y - size, 2 * size, 2 * size)
+        ), f"covers field {tile.label or tile.index}"
+
+
+def test_clicking_the_button_is_not_swallowed_by_the_board(screen):
+    """It floats over the map, which claims any click offered to it as a drag.
+
+    This is the reason the button has to be tested through a real click rather
+    than by calling the handler.
+    """
+    seat, card = _play_one(screen)
+    frame(screen)
+    where = screen.state.board.position_of_pawn("żółty")
+    click(screen, screen.app.layout.undo_button_rect().center)
+    assert screen.state.board.position_of_pawn("żółty") == where - 1
+    assert screen.board_view.dragging is None, "and the board did not start a drag"

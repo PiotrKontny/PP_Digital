@@ -171,6 +171,56 @@ class Presentation:
 
 
 @dataclass(frozen=True)
+class CardVariant:
+    """One of a card's two-or-more predefined readings.
+
+    A VARIANT IS NOT A CARD.  ``Sesja na PG`` with variant 2 selected is still
+    ``Sesja na PG``: same title, same artwork, same count, same deck identity,
+    same entry in cards.json.  Only what the card SAYS and what it DOES may
+    differ, which is exactly the three fields below.
+
+    Everything a variant leaves out is inherited from the card it belongs to,
+    so a variant that only rewrites the text is three keys of JSON and a
+    variant that only changes the rule is three others.  Deliberately small:
+    ``AKO`` and ``Nie masz Rosji`` are the next two cards to use this, and both
+    of them are a different sentence plus a different rule.
+    """
+
+    id: str
+    label: str = ""
+    #: Replacement rules text, or ``None`` to keep the card's printed one.
+    text: Optional[str] = None
+    #: Replacement ``passive`` bag.  ``None`` keeps the card's own; a variant
+    #: that declares one REPLACES rather than merges, because "the same rule
+    #: minus one key" is a thing a merge cannot express.
+    passive: Optional[Mapping[str, Any]] = None
+    #: Replacement active effect, for a variant that changes what playing the
+    #: card does rather than what holding it does.
+    effect: Optional[EffectSpec] = None
+    #: Replacement ACTIVATED ability, for a character card whose two variants
+    #: differ in what using the ability does.  Ondrej's Radar is the first:
+    #: both variants link two pawns and only the checking rule differs, so the
+    #: variant is the same ``link_pawns`` spec with one key changed.  A
+    #: character card is a card and its variants are variants; this is the
+    #: fourth field of the same small shape rather than a parallel mechanism.
+    ability: Optional[EffectSpec] = None
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "CardVariant":
+        effect_raw = raw.get("effect")
+        ability_raw = raw.get("ability")
+        return cls(
+            id=str(raw.get("id", "")),
+            label=str(raw.get("label", "")),
+            text=None if raw.get("text") is None else str(raw["text"]),
+            passive=(None if raw.get("passive") is None
+                     else dict(raw["passive"])),
+            effect=EffectSpec.from_dict(effect_raw) if effect_raw else None,
+            ability=EffectSpec.from_dict(ability_raw) if ability_raw else None,
+        )
+
+
+@dataclass(frozen=True)
 class CardDef:
     """One entry in a deck's card list."""
 
@@ -219,10 +269,87 @@ class CardDef:
     #: both, in which case the Signature face wins and ``image`` is unused.
     art: Optional[str] = None
     count: int = 1
+    #: The readings this card may be played under, in the data file's order.
+    #: EMPTY IS THE ORDINARY CASE — a card with fewer than two variants has no
+    #: variant setting anywhere in the interface, which is what keeps the
+    #: control off the twenty-nine cards that do not need one.
+    variants: tuple[CardVariant, ...] = ()
+    #: Which of them this definition is currently expressing.  Empty means
+    #: "the printed card", which for a card WITH variants is its first one.
+    variant: str = ""
+    #: The PRINTED definition, kept when a variant has been applied on top of
+    #: it.  Without it a second :meth:`with_variant` would inherit the first
+    #: variant's text wherever the second one declares none, and switching from
+    #: variant 2 back to variant 1 would leave variant 2's sentence on the
+    #: card.  Never compared and never printed: it is the same card.
+    base: Optional["CardDef"] = field(default=None, repr=False, compare=False)
 
     @property
     def is_piotrek(self) -> bool:
         return self.role == "piotrek"
+
+    # ── variants ─────────────────────────────────────────────────────────────
+    @property
+    def has_variants(self) -> bool:
+        """Whether a variant is a choice at all.
+
+        Two is the minimum: one "variant" is the card, and offering a
+        single-option selector would be a control that cannot do anything.
+        """
+        return len(self.variants) > 1
+
+    @property
+    def variant_ids(self) -> tuple[str, ...]:
+        return tuple(v.id for v in self.variants)
+
+    @property
+    def default_variant(self) -> str:
+        """The reading a table gets when nobody chose one.
+
+        The FIRST in the data file, which is why ``Sesja na PG``'s variant 1 is
+        the behaviour that shipped: a game that never opens the panel plays
+        exactly the card it played before this existed.
+        """
+        return self.variants[0].id if self.variants else ""
+
+    def variant_def(self, variant_id: str) -> Optional[CardVariant]:
+        return next((v for v in self.variants if v.id == variant_id), None)
+
+    @property
+    def selected_variant(self) -> str:
+        return self.variant or self.default_variant
+
+    def with_variant(self, variant_id: str) -> "CardDef":
+        """This card read under one of its variants.
+
+        Returns SELF when the card has no such variant, so an unknown id from
+        an older save or a hand-written message is ignored rather than
+        producing a card with no rules on it.
+
+        Only ``text``, ``passive`` and ``effect`` are touched.  The title, the
+        artwork, the count and the deck id are the card's IDENTITY and no
+        variant may reach them — that is the difference between this and simply
+        printing two cards.
+        """
+        printed = self.printed
+        variant = printed.variant_def(variant_id)
+        if variant is None:
+            return self
+        return replace(
+            printed,
+            text=printed.text if variant.text is None else variant.text,
+            passive=(dict(printed.passive) if variant.passive is None
+                     else dict(variant.passive)),
+            effect=printed.effect if variant.effect is None else variant.effect,
+            ability=printed.ability if variant.ability is None else variant.ability,
+            variant=variant.id,
+            base=printed,
+        )
+
+    @property
+    def printed(self) -> "CardDef":
+        """What cards.json says, whatever variant is currently applied."""
+        return self.base or self
 
     @property
     def opens_a_hand(self) -> bool:
@@ -267,6 +394,8 @@ class CardDef:
             art=("" if raw.get("art") is False
                  else (str(raw["art"]) if raw.get("art") is not None else None)),
             count=int(raw.get("count", 1)),
+            variants=tuple(CardVariant.from_dict(item)
+                           for item in (raw.get("variants") or [])),
         )
 
 
@@ -372,6 +501,19 @@ class Card:
         return self.definition.passive
 
     @property
+    def variant(self) -> str:
+        """Which reading this physical copy is being played under.
+
+        Read through the DEFINITION for the reason :attr:`art` is: the card is
+        whatever it has become, not what it was printed as.
+        """
+        return self.definition.selected_variant
+
+    @property
+    def has_variants(self) -> bool:
+        return self.definition.has_variants
+
+    @property
     def has_ability(self) -> bool:
         return self.definition.ability is not None
 
@@ -463,6 +605,29 @@ class DeckDef:
         cards = tuple(
             replace(card, count=max(0, int(counts[card.title])))
             if card.title in counts else card
+            for card in self.cards
+        )
+        return DeckDef(id=self.id, name=self.name, cards=cards)
+
+    def with_variants(self, variants: Mapping[str, str]) -> "DeckDef":
+        """A copy of this deck with some titles read under a chosen variant.
+
+        The third member of the :meth:`with_counts` / :meth:`with_uses` family
+        and it keeps both of their properties, for both of their reasons: a
+        title the mapping does not name keeps the variant the data gives it, so
+        an empty mapping means "as printed"; and the card ORDER is untouched,
+        because the shuffle is a permutation of this list and a list built in
+        another order shuffles differently.
+
+        A variant changes no card's ``count``, so unlike :meth:`with_counts`
+        this cannot change the SIZE of the pile — which is why applying it
+        before or after the counts makes no difference to what gets shuffled.
+        """
+        if not variants:
+            return self
+        cards = tuple(
+            card.with_variant(str(variants[card.title]))
+            if card.title in variants and card.has_variants else card
             for card in self.cards
         )
         return DeckDef(id=self.id, name=self.name, cards=cards)

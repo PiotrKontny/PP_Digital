@@ -140,6 +140,18 @@ def test_the_automatic_check_reaches_every_machine(library):
     for service in parties:
         assert service.state.leading_pawn() == leader, "the question is public"
 
+    # ICE BLOCK IS PUT ASIDE FIRST.  Piotrek is dealt a skill at setup, and
+    # when that skill happens to be Ice Block the automatic check now correctly
+    # pauses for his answer — which made this test pass or fail on the shuffle.
+    # That interaction is covered on its own in test_stage40_ice_block; what is
+    # being pinned here is that the check REACHES every machine, so the skill
+    # is removed on all of them and the check resolves straight through.
+    for state in [room.state, *[s.state for s in parties]]:
+        for player in state.players:
+            if player.skill is not None and player.skill.title == "Ice Block":
+                state.decks[settings.DECK_SKILLS].return_card(player.skill)
+                player.skill = None
+
     # The round begins on every machine, so every machine arms the same check.
     for state in [room.state, *[s.state for s in parties]]:
         state._begin_round(state.round_number + 1)
@@ -215,7 +227,7 @@ def test_every_machine_hides_and_restores_the_same_pawn(library):
     parties = [host, *clients]
     room = table.room(host.room_code)
 
-    card = force_mod(room, "Shady")
+    card = force_mod(room, "Obóz Harcerski")
     spread_pawns(room.state)
     hidden_events = room.state._sync_mod_states()
     hidden = room.state.hidden_pawn_ids
@@ -247,7 +259,7 @@ def test_a_hidden_pawn_is_a_status_and_therefore_survives_a_resync(library):
     host, clients = table.playing("Kuba", "Ola", "Antek")
     room = table.room(host.room_code)
 
-    force_mod(room, "Shady")
+    force_mod(room, "Obóz Harcerski")
     spread_pawns(room.state)
     room.state._sync_mod_states()
 

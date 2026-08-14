@@ -313,6 +313,10 @@ class ServerHub:
         out: List[Tuple[str, Message]] = []
         for room in list(self.rooms):
             out.extend(room.expire_absentees())
+            # Nie masz Rosji's decision window, on the same tick and for the
+            # same reason: a window times out precisely when nobody is sending
+            # anything.
+            out.extend(room.expire_decisions())
         for code in self.rooms.prune():
             for identity in self.identities.values():
                 if identity.room_code == code:

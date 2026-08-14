@@ -87,7 +87,7 @@
         {
           "title": "Mitoman",
           "skill": "PAA",
-          "text": "Przenosi pionka najbardziej do przodu do pionka najbardziej do tyłu",
+          "text": "Przenosi pionka najbardziej od przodu do pionka najbardziej od tyłu",
           "uses": 1,
           "ability": {
             "type": "stack_pawn",
@@ -109,10 +109,11 @@
         {
           "title": "Norbur",
           "skill": "Plac",
-          "text": "Pionki mogą poruszać się tylko pomiędzy najdalszym i najbliższym pionkiem na jedną turę. Minimum 3 pola różnicy",
+          "text": "Pionki mogą poruszać się tylko pomiędzy najdalszym i najbliższym pionkiem na jedną pełną rundę. Minimum 3 pola różnicy",
           "uses": 1,
           "ability": {
-            "type": "restrict_movement",
+            "type": "no_effect",
+            "text": "Plac: umiejętność użyta — zasadę rozstrzygacie przy stole",
             "min_gap": 3,
             "duration_turns": 1
           }
@@ -140,8 +141,33 @@
           "ability": {
             "type": "link_pawns",
             "count": 2,
-            "duration_turns": 1
-          }
+            "duration_turns": 1,
+            "check_together": true
+          },
+          "variants": [
+            {
+              "id": "check_both",
+              "label": "Wariant 1",
+              "text": "Skleja 2 pionki ze sobą na pełną rundę. Przy checku oba pionki są sprawdzane",
+              "ability": {
+                "type": "link_pawns",
+                "count": 2,
+                "duration_turns": 1,
+                "check_together": true
+              }
+            },
+            {
+              "id": "check_one",
+              "label": "Wariant 2",
+              "text": "Skleja 2 pionki ze sobą na pełną rundę. Check dotyczy tylko sprawdzanego pionka",
+              "ability": {
+                "type": "link_pawns",
+                "count": 2,
+                "duration_turns": 1,
+                "check_together": false
+              }
+            }
+          ]
         },
         {
           "title": "Dziubdziuch",
@@ -149,11 +175,70 @@
           "text": "Blokuje ruch Piotrka w dowolnym momencie rozgrywki, spala użytą kartę",
           "uses": 1,
           "ability": {
-            "type": "freeze_player",
-            "target": "piotrek",
-            "duration_turns": 1,
-            "burn_card": true
-          }
+            "type": "movement_veto",
+            "targets": "piotrek",
+            "rounds": 0,
+            "decks": [
+              "movement",
+              "chest"
+            ]
+          },
+          "variants": [
+            {
+              "id": "forever_any",
+              "label": "Wariant 1",
+              "text": "Blokuje ruch Piotrka w dowolnym momencie rozgrywki — Karty Ruchu i Karty Skrzyni",
+              "ability": {
+                "type": "movement_veto",
+                "targets": "piotrek",
+                "rounds": 0,
+                "decks": [
+                  "movement",
+                  "chest"
+                ]
+              }
+            },
+            {
+              "id": "forever_movement",
+              "label": "Wariant 2",
+              "text": "Blokuje ruch Piotrka w dowolnym momencie rozgrywki — tylko Karty Ruchu",
+              "ability": {
+                "type": "movement_veto",
+                "targets": "piotrek",
+                "rounds": 0,
+                "decks": [
+                  "movement"
+                ]
+              }
+            },
+            {
+              "id": "round_any",
+              "label": "Wariant 3",
+              "text": "Blokuje ruch Piotrka przez jedną pełną rundę — Karty Ruchu i Karty Skrzyni",
+              "ability": {
+                "type": "movement_veto",
+                "targets": "piotrek",
+                "rounds": 1,
+                "decks": [
+                  "movement",
+                  "chest"
+                ]
+              }
+            },
+            {
+              "id": "round_movement",
+              "label": "Wariant 4",
+              "text": "Blokuje ruch Piotrka przez jedną pełną rundę — tylko Karty Ruchu",
+              "ability": {
+                "type": "movement_veto",
+                "targets": "piotrek",
+                "rounds": 1,
+                "decks": [
+                  "movement"
+                ]
+              }
+            }
+          ]
         },
         {
           "title": "Atencjusz",
@@ -201,7 +286,7 @@
         },
         {
           "title": "Dług u Tomasza",
-          "text": "Wybiera dwa pionki, które nie mogą ze sobą sąsiadować przez pełną turę",
+          "text": "Wybiera dwa pionki, które nie mogą ze sobą sąsiadować przez pełną rundę",
           "uses": 1,
           "ability": {
             "type": "forbid_adjacency",

@@ -90,6 +90,15 @@ class Session:
     def poll(self) -> None:
         """Pump the network.  A local session has nothing to do."""
 
+    def tick(self, now: float) -> List[ev.GameEvent]:
+        """Periodic work the AUTHORITY owes the table.  Nothing, by default.
+
+        A client's session has nothing to do here: the server owns the clock,
+        and this machine learns that a decision window closed the way it learns
+        everything else — by being sent the command.
+        """
+        return []
+
     def close(self) -> None:
         pass
 
@@ -115,6 +124,54 @@ class LocalSession(Session):
     def __init__(self, state: GameState, bus: Optional[ev.EventBus] = None) -> None:
         super().__init__(state, bus)
         self.transport: Transport = NullTransport()
+
+    def tick(self, now: float) -> List[ev.GameEvent]:
+        """Close a Nie masz Rosji window whose time is up.
+
+        A hot-seat game has no server, so this session is the authority and
+        owns the clock exactly as the room does online.  ``now`` is passed in
+        rather than read here so the caller decides what "now" means — the
+        interface passes real time, a test passes whatever it likes, and
+        neither depends on a frame rate or on anything sleeping.
+        """
+        breakup = self.state.pending_breakup
+        if breakup is not None:
+            if breakup.opened_at is None:
+                breakup.opened_at = now
+                return []
+            if now - breakup.opened_at < breakup.seconds:
+                return []
+            return self.submit_authoritative(cmd.ResolveTowerBreakup())
+        # Ice Block's window first, and on the same clock: a hot-seat table is
+        # its own authority, so the check must time out here exactly as it does
+        # in the room.
+        check = self.state.pending_check
+        if check is not None:
+            if check.opened_at is None:
+                check.opened_at = now
+                return []
+            if now - check.opened_at < check.seconds:
+                return []
+            return self.submit_authoritative(cmd.ExpireCheckDecision())
+        decision = self.state.pending_movement
+        if decision is None:
+            return []
+        if decision.opened_at is None:
+            decision.opened_at = now
+            return []
+        if now - decision.opened_at < decision.seconds:
+            return []
+        return self.submit_authoritative(cmd.ExpireMovementDecision())
+
+    def submit_authoritative(self, command: cmd.Command) -> List[ev.GameEvent]:
+        """Apply a command of the game's own, and review the outcome after it."""
+        events = self.state.apply(command, local=False)
+        self.bus.emit_all(events)
+        for followed in victory.review(self.state):
+            extra = self.state.apply(followed, local=False)
+            self.bus.emit_all(extra)
+            events.extend(extra)
+        return events
 
     def submit(self, command: cmd.Command) -> List[ev.GameEvent]:
         events = super().submit(command)

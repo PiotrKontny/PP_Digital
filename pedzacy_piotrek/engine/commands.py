@@ -17,7 +17,7 @@ survives a trip through JSON without any per-message plumbing.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, ClassVar, Dict, Optional, Tuple, Type
+from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple, Type
 
 
 def frozen_field():
@@ -259,6 +259,27 @@ class AdjustAbilityUses(Command):
 
 
 @dataclass(frozen=True)
+class SetCardVariant(Command):
+    """Play a card under a different one of its predefined variants.
+
+    THE MATCH'S configuration, not the data file's: applying this rewrites the
+    definition every copy of that title in THIS match shares, and cards.json is
+    untouched — another table plays the other variant at the same moment.
+
+    Carries no ``player_index``, exactly as the library's other bookkeeping
+    commands do not: which variant a card is played under is a table decision
+    rather than a move, so it belongs to no seat and to no turn.  An absolute
+    id rather than a "next variant" step, because two players cycling at once
+    would otherwise land somewhere neither of them chose.
+    """
+
+    kind: ClassVar[str] = "set_card_variant"
+    deck_id: str = ""
+    title: str = ""
+    variant: str = ""
+
+
+@dataclass(frozen=True)
 class RestoreAbilityUses(Command):
     """Put an ability's remaining uses back to its configured default.
 
@@ -269,6 +290,49 @@ class RestoreAbilityUses(Command):
 
     kind: ClassVar[str] = "restore_ability_uses"
     title: str = ""
+
+
+# ── Nie masz Rosji (stage 36) ────────────────────────────────────────────────
+@dataclass(frozen=True)
+class AcceptMovement(Command):
+    """A blocker lets a paused movement happen.
+
+    Carries a ``player_index`` because it IS about a particular player: only a
+    seat holding a usable veto against this movement may answer for itself, and
+    the existing ``_OWNED_BY_PLAYER`` check is exactly that authorisation.  It
+    is deliberately NOT turn-bound — answering a movement happens on somebody
+    else's turn, which is the whole point of the card.
+    """
+
+    kind: ClassVar[str] = "accept_movement"
+    player_index: int = 0
+
+
+@dataclass(frozen=True)
+class BlockMovement(Command):
+    """A blocker stops a paused movement, spending their Nie masz Rosji.
+
+    Sent only after the interface's confirmation dialog, but the engine does
+    not know or care about that: a client that skips the dialog blocks, exactly
+    as a client that skips a highlight still moves a pawn.  The FIRST of these
+    the authority applies wins; a second finds nothing to answer.
+    """
+
+    kind: ClassVar[str] = "block_movement"
+    player_index: int = 0
+
+
+@dataclass(frozen=True)
+class ExpireMovementDecision(Command):
+    """The decision window ran out; the movement is accepted.
+
+    AUTHORITY ONLY, like every other command that represents the game itself
+    noticing something rather than a player doing something.  A client's
+    countdown is a drawing of this command arriving; if it were allowed to send
+    it, a machine with a fast clock could time everybody else out.
+    """
+
+    kind: ClassVar[str] = "expire_movement_decision"
 
 
 # ── board ────────────────────────────────────────────────────────────────────
@@ -393,6 +457,109 @@ class RevealIdentity(Command):
 
 
 @dataclass(frozen=True)
+class UndoMove(Command):
+    """Rewind my own last played card, if the window is still open.
+
+    NOT authority-only: it is a player's own action, like playing a card.  What
+    stops abuse is the ENGINE — ``can_undo`` refuses a seat that is not the
+    window's owner and refuses a window that has closed, so a forged or stale
+    command changes nothing.
+    """
+
+    kind: ClassVar[str] = "undo_move"
+    player_index: int = -1
+
+
+@dataclass(frozen=True)
+class ChooseBreakupTile(Command):
+    """Piotrek picks which field of a doubled row a scattered group lands on.
+
+    His choice, not the choice of whoever played the card that built the tower.
+    """
+
+    kind: ClassVar[str] = "choose_breakup_tile"
+    player_index: int = -1
+    tile_index: int = -1
+
+
+@dataclass(frozen=True)
+class ResolveTowerBreakup(Command):
+    """The two seconds are up: scatter the tower.
+
+    AUTHORITY ONLY.  The deadline runs on the authority's clock for the same
+    reason every other one does — a client with a fast clock must not be able
+    to scatter the board early.
+    """
+
+    kind: ClassVar[str] = "resolve_tower_breakup"
+
+
+@dataclass(frozen=True)
+class OpenCheckDecision(Command):
+    """A check is paused; Piotrek may refuse it with Ice Block.
+
+    AUTHORITY ONLY.  Deciding that a check is about to happen is
+    ``victory.review``'s job, and review only ever runs where the hidden colour
+    lives.  A client sending this would be manufacturing a window.
+    """
+
+    kind: ClassVar[str] = "open_check_decision"
+    source: str = "tower"
+    pawn_id: str = ""
+    seat: int = -1
+
+
+@dataclass(frozen=True)
+class AllowCheck(Command):
+    """Piotrek lets the check happen.  Ice Block is NOT spent."""
+
+    kind: ClassVar[str] = "allow_check"
+    player_index: int = -1
+
+
+@dataclass(frozen=True)
+class RefuseCheck(Command):
+    """Piotrek refuses the check.  One Ice Block use is spent.
+
+    The check is cancelled rather than answered, so nothing is revealed, no
+    colour is crossed off and — under checking variant 2 — no tower breaks.
+    """
+
+    kind: ClassVar[str] = "refuse_check"
+    player_index: int = -1
+
+
+@dataclass(frozen=True)
+class ExpireCheckDecision(Command):
+    """The Ice Block window ran out; the check proceeds and no use is spent.
+
+    AUTHORITY ONLY, like :class:`ExpireMovementDecision` and for the identical
+    reason: a client's countdown is a drawing of this command arriving, and a
+    machine with a fast clock must not be able to time Piotrek out early.
+    """
+
+    kind: ClassVar[str] = "expire_check_decision"
+
+
+@dataclass(frozen=True)
+class EliminatePlayer(Command):
+    """A player is out of the game: their turns are skipped from now on.
+
+    AUTHORITY ONLY, and for the same reason :class:`EliminatePawn` is.  The
+    only thing that issues it today is a failed Glockboy check, and deciding
+    that a check failed needs the hidden colour — which exists on exactly one
+    machine.  A client sending this is claiming to have knocked somebody out.
+
+    They stay in ``players``, stay in the turn order and stay connected.  This
+    is a permission being withdrawn, not a seat being removed.
+    """
+
+    kind: ClassVar[str] = "eliminate_player"
+    player_index: int = -1
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class FinishIdentitySwap(Command):
     """Alter Ego: Piotrek has picked a new colour, so play resumes.
 
@@ -424,6 +591,10 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
         AdjustDeckCount,
         AdjustAbilityUses,
         RestoreAbilityUses,
+        SetCardVariant,
+        AcceptMovement,
+        BlockMovement,
+        ExpireMovementDecision,
         MoveToken,
         PickUpToken,
         SetRound,
@@ -432,6 +603,14 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
         ToggleMark,
         BeginMatch,
         EliminatePawn,
+        EliminatePlayer,
+        UndoMove,
+        ChooseBreakupTile,
+        ResolveTowerBreakup,
+        OpenCheckDecision,
+        AllowCheck,
+        RefuseCheck,
+        ExpireCheckDecision,
         DeclareVictory,
         RevealIdentity,
         FinishIdentitySwap,
@@ -441,5 +620,9 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
 #: Commands only the authority may issue.  A client sending one is not making a
 #: mistake, it is cheating: these are how a match starts, how a colour is ruled
 #: out and how a winner is declared.
-AUTHORITY_ONLY = (BeginMatch, EliminatePawn, DeclareVictory, RevealIdentity,
-                  FinishIdentitySwap)
+AUTHORITY_ONLY = (BeginMatch, EliminatePawn, EliminatePlayer, DeclareVictory,
+                  RevealIdentity, FinishIdentitySwap, ExpireMovementDecision,
+                  UndoMove,
+        ChooseBreakupTile,
+        ResolveTowerBreakup,
+        OpenCheckDecision, ExpireCheckDecision)

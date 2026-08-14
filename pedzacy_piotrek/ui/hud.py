@@ -550,11 +550,16 @@ class CharacterPanel(Panel):
 
         left = source_card.uses_left
         total = source_card.uses_total
-        # Sesja na PG greys the button exactly the way spending the last use
-        # does — same ``enabled=False``, same styling — but it is a DIFFERENT
-        # state: the charges are untouched and come back when the mod leaves,
-        # so the caption still shows how many are left rather than "ZUŻYTE".
-        locked = ctx.state.abilities_locked
+        # Sesja na PG and the pawns-on-START rule grey the button exactly the
+        # way spending the last use does — same ``enabled=False``, same styling
+        # — but they are a DIFFERENT state: the charges are untouched and come
+        # back when the block lifts, so the caption still shows how many are
+        # left rather than "ZUŻYTE".  ONE QUESTION, asked of the engine, so the
+        # button is grey exactly when the command would be refused: a button
+        # that lights up for a rule the engine enforces is a lie the player
+        # only discovers by clicking it.
+        blocked = ctx.state.ability_refusal()
+        locked = blocked is not None
         available = source_card.ability_available and not locked
         hovered = rect.collidepoint(ctx.mouse) and available
 
@@ -566,7 +571,8 @@ class CharacterPanel(Panel):
         drawn = r.interactive_panel(rect, style, surface, radius=8)
 
         if locked and source_card.ability_available:
-            label = "SESJA NA PG"
+            label = ("SESJA NA PG" if ctx.state.abilities_locked
+                     else "PIONKI NA STARCIE")
         elif total is None:
             label = "UŻYJ UMIEJĘTNOŚCI"
         elif available:
@@ -752,6 +758,25 @@ class PlayerTiles(Panel):
             pygame.draw.line(surface, lighten(pencil_style.text, 0.3 if hovered else 0.0),
                              (drawn.left + 4, drawn.bottom - 4),
                              (drawn.right - 4, drawn.top + 4), 2)
+
+            if player.eliminated:
+                # ONE LARGE X ACROSS THE WHOLE TILE, drawn last so it crosses
+                # out the name, the card count and the pencil together — the
+                # character is out of the game, not merely unavailable.  On the
+                # existing seat tiles rather than in a second player list, so
+                # the crossed-out seat keeps its place in the same row and
+                # everybody can see whose turns are being skipped.
+                self._elimination_cross(r, surface, rect, theme)
+
+    @staticmethod
+    def _elimination_cross(r, surface, rect, theme) -> None:
+        """The X over a seat that is out of the game."""
+        inset = 6
+        box = rect.inflate(-inset * 2, -inset * 2)
+        for width, colour in ((5, darken(theme.invalid, 0.55)),
+                              (3, theme.invalid)):
+            pygame.draw.line(surface, colour, box.topleft, box.bottomright, width)
+            pygame.draw.line(surface, colour, box.bottomleft, box.topright, width)
 
     def handle_click(self, ctx: HudContext, button: int, ui) -> List[cmd.Command]:
         if button != 1:

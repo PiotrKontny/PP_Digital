@@ -69,7 +69,7 @@ def test_deck_sizes_match_the_data_file(library):
     # the ODDS are now a balance decision rather than a side effect of the
     # supply fix.  The supply itself is unchanged — 17 is above 16 — and
     # test_the_deck_can_supply_a_full_table_indefinitely still proves it.
-    assert len(library.deck(settings.DECK_CHEST).build_cards()) == 17
+    assert len(library.deck(settings.DECK_CHEST).build_cards()) == 18
     assert len(library.deck(settings.DECK_CHARACTERS).build_cards()) == 10
     assert len(library.deck(settings.DECK_SKILLS).build_cards()) == 3
     assert len(library.pawns) == 6

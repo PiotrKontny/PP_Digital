@@ -511,7 +511,29 @@
         {
           "title": "AKO",
           "text": "Wszystkie ruchy poruszają jednego sąsiadującego pionka",
-          "count": 1
+          "count": 1,
+          "passive": {
+            "carry_neighbour": true
+          },
+          "variants": [
+            {
+              "id": "with_stack",
+              "label": "Wariant 1",
+              "text": "Wszystkie ruchy poruszają jednego sąsiadującego pionka",
+              "passive": {
+                "carry_neighbour": true
+              }
+            },
+            {
+              "id": "alone",
+              "label": "Wariant 2",
+              "text": "Wszystkie ruchy poruszają TYLKO jednego sąsiadującego pionka",
+              "passive": {
+                "carry_neighbour": true,
+                "carry_neighbour_alone": true
+              }
+            }
+          ]
         },
         {
           "title": "Halloween",
@@ -527,7 +549,26 @@
           "count": 2,
           "passive": {
             "abilities_locked": true
-          }
+          },
+          "variants": [
+            {
+              "id": "lock",
+              "label": "Wariant 1",
+              "text": "Umiejętności postaci nie mogą być używane",
+              "passive": {
+                "abilities_locked": true
+              }
+            },
+            {
+              "id": "lock_and_cancel",
+              "label": "Wariant 2",
+              "text": "Umiejętności postaci nie mogą być używane, a wszystkie obecnie działające efekty umiejętności są anulowane",
+              "passive": {
+                "abilities_locked": true,
+                "cancel_ability_effects": true
+              }
+            }
+          ]
         },
         {
           "title": "Paczka",
@@ -597,8 +638,29 @@
           "text": "Przez następne dwie pełne rundy po zagraniu tej karty uzyskujesz możliwość zablokowania jednego dowolnego ruchu przeciwnika",
           "count": 2,
           "effect": {
-            "type": "manual"
-          }
+            "type": "movement_veto",
+            "rounds": 2
+          },
+          "variants": [
+            {
+              "id": "two_rounds",
+              "label": "Wariant 1",
+              "text": "Przez następne dwie pełne rundy po zagraniu tej karty uzyskujesz możliwość zablokowania jednego dowolnego ruchu przeciwnika",
+              "effect": {
+                "type": "movement_veto",
+                "rounds": 2
+              }
+            },
+            {
+              "id": "one_round",
+              "label": "Wariant 2",
+              "text": "Przez następną jedną pełną rundę po zagraniu tej karty uzyskujesz możliwość zablokowania jednego dowolnego ruchu przeciwnika",
+              "effect": {
+                "type": "movement_veto",
+                "rounds": 1
+              }
+            }
+          ]
         },
         {
           "title": "Gambit Patusa",
@@ -654,6 +716,15 @@
             }
           },
           "count": 1
+        },
+        {
+          "title": "Herold",
+          "text": "Kopiuje i wykonuje umiejętność dowolnej postaci w grze",
+          "count": 1,
+          "effect": {
+            "type": "copy_ability",
+            "asks": true
+          }
         }
       ]
     }

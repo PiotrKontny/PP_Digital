@@ -344,7 +344,7 @@ def test_rage_quit_giving_shady_its_pawn_back_replicates(library):
 
     pose(room, parties, [(pawn.id, 2 + index)
                          for index, pawn in enumerate(room.state.library.pawns)])
-    force_mod(room, parties, "Shady", 0)
+    force_mod(room, parties, "Obóz Harcerski", 0)
     force_mod(room, parties, "Paczka", 1)
     hidden = room.state.hidden_pawn_ids
     assert len(hidden) == 1

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..board.tiles import Tile, TileKind
 from . import commands as cmd
@@ -189,6 +189,90 @@ def checkable(state, pawn_id: Optional[str]) -> bool:
     return bool(pawn_id) and pawn_id not in state.eliminated_pawns
 
 
+def escaped_pawn(state, hidden: str) -> Optional[str]:
+    """The pawn whose arrival at the finish wins the match for Piotrek.
+
+    TWO VARIANTS, AND ONLY THE CONDITION DIFFERS.  ``own_pawn`` is the game as
+    it has always been: the colour Piotrek is actually hiding behind has to get
+    there.  ``any_pawn`` lets any pawn do it.
+
+    WHAT THIS DELIBERATELY DOES NOT TOUCH.  The hidden colour is still hidden,
+    still the thing a check is asking about, and still what the reveal shows at
+    the end — the ``Verdict`` carries ``hidden`` in both variants, so winning
+    on somebody else's pawn does not rename Piotrek or leak which pawn he was.
+    Checking, movement and ownership are all read from the same state they
+    always were; nothing else in the module asks this question.
+    """
+    if reached_finish(state, hidden):
+        return hidden
+    if getattr(state, "victory_variant", "own_pawn") != "any_pawn":
+        return None
+    for pawn in visible_pawns(state):
+        if reached_finish(state, pawn.id):
+            return pawn.id
+    return None
+
+
+ICE_BLOCK = "refuse_check"
+
+
+def ice_block_uses(state) -> int:
+    """How many Ice Blocks Piotrek has left, read from the ordinary card.
+
+    The ability-use system IS the counter, exactly as it is for every other
+    character: a seat holding the Piotrek card whose ``ability`` is
+    ``refuse_check``.  No parallel tally, and a table where the Card Library
+    has set the uses to nought simply never opens the window.
+    """
+    return 0 if ice_block_card(state) is None else max(
+        0, int(getattr(ice_block_card(state), "uses_left", 0)))
+
+
+def ice_block_card(state):
+    """The card carrying Ice Block, or ``None``.
+
+    It is one of PIOTREK'S SKILLS — the separate deck he draws from — and not
+    a character ability, which is why this looks at ``player.skill``.  Both are
+    checked all the same, so a future table that hands Ice Block out as a
+    character ability instead needs no change here.
+    """
+    seat = piotrek_seat(state)
+    player = state.player(seat) if seat is not None else None
+    if player is None:
+        return None
+    for card in (getattr(player, "skill", None),
+                 getattr(player, "character", None)):
+        ability = getattr(card, "ability", None) if card is not None else None
+        if ability is not None and str(ability.type) == ICE_BLOCK:
+            if getattr(card, "ability_available", False):
+                return card
+    return None
+
+
+def ice_block_pending(state, source: str, pawn_id: str) -> List[cmd.Command]:
+    """Open Piotrek's window if he may refuse this check, else ``[]``.
+
+    THE ONE GATE EVERY CHECK PASSES THROUGH.  The three checking routes — the
+    completed tower, Squid Game's automatic check and Glockboy's deliberate one
+    — all ask this before resolving, so a fourth added later inherits the
+    ability by calling the same function rather than by remembering to.
+
+    Returns a command rather than mutating, like everything else in this
+    module: the window is state every client has to agree about, so it is
+    opened by a logged command and not by the authority quietly setting a flag.
+    """
+    if getattr(state, "pending_check", None) is not None:
+        return []                       # already asked; waiting for an answer
+    if getattr(state, "check_allowed", None) == pawn_id:
+        return []                       # he has already said yes to this one
+    if ice_block_uses(state) <= 0:
+        return []
+    seat = piotrek_seat(state)
+    if seat is None:
+        return []
+    return [cmd.OpenCheckDecision(source=source, pawn_id=pawn_id, seat=seat)]
+
+
 # ── the one decision ─────────────────────────────────────────────────────────
 def review(state) -> List[cmd.Command]:
     """What follows from the table as it now stands.
@@ -199,6 +283,11 @@ def review(state) -> List[cmd.Command]:
     tower, and a match that has ended is not looked at again.
     """
     if not state.phase.playable:
+        return []
+    if getattr(state, "pending_check", None) is not None:
+        # A check is on the table waiting for Piotrek.  Nothing is decided
+        # until he answers or the clock runs out — including a victory, which
+        # could otherwise resolve out from under an unanswered question.
         return []
     hidden = hidden_pawn(state)
 
@@ -230,10 +319,20 @@ def review(state) -> List[cmd.Command]:
     player = state.player(seat) if seat is not None else None
     name = player.name if player is not None else ""
 
-    if reached_finish(state, hidden):
+    if escaped_pawn(state, hidden) is not None:
+        # The VERDICT still names the hidden colour, whichever pawn crossed
+        # the line: the reveal is about who Piotrek was, not about which pawn
+        # happened to finish.
         return [cmd.DeclareVictory(outcome=Outcome.PIOTREK.value, pawn_id=hidden,
                                    piotrek_seat=seat if seat is not None else -1,
                                    piotrek_name=name)]
+
+    # A check somebody ASKED for is answered before anything else on the
+    # table, because it is a question that has been put and is waiting.
+    # Glockboy's "Where are you Marcus?" is the only thing that asks it today.
+    asked = getattr(state, "pending_pawn_check", None)
+    if asked:
+        return _asked_check(state, asked, hidden, seat, name)
 
     # Squid Game REPLACES the checking mechanic rather than adding to it: while
     # it is in the rack, building a tower proves nothing and the only check in
@@ -248,11 +347,92 @@ def review(state) -> List[cmd.Command]:
         # Either the tower is not complete, or its bottom colour has already
         # been ruled out — and a colour is never checked twice.
         return []
-    if bottom == hidden:
-        return [cmd.DeclareVictory(outcome=Outcome.HUNTERS.value, pawn_id=hidden,
-                                   piotrek_seat=seat if seat is not None else -1,
-                                   piotrek_name=name)]
-    return [cmd.EliminatePawn(pawn_id=bottom)]
+    if getattr(state, "check_needs_separation", False):
+        # Ice Block refused the last one.  "Pionki muszą być rozdzielone przed
+        # kolejnym sprawdzeniem": this same intact tower proves nothing until
+        # it has come apart, or a refusal would simply be re-asked next command.
+        return []
+    waiting = ice_block_pending(state, "tower", bottom)
+    if waiting:
+        return waiting
+    _, commands = _resolve_check(state, bottom, hidden, seat, name)
+    return commands
+
+
+def _asked_check(state, asked, hidden: str, seat: Optional[int],
+                 name: str) -> List[cmd.Command]:
+    """Settle a check a player deliberately made, and charge them if it failed.
+
+    THE ORDINARY HUNTER VICTORY, not a second ending.  A correct guess produces
+    exactly the ``DeclareVictory`` a completed tower would have produced, with
+    the same outcome, the same reveal, the same overlay and the same three ways
+    out — Glockboy's ability is another route to the existing ending, and there
+    is deliberately no second game-over path for it to take.
+
+    A wrong guess answers with TWO commands, and both of them are ordinary:
+    the colour is crossed off every notepad exactly as a failed tower crosses
+    one off, and the seat that staked itself is out.  The match keeps running.
+    """
+    checked, staked = str(asked[0]), int(asked[1])
+    waiting = ice_block_pending(state, "asked", checked)
+    if waiting:
+        return waiting
+    if not checkable(state, checked):
+        # Already ruled out, so the guess cannot teach anybody anything and
+        # cannot cost anybody anything.  Drop the question.
+        return [cmd.EliminatePawn(pawn_id=checked)]
+    found, commands = _resolve_check(state, checked, hidden, seat, name)
+    if found:
+        return commands
+    out: List[cmd.Command] = list(commands)
+    if staked >= 0:
+        player = state.player(staked)
+        who = player.name if player is not None else ""
+        out.append(cmd.EliminatePlayer(
+            player_index=staked,
+            reason=f"Nietrafione sprawdzenie: {checked}" if not who
+            else f"{who}: nietrafione sprawdzenie ({checked})",
+        ))
+    return out
+
+
+def checked_with(state, pawn_id: str) -> List[str]:
+    """Every colour a check on ``pawn_id`` actually inspects, in order.
+
+    ONE CHECK, POSSIBLY SEVERAL COLOURS.  Radar's variant 1 says that checking
+    one linked pawn checks the other; the linked pair is therefore not two
+    checks in sequence but one check with two answers, and every checking route
+    in the game asks this rather than each of them growing a Radar clause.
+
+    Colours already ruled out are dropped: a check never inspects the same
+    colour twice, and a partner that has already been crossed off adds nothing.
+    The pawn being checked comes FIRST, so a failed check reads as \"we looked
+    at blue, and pink came with it\".
+    """
+    from . import effects
+
+    group = [pawn_id, *effects.checks_together(state, pawn_id)]
+    return [colour for colour in group if checkable(state, colour)]
+
+
+def _resolve_check(state, pawn_id: str, hidden: str, seat: Optional[int],
+                   name: str) -> Tuple[bool, List[cmd.Command]]:
+    """Answer one check, following any Radar link out from it.
+
+    Returns ``(found_piotrek, commands)``.  A linked partner that turns out to
+    be Piotrek ends the match exactly as the checked pawn would have — that is
+    what \"both pawns are checked\" means, and the alternative (checking a pawn
+    but declining to notice the answer) would be a different rule.
+    """
+    colours = checked_with(state, pawn_id)
+    if not colours:
+        return False, []
+    if hidden in colours:
+        return True, [cmd.DeclareVictory(
+            outcome=Outcome.HUNTERS.value, pawn_id=hidden,
+            piotrek_seat=seat if seat is not None else -1,
+            piotrek_name=name)]
+    return False, [cmd.EliminatePawn(pawn_id=colour) for colour in colours]
 
 
 def _lead_check(state, hidden: str, seat: Optional[int],
@@ -269,8 +449,10 @@ def _lead_check(state, hidden: str, seat: Optional[int],
     checked = getattr(state, "pending_lead_check", None)
     if not checked or not checkable(state, checked):
         return []
-    if checked == hidden:
-        return [cmd.DeclareVictory(outcome=Outcome.HUNTERS.value, pawn_id=hidden,
-                                   piotrek_seat=seat if seat is not None else -1,
-                                   piotrek_name=name)]
-    return [cmd.EliminatePawn(pawn_id=checked)]
+    waiting = ice_block_pending(state, "lead", checked)
+    if waiting:
+        return waiting
+    # Through the shared resolver, so a pawn Radar has linked drags its partner
+    # into the automatic check exactly as it does into a deliberate one.
+    _, commands = _resolve_check(state, checked, hidden, seat, name)
+    return commands

@@ -53,11 +53,28 @@ def finish_tile(state):
 
 
 def stack_everyone_on(state, tile_index: int, bottom: str) -> None:
-    """Build the tower the hunters have to build, with a chosen pawn beneath."""
+    """Build the tower the hunters have to build, with a chosen pawn beneath.
+
+    ICE BLOCK IS ANSWERED HERE.  Piotrek is dealt a skill at setup, and when
+    that skill is Ice Block the engine now offers him a window before any check
+    resolves — correct, and tested on its own in ``test_stage40_ice_block``.
+    These tests are about what a check DECIDES, so the window is opened and
+    allowed, which is the path that leaves the check exactly as it was.
+    """
     order = [bottom] + [p.id for p in state.library.pawns if p.id != bottom]
     for pawn_id in order:
         state.board.place_pawn(pawn_id, tile_index)
     state._sync_token_positions()
+    allow_any_check(state)
+
+
+def allow_any_check(state) -> None:
+    """Open and allow an Ice Block window if one is due.  Costs no use."""
+    pending = victory.review(state)
+    if pending and pending[0].kind == "open_check_decision":
+        state.apply(pending[0], local=False)
+        state.apply(cmd.AllowCheck(player_index=state.pending_check.seat),
+                    local=False)
 
 
 # ── the rules ────────────────────────────────────────────────────────────────

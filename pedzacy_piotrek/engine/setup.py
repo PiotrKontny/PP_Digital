@@ -50,6 +50,11 @@ def build_decks(library: ContentLibrary, rng: random.Random,
     to agree on the numbering.  Deck position gives that for free, and it is
     stable regardless of how many games the process has already built.
 
+    THE CHOSEN VARIANTS are applied here too, and for the same reason: a
+    variant is configuration of the match, not an edit to cards.json.  Another
+    match built from another config plays the same card the other way, and the
+    file on disk never moves.
+
     THREE decks now have their composition set by the lobby — Movement, Mody
     Patusa and Chest — and the two ability decks have their charges set.  All
     of it is applied BEFORE the shuffle, because a deck resized afterwards is a
@@ -62,11 +67,18 @@ def build_decks(library: ContentLibrary, rng: random.Random,
         settings.DECK_CHEST: dict(config.chest_counts) if config else {},
     }
     ability_uses = dict(config.ability_uses) if config is not None else {}
+    card_variants = dict(config.card_variants) if config is not None else {}
     decks: Dict[str, Deck] = {}
     for ordinal, deck_id in enumerate(library.deck_order):
         definition = library.deck(deck_id)
         if counts.get(deck_id):
             definition = definition.with_counts(counts[deck_id])
+        # The chosen VARIANT of a card, applied here for the same reason the
+        # counts and the charges are: it belongs to the definition every copy
+        # in this match shares, and a match is built from a config.  It cannot
+        # change the size of the pile, so the shuffle below is unaffected.
+        if card_variants:
+            definition = definition.with_variants(card_variants)
         if ability_uses and deck_id in (settings.DECK_CHARACTERS,
                                         settings.DECK_SKILLS):
             definition = definition.with_uses(ability_uses)

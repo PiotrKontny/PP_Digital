@@ -75,6 +75,10 @@ class LibraryEntry:
     owner: str = ""
     #: The ability's printed name ("Jazdy"), when it differs from the card's.
     ability: str = ""
+    #: Which variant the display card is currently showing, so the entry can
+    #: notice the match has moved on and rebuild.  Empty for the great majority
+    #: of cards, which have no variants at all.
+    variant: str = ""
 
 
 @dataclass
@@ -94,6 +98,12 @@ class LibraryTab:
     #: The deck whose composition this tab edits, or "" for the abilities.
     deck_id: str = ""
     abilities: bool = False
+
+    @property
+    def has_variants(self) -> bool:
+        """Whether ANY card here has variants, which is a question about the
+        GRID: the row height is shared by every cell in the tab."""
+        return any(entry.card.has_variants for entry in self.entries)
 
 
 class CardLibrary:
@@ -138,7 +148,27 @@ class CardLibrary:
 
     # ── what is in it ────────────────────────────────────────────────────────
     def _display_card(self, definition: CardDef) -> Card:
-        return Card(definition)
+        """One throwaway card to draw, read the way THIS MATCH reads it.
+
+        A card with variants is shown under the variant the match is playing —
+        the description on its face is the one the rules are actually using —
+        and that comes from the game state, exactly as every number in this
+        file does.  The library still invents nothing: it asks.
+        """
+        variant = ""
+        if definition.has_variants:
+            chosen = self.state.variant_definition(definition.deck_id,
+                                                   definition.title)
+            if chosen is not None:
+                definition = chosen
+                variant = chosen.selected_variant
+        card = Card(definition)
+        return card
+
+    def _entry_for(self, definition: CardDef, **kwargs) -> LibraryEntry:
+        card = self._display_card(definition)
+        return LibraryEntry(card=card, title=definition.title,
+                            variant=card.variant, **kwargs)
 
     def _deck_tab(self, deck_id: str, label: str, heading: str) -> LibraryTab:
         """One table deck, in the data file's own order.
@@ -148,11 +178,8 @@ class CardLibrary:
         here sorts or shuffles: a library that reordered itself between two
         openings would be unusable as a reference.
         """
-        entries = [
-            LibraryEntry(card=self._display_card(definition),
-                         title=definition.title)
-            for definition in self.library.deck(deck_id).cards
-        ]
+        entries = [self._entry_for(definition)
+                   for definition in self.library.deck(deck_id).cards]
         return LibraryTab(id=deck_id, label=label, heading=heading,
                           entries=entries, deck_id=deck_id)
 
@@ -188,10 +215,8 @@ class CardLibrary:
                     continue
                 owner = (definition.title if deck_id == settings.DECK_CHARACTERS
                          else piotrek)
-                entries.append(LibraryEntry(
-                    card=self._display_card(definition),
-                    title=definition.title,
-                    owner=owner,
+                entries.append(self._entry_for(
+                    definition, owner=owner,
                     ability=definition.skill or definition.title,
                 ))
         return LibraryTab(id="abilities", label="Umiejętności",
@@ -290,9 +315,19 @@ class CardLibrary:
         columns = layout.card_library_columns
         return (len(self.entries) + columns - 1) // max(1, columns)
 
+    @property
+    def tab_has_variants(self) -> bool:
+        """Whether the OPEN TAB needs a variant row under every card.
+
+        Asked of the tab rather than of each card so the grid stays a grid;
+        see ``Layout.card_library_cell_size``.
+        """
+        return self.tab.has_variants and not self.tab.abilities
+
     def max_scroll(self, layout: Layout) -> int:
         content = layout.card_library_content
-        _, cell_h = layout.card_library_cell_size(self.tab.abilities)
+        _, cell_h = layout.card_library_cell_size(self.tab.abilities,
+                                                  self.tab_has_variants)
         return max(0, self.rows(layout) * cell_h - content.height)
 
     def _clamp_scroll(self, layout: Layout) -> None:
@@ -300,7 +335,8 @@ class CardLibrary:
 
     def cell_rect(self, index: int, layout: Layout) -> pygame.Rect:
         return layout.card_library_cell_rect(index, self.tab.abilities,
-                                             self.scroll)
+                                             self.scroll,
+                                             self.tab_has_variants)
 
     def card_rect(self, index: int, layout: Layout) -> pygame.Rect:
         """The card itself inside its cell: centred, under the owner band."""
@@ -345,6 +381,16 @@ class CardLibrary:
             boxes["draw"] = pygame.Rect(cell.centerx - width // 2,
                                         boxes["stepper"].bottom,
                                         width, layout.card_library_button_h)
+            if self.tab_has_variants:
+                # UNDER everything, and never over the card: the variant is a
+                # setting about the card, and stage 31's rule is that nothing
+                # the project controls goes on a card face.  The box is
+                # reserved for every cell in the tab so the columns line up;
+                # only a card that HAS variants draws in it.
+                boxes["variant"] = pygame.Rect(cell.centerx - width // 2,
+                                               boxes["draw"].bottom,
+                                               width,
+                                               layout.card_library_button_h)
         return boxes
 
     def _stepper(self, box: pygame.Rect, layout: Layout) -> Optional[Stepper]:
@@ -442,7 +488,8 @@ class CardLibrary:
         return True
 
     def _wheel_step(self, layout: Layout) -> int:
-        _, cell_h = layout.card_library_cell_size(self.tab.abilities)
+        _, cell_h = layout.card_library_cell_size(self.tab.abilities,
+                                                  self.tab_has_variants)
         return max(24, int(cell_h * WHEEL_FRACTION))
 
     def _click_grid(self, mouse: Tuple[int, int], layout: Layout) -> None:
@@ -453,6 +500,11 @@ class CardLibrary:
             restore = boxes.get("restore")
             if restore is not None and restore.collidepoint(mouse):
                 self.submit(cmd.RestoreAbilityUses(title=entry.title))
+                return
+            variant_box = boxes.get("variant")
+            if (variant_box is not None and entry.card.has_variants
+                    and variant_box.collidepoint(mouse)):
+                self._cycle_variant(entry)
                 return
             fetch = boxes.get("draw")
             if fetch is not None and fetch.collidepoint(mouse):
@@ -470,6 +522,34 @@ class CardLibrary:
                 self._bump(entry, 1 if delta > 0 else -1)
                 return
 
+    def _next_variant(self, entry: LibraryEntry) -> str:
+        """The variant after the one showing, wrapping round.
+
+        The CONTROL cycles, but the COMMAND it sends names the variant it
+        wants: two players clicking at the same moment must not end up
+        somewhere neither of them chose, and an absolute id is what makes the
+        second click a no-op instead of a second step.
+        """
+        ids = list(entry.card.definition.printed.variant_ids)
+        if not ids:
+            return ""
+        current = self.state.card_variant(entry.card.deck_id, entry.title)
+        index = ids.index(current) if current in ids else 0
+        return ids[(index + 1) % len(ids)]
+
+    def _cycle_variant(self, entry: LibraryEntry) -> None:
+        """Ask for the next variant.  Changes nothing here — see :meth:`_bump`.
+
+        The setting belongs to the MATCH, so it leaves as a Command and comes
+        back as a change to the game state, exactly as a deck count does.  The
+        base card definition in cards.json is not involved and is not edited.
+        """
+        wanted = self._next_variant(entry)
+        if wanted:
+            self.submit(cmd.SetCardVariant(deck_id=entry.card.deck_id,
+                                           title=entry.title,
+                                           variant=wanted))
+
     def _bump(self, entry: LibraryEntry, delta: int) -> None:
         """The ONLY place this file changes anything, and it changes nothing.
 
@@ -485,9 +565,31 @@ class CardLibrary:
                                             title=entry.title, delta=delta))
 
     # ── frame ────────────────────────────────────────────────────────────────
+    def _refresh_variants(self) -> None:
+        """Rebuild any display card the match no longer reads the way it does.
+
+        The library holds no settings of its own; the display cards are the one
+        thing it caches, and only because a card needs an object to be drawn
+        from.  So this is the same rule as every number in this file — read the
+        live state, and follow it — applied to the one cached thing.  A card
+        whose variant has not moved is left alone, so this costs nothing on the
+        frames where nothing happened.
+        """
+        for tab in self.tabs:
+            for index, entry in enumerate(tab.entries):
+                if not entry.card.has_variants:
+                    continue
+                current = self.state.card_variant(entry.card.deck_id,
+                                                  entry.title)
+                if current and current != entry.variant:
+                    definition = entry.card.definition.printed
+                    tab.entries[index] = self._entry_for(
+                        definition, owner=entry.owner, ability=entry.ability)
+
     def update(self, dt: float, layout: Layout, mouse: Tuple[int, int]) -> None:
         if not self.active:
             return
+        self._refresh_variants()
         self.appear = approach(self.appear, 1.0, 12.0, dt)
         self.close_button.update(mouse, dt)
         if self.notice_left > 0.0:
@@ -664,10 +766,34 @@ class CardLibrary:
         if stepper is not None:
             stepper.draw(r, str(count), mouse, surface)
         self._draw_action(r, surface, boxes["draw"], "DOBIERZ KARTĘ", mouse)
+        box = boxes.get("variant")
+        if box is not None and entry.card.has_variants:
+            # ONLY for a card that has variants.  The room is reserved for
+            # every cell in the tab, but an ordinary card draws nothing in it:
+            # a selector offering one option is a control that cannot do
+            # anything, and twenty-nine of the thirty-one cards have none.
+            self._draw_action(r, surface, box, self._variant_caption(entry),
+                              mouse, selected=True)
+
+    def _variant_caption(self, entry: LibraryEntry) -> str:
+        """What the variant button says: the reading in force, and how many.
+
+        "WARIANT 2/2" rather than a bare name, because the player needs to know
+        both which one is on and that there is another — the description itself
+        is on the card face above, which is where a card's text belongs.
+        """
+        printed = entry.card.definition.printed
+        ids = list(printed.variant_ids)
+        current = self.state.card_variant(entry.card.deck_id, entry.title)
+        index = (ids.index(current) if current in ids else 0) + 1
+        chosen = printed.variant_def(current)
+        label = (chosen.label if chosen and chosen.label
+                 else f"WARIANT {index}")
+        return f"{label.upper()}  ({index}/{len(ids)})"
 
     def _draw_action(self, r: Renderer, surface: pygame.Surface,
                      rect: pygame.Rect, caption: str,
-                     mouse: Tuple[int, int]) -> None:
+                     mouse: Tuple[int, int], selected: bool = False) -> None:
         """An action button under a card.
 
         Stateless, taking its hover straight from the cursor: the grid scrolls
@@ -679,7 +805,8 @@ class CardLibrary:
         style = r.emphasis(fill=theme.btn_idle_bg, border=theme.btn_idle_border,
                            text=theme.btn_text,
                            hover=1.0 if rect.collidepoint(mouse) else 0.0,
-                           enabled=True, accent=theme.brass_light)
+                           selected=selected, enabled=True,
+                           accent=theme.brass_light)
         drawn = r.interactive_panel(rect, style, surface, radius=8)
         r.fit_spaced_text(caption, drawn, style.text, surface, spacing=1,
                           padding=8, min_size=8, height_ratio=0.44)

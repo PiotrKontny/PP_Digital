@@ -70,7 +70,7 @@ def test_there_is_a_tab_for_every_category(library):
     panel = screen.settings_panel
     assert [tab.id for tab in panel.tabs] == [
         settings.DECK_MOVEMENT, settings.DECK_MODS, settings.DECK_CHEST,
-        "abilities",
+        "abilities", "variants", "rules", "copy",
     ]
     assert len(panel.tab_rects) == len(panel.tabs)
 
@@ -101,6 +101,7 @@ def test_the_chest_tab_shows_the_stage_27_counts(library):
         "Balbinka": 2,
         "Nie masz Rosji": 2,
         "Gambit Patusa": 3,
+        "Herold": 1,
         "Shady": 2,
         "Gejtos": 3,
         "Gamechanger": 1,
@@ -365,7 +366,7 @@ def test_the_host_screen_offers_the_same_panel(library):
     app.push(screen)
     assert [tab.id for tab in screen.settings_panel.tabs] == [
         settings.DECK_MOVEMENT, settings.DECK_MODS, settings.DECK_CHEST,
-        "abilities",
+        "abilities", "variants", "rules", "copy",
     ]
 
 

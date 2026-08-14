@@ -141,6 +141,9 @@ class BoardView:
 
         bus.subscribe(ev.TokenMoved, self._on_token_moved)
         bus.subscribe(ev.TokenWalked, self._on_token_walked)
+        bus.subscribe(ev.TileRestacked, self._on_tile_restacked)
+        bus.subscribe(ev.TowerGroupPlaced, self._on_tower_group_placed)
+        bus.subscribe(ev.MoveUndone, self._on_move_undone)
 
     def build(self) -> None:
         """Paint the static terrain.  Requires a live display surface."""
@@ -229,6 +232,113 @@ class BoardView:
                 delay=self.walk_delay + i * 0.09,
                 hop=12.0 if not event.backward else 7.0,
                 on_step=lambda position, c=colour: self.particles.dust(position, c),
+            )
+
+    def resync(self) -> None:
+        """Rebuild every drawn position from the ENGINE, discarding animation.
+
+        THE GENERAL ANSWER to a state change the board did not watch happen.
+        Undo is the first caller and the reason this exists, but the shape of
+        the bug is older than undo: ``self.visual`` is the board's own copy of
+        where each pawn is drawn, and only the movement reactions ever wrote
+        it.  Anything that rearranges the board WITHOUT walking a pawn — a
+        rewind, a restack, a scatter — leaves the engine right and the screen
+        showing the move that is no longer in the game.
+
+        So this does not animate and does not interpolate: it SNAPS, because a
+        rewind is not a journey anybody made and gliding pawns backwards would
+        be inventing a movement the game does not contain.  In-flight walks and
+        tweens are cancelled first — a tween that survives would carry on
+        writing the old destination into ``visual`` after this had corrected
+        it, which is the same bug arriving a frame later.
+
+        Everything else drawn from the state — towers, the x2 badges, the
+        highlights, the counters — is derived per frame and needs nothing here.
+        What is CACHED is exactly what is reset.
+        """
+        self.animator.clear()
+        self.walks.clear()
+        self.dragging = None
+        self.preview_route = []
+        self.expanded_tile = None
+        self.expansion = 0.0
+        self.visual = {
+            pawn_id: token.position for pawn_id, token in self.state.tokens.items()
+        }
+
+    def _on_move_undone(self, event: ev.MoveUndone) -> None:
+        """A turn was rewound; redraw the board from what is actually there.
+
+        Deliberately NOT "move the pawn back": the checkpoint may have restored
+        several pawns, a tower's order, or nothing visible at all, and the view
+        has no way to know which.  Asking the engine for every position is the
+        only answer that is right for every undoable action rather than for the
+        one that happened to be tested.
+        """
+        self.resync()
+
+    def _on_tile_restacked(self, event: ev.TileRestacked) -> None:
+        """Settle a tower that has been stood up in a new order.
+
+        WHY THIS EXISTS.  ``self.visual`` is the board's own copy of where each
+        pawn is DRAWN, and it is only ever written by the two movement
+        reactions above.  A restack changes a pawn's height without moving it
+        between fields, so no walk and no glide is emitted and nothing was
+        writing the new heights — the engine had the tower right and the screen
+        went on showing the old order until some later card happened to touch
+        those pawns and drag the view back into step.
+
+        So this is the missing propagation, not a redraw hack: the authoritative
+        stack is already correct and untouched, and this hands the same numbers
+        the engine computed to the layer that draws them.  Reusing the tween
+        the drag path uses, so a reorder reads as pawns shuffling in place
+        rather than teleporting.
+        """
+        self._settle_pawns(event.order)
+
+    def _on_tower_group_placed(self, event: ev.TowerGroupPlaced) -> None:
+        """Settle one group of a broken tower onto its new field.
+
+        THE GHOST TOWER.  The breakup moves pawns between FIELDS, but it does
+        it by placing them directly rather than by walking them, so no
+        ``TokenWalked`` and no ``TokenMoved`` was ever emitted — and those two
+        were the only things that wrote ``self.visual``.  The engine had every
+        pawn on its new field, the "x2" badges (which count the authoritative
+        stack) moved immediately, and the pawns themselves stayed drawn in a
+        tower on the old field until some later card happened to touch them.
+        Screenshot 2 is exactly that: three badges in the right places and six
+        pawns still stacked in the wrong one.
+
+        So the fix is the missing propagation, not a redraw hack and not
+        hiding the old tower: the authoritative positions are already correct
+        and are left untouched, and this hands the same numbers to the layer
+        that draws them.  Same tween as the restack, so a group slides to its
+        field instead of teleporting.
+        """
+        self._settle_pawns(event.pawns)
+
+    def _settle_pawns(self, pawns) -> None:
+        """Redraw these pawns wherever the ENGINE currently says they are."""
+        for index, pawn_id in enumerate(pawns):
+            token = self.state.tokens.get(pawn_id)
+            if token is None:
+                continue
+            start = self.visual.get(pawn_id, token.position)
+            end = token.position
+            self.walks.pop(pawn_id, None)
+            self.animator.cancel(f"token:{pawn_id}")
+            if math.dist(start, end) < 1.0:
+                self.visual[pawn_id] = end
+                continue
+
+            def updater(value, pid=pawn_id):
+                self.visual[pid] = value
+
+            self.animator.add(
+                f"token:{pawn_id}",
+                Tween(start=start, end=end, duration=0.28,
+                      delay=index * 0.04, easing=ease_out_cubic,
+                      on_update=updater),
             )
 
     # ── input ────────────────────────────────────────────────────────────────
@@ -469,6 +579,40 @@ class BoardView:
         self.r.text(str(order), self.r.fonts.get(max(11, size + 1), bold=True),
                     theme.ink, surface, center=spot)
 
+    def frozen_tiles(self) -> List[int]:
+        """Fields holding a pawn that is frozen, computed fresh every frame.
+
+        DERIVED, NEVER STORED.  The highlight is a view of the status and
+        nothing else, so every way a freeze can end — it expires, the pawn is
+        dragged by hand, Obóz Harcerski takes the pawn off the map, Sesja na PG
+        variant 2 cancels it — removes the highlight without any of them
+        knowing the board is drawing one.  A cached set would need a line in
+        each of those places, and the one that got forgotten would leave a blue
+        field with nothing frozen on it.
+        """
+        tiles: List[int] = []
+        for status in self.state.statuses.of_kind(StatusKind.FROZEN):
+            tile = self.state.board.pawn_tile(status.subject_id)
+            if tile is not None and tile.index not in tiles:
+                tiles.append(tile.index)
+        return tiles
+
+    def _draw_frozen_fields(self, surface: pygame.Surface) -> None:
+        """The blue field under a frozen pawn.
+
+        Drawn with the same ``draw_tile_highlight`` the previews and the snap
+        ring use, so it sits in the board's own highlight layer rather than in
+        a second rendering system invented for one ability.
+        """
+        theme = self.r.theme
+        for index in self.frozen_tiles():
+            tile = self.state.board.tile(index)
+            if tile is None:
+                continue
+            self.board_renderer.draw_tile_highlight(
+                surface, self.camera, tile, theme.frost, strength=0.85
+            )
+
     def _draw_status_marks(self, surface: pygame.Surface) -> None:
         """Small badges on pawns carrying a gameplay state.
 
@@ -663,6 +807,11 @@ class BoardView:
         theme = self.r.theme
         viewport = self.layout.board_viewport
         self.board_renderer.draw(surface, self.camera, dt)
+
+        # Under the previews and the hover ring: a frozen field is a standing
+        # fact about the board, and whatever the player is doing right now
+        # should be drawn on top of it.
+        self._draw_frozen_fields(surface)
 
         for index in self.preview_route:
             tile = self.state.board.tile(index)

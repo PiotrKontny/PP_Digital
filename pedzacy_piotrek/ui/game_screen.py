@@ -15,6 +15,7 @@ and sits first because it is the topmost thing on screen):
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -28,6 +29,8 @@ from ..render.card_renderer import CardRenderer
 from .app import App, Screen
 from .board_view import BoardView
 from .card_library import CardLibrary, draw_library_button
+from .check_decision import BreakupChoice, CheckDecision
+from .movement_decision import MovementDecision
 from .hand_fan import HandFan
 from .debug_panel import NetworkDebugPanel
 from .match_overlays import (EliminationNotice, MatchStartOverlay,
@@ -145,6 +148,21 @@ class GameScreen(Screen):
         #: the live table and both make the game unplayable while they are up —
         #: though the engine refuses everything anyway, so this is manners
         #: rather than enforcement.
+        #: Nie masz Rosji: the two buttons under the played-card strip, and
+        #: the confirmation in front of the block.  Reads the live state and
+        #: answers with Commands; it owns no game state of its own.
+        self.movement_decision = MovementDecision(
+            self.state, seat=lambda: self.view_seat)
+        #: Ice Block: the same two-button shape, in front of a CHECK instead of
+        #: a movement.  The two can never be up at once — ``review`` decides
+        #: nothing while a check is pending, and a paused movement is not a
+        #: command that can arm one.
+        self.check_decision = CheckDecision(
+            self.state, seat=lambda: self.view_seat)
+        #: Checking variant 2: Piotrek picking 2a or 2b for the last group of
+        #: a broken tower.
+        self.breakup_choice = BreakupChoice(
+            self.state, seat=lambda: self.view_seat)
         self.match_start = MatchStartOverlay()
         self.victory = VictoryOverlay()
         #: "<colour> to nie Piotrek", as a card beside the board.  The status
@@ -176,6 +194,10 @@ class GameScreen(Screen):
 
         self.bus.subscribe(ev.ActionRejected, self._on_rejected)
         self.bus.subscribe(ev.CardDrawn, self._on_card_drawn)
+        self.bus.subscribe(ev.CardVariantChanged, self._on_variant_changed)
+        self.bus.subscribe(ev.MovementDecisionOpened, self._on_decision_opened)
+        self.bus.subscribe(ev.MovementAccepted, self._on_movement_accepted)
+        self.bus.subscribe(ev.MovementBlocked, self._on_movement_blocked)
         self.bus.subscribe(ev.ModPlaced, self._on_mod_placed)
         self.bus.subscribe(ev.CardPlayed, self._on_card_played)
         self.bus.subscribe(ev.ActivePlayerChanged, self._on_player_changed)
@@ -196,6 +218,11 @@ class GameScreen(Screen):
         self.bus.subscribe(ev.StatusGranted, self._on_status_granted)
         self.bus.subscribe(ev.MatchBegan, self._on_match_began)
         self.bus.subscribe(ev.PawnEliminated, self._on_pawn_eliminated)
+        self.bus.subscribe(ev.PlayerEliminated, self._on_player_eliminated)
+        self.bus.subscribe(ev.CheckDecisionOpened, self._on_check_decision_opened)
+        self.bus.subscribe(ev.CheckAllowed, self._on_check_allowed)
+        self.bus.subscribe(ev.CheckRefused, self._on_check_refused)
+        self.bus.subscribe(ev.TowerBrokeUp, self._on_tower_broke_up)
         self.bus.subscribe(ev.MatchEnded, self._on_match_ended)
         self.bus.subscribe(ev.ChestCardsRevealed, self._on_chest_revealed)
         self.bus.subscribe(ev.LeadCheckAnnounced, self._on_lead_check)
@@ -644,6 +671,90 @@ class GameScreen(Screen):
         # this message can always be sure of.
         self.card_library.notify("Dodano kartę do ręki", ok=True)
 
+    def _on_variant_changed(self, event: ev.CardVariantChanged) -> None:
+        """Say that a card is now being played the other way.
+
+        On the STATUS BAR as well as in the library, because this changes the
+        rules for the whole table and the player who did it is the only one
+        with the book open.  The count of cancelled ability effects is said
+        only when there were any: it is the one consequence of the switch that
+        is not written on the card itself.
+        """
+        label = event.label or event.variant
+        text = f"{event.title} — {label}"
+        if event.cancelled:
+            text += f" (anulowane efekty umiejętności: {event.cancelled})"
+        if self.card_library.active:
+            self.card_library.notify(text, ok=True)
+        self.status_bar.notify(text)
+
+    # ── Nie masz Rosji ───────────────────────────────────────────────────────
+    def _on_decision_opened(self, event: ev.MovementDecisionOpened) -> None:
+        """A movement is waiting.  Start DRAWING a countdown for it.
+
+        The number on screen is a picture: the authority owns the deadline and
+        sends the command that closes the window.  Every seat is told, because
+        everybody at the table should see that the game has stopped and why.
+        """
+        self.movement_decision.on_opened(event.seconds, event.card_uid)
+        owner = self.state.player(event.player_index)
+        name = owner.name if owner is not None else "Gracz"
+        if self.view_seat in event.blockers:
+            self.status_bar.notify(
+                f"„{event.title}” — możesz zablokować ten ruch")
+        else:
+            self.status_bar.notify(f"{name}: „{event.title}” — czekamy na decyzję")
+
+    def _on_check_decision_opened(self, event: ev.CheckDecisionOpened) -> None:
+        """A check is waiting on Piotrek.  Start DRAWING a countdown.
+
+        The number on screen is a picture; the authority owns the deadline.
+        Everybody is told, because the table has visibly stopped and the reason
+        is not a secret — WHICH pawn is being checked has always been public.
+        """
+        self.check_decision.on_opened(event.seconds, event.pawn_id)
+        pawn = self.state.library.pawn(event.pawn_id)
+        name = pawn.name if pawn is not None else event.pawn_id
+        if self.view_seat == event.seat:
+            self.status_bar.notify(
+                f"Sprawdzają {name} — możesz odmówić (Ice Block)")
+        else:
+            self.status_bar.notify(f"Sprawdzenie: {name} — czekamy na decyzję")
+
+    def _on_check_allowed(self, event: ev.CheckAllowed) -> None:
+        self.check_decision.on_closed()
+        if event.timed_out:
+            self.status_bar.notify("Czas minął — sprawdzenie dozwolone")
+
+    def _on_check_refused(self, event: ev.CheckRefused) -> None:
+        """Ice Block cancelled it.  NOTHING about the pawn is said here.
+
+        The event carries no answer because none was computed, so there is no
+        way for this to leak one even by accident.
+        """
+        self.check_decision.on_closed()
+        pawn = self.state.library.pawn(event.pawn_id)
+        name = pawn.name if pawn is not None else event.pawn_id
+        self.status_bar.notify(
+            f"Ice Block — sprawdzenie {name} odwołane "
+            f"(pozostało: {event.uses_left})")
+
+    def _on_tower_broke_up(self, event: ev.TowerBrokeUp) -> None:
+        self.status_bar.notify("Wieża się rozpadła")
+
+    def _on_movement_accepted(self, event: ev.MovementAccepted) -> None:
+        self.movement_decision.on_closed()
+        if event.timeout:
+            self.status_bar.notify("Czas minął — ruch dozwolony")
+
+    def _on_movement_blocked(self, event: ev.MovementBlocked) -> None:
+        self.movement_decision.on_closed()
+        blocker = self.state.player(event.blocker_index)
+        name = blocker.name if blocker is not None else "Przeciwnik"
+        automatic = "  (ostatnia szansa)" if event.automatic else ""
+        self.status_bar.notify(
+            f"{name} zablokował ruch: „{event.title}”{automatic}")
+
     def _on_mod_placed(self, event: ev.ModPlaced) -> None:
         self.status_bar.notify("Mod Patusa aktywny")
 
@@ -672,6 +783,21 @@ class GameScreen(Screen):
     def _on_match_began(self, event: ev.MatchBegan) -> None:
         self.match_start.hide()
         self.status_bar.notify("Gra się rozpoczęła!")
+
+    def _on_player_eliminated(self, event: ev.PlayerEliminated) -> None:
+        """A seat is out of the game.
+
+        Nothing is drawn from here: the seat tiles read ``player.eliminated``
+        directly, so a client that reconnected sees the same X without having
+        heard the event.  This is the announcement, not the state.
+        """
+        player = self.state.player(event.player_index)
+        if player is None:
+            return
+        character = player.character
+        who = character.title if character is not None else player.name
+        self.status_bar.notify(f"{who} odpada z gry — {event.reason}"
+                               if event.reason else f"{who} odpada z gry")
 
     def _on_pawn_eliminated(self, event: ev.PawnEliminated) -> None:
         """A check failed.  Every notepad crosses the colour off by itself.
@@ -824,6 +950,32 @@ class GameScreen(Screen):
             self.card_library.handle_event(event, mouse, self.app.layout)
             return
 
+        # 1a'. Nie masz Rosji.  Above the table because the table is genuinely
+        #      stopped while it is up, and below the library and the ending for
+        #      the same reason those two come first.
+        decision = self.movement_decision.handle_event(event, mouse,
+                                                       self.app.layout)
+        if decision is not None:
+            self.submit(decision)
+            return
+        if self.movement_decision.consumes_click(mouse, self.app.layout):
+            return
+
+        # 1a''. Ice Block, and Piotrek's 2a/2b pick.  Same tier as the movement
+        #       window: the table is genuinely stopped while either is up.
+        answer = self.check_decision.handle_event(event, mouse, self.app.layout)
+        if answer is not None:
+            self.submit(answer)
+            return
+        if self.check_decision.consumes_click(mouse, self.app.layout):
+            return
+        pick = self.breakup_choice.handle_event(event, mouse, self.app.layout)
+        if pick is not None:
+            self.submit(pick)
+            return
+        if self.breakup_choice.consumes_click(mouse, self.app.layout):
+            return
+
         # 1a. The ending is absolutely modal: there is no game left to play, and
         #     Esc must not offer to "leave" a match that has already finished.
         if self.victory.active:
@@ -897,6 +1049,16 @@ class GameScreen(Screen):
                 and self.view_seat != self.my_seat
                 and self.app.layout.return_seat_button.collidepoint(mouse)):
             self.return_to_my_seat()
+            return
+        # 'Cofnij ruch' sits INSIDE the board viewport, so it belongs in this
+        # group and not in the ordinary chain below: the board claims any click
+        # it is offered as a map drag, and a button drawn on top of the map has
+        # to be asked first or it can never be pressed.  Only while the offer
+        # stands — otherwise this would swallow drags over an empty corner.
+        if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                and self.can_undo
+                and self.app.layout.undo_button_rect().collidepoint(mouse)):
+            self._undo_click(mouse)
             return
 
         # 4. The hand fan is the topmost layer on screen.
@@ -1171,6 +1333,65 @@ class GameScreen(Screen):
                           base_size=int(15 * ctx.layout.ui_scale), spacing=2,
                           padding=14, shadow=live)
 
+    # ── the turn window: undo ────────────────────────────────────────────────
+    @property
+    def undo_seat(self) -> Optional[int]:
+        """The seat this machine may rewind for, or ``None``.
+
+        NOT ``view_seat``.  The view follows the active player, so on a
+        hot-seat table it moves to the NEXT player the instant a card is
+        played — which is the exact moment the previous player is offered the
+        undo.  Keying the button to the view made it vanish precisely when it
+        should have appeared.
+
+        The offer belongs to the window's owner, and this machine may take it
+        if it may play that seat at all: one client online, everybody round one
+        table hot-seat.  ``may_control`` is the same question the rest of the
+        screen asks, so the two cannot drift.
+        """
+        window = getattr(self.state, "turn_window", None)
+        if window is None:
+            return None
+        seat = int(window.seat)
+        if not self.state.may_control(seat) or not self.state.can_undo(seat):
+            return None
+        return seat
+
+    @property
+    def can_undo(self) -> bool:
+        """Whether the undo button should be on screen at all."""
+        return self.undo_seat is not None
+
+    def _undo_click(self, mouse: Tuple[int, int]) -> bool:
+        if not self.app.layout.undo_button_rect().collidepoint(mouse):
+            return False
+        seat = self.undo_seat
+        if seat is None:
+            # Only reachable if a frame drew the button and the window closed
+            # before the click landed.  The engine would refuse it anyway; this
+            # says why instead of sending a command that is going to bounce.
+            self.status_bar.notify("Nie można już cofnąć ruchu")
+            return True
+        self.submit(cmd.UndoMove(player_index=seat))
+        return True
+
+    def _draw_undo_button(self, ctx: HudContext) -> None:
+        """Drawn ONLY while the offer stands, so its absence is the rule."""
+        if not self.can_undo:
+            return
+        r, surface = ctx.r, ctx.surface
+        rect = ctx.layout.undo_button_rect()
+        hovered = rect.collidepoint(ctx.mouse)
+        theme = ctx.theme
+        style = r.emphasis(fill=theme.btn_idle_bg, border=theme.btn_idle_border,
+                           text=theme.btn_text,
+                           hover=1.0 if hovered else 0.0, enabled=True,
+                           accent=theme.prompt)
+        drawn = r.interactive_panel(rect, style, surface, radius=9)
+        r.fit_spaced_text("COFNIJ RUCH", drawn, style.text, surface,
+                          base_size=int(12 * ctx.layout.ui_scale), spacing=1,
+                          padding=10, shadow=True)
+
     def _ability_click(self, mouse: Tuple[int, int]) -> bool:
         """The 'use ability' button under the character card."""
         player = self.state.player(self.view_seat) or self.state.active_player
@@ -1188,11 +1409,13 @@ class GameScreen(Screen):
         if not card.ability_available:
             self.status_bar.notify("Ta umiejętność została już zużyta")
             return True
-        if self.state.abilities_locked:
-            # Sesja na PG.  The engine refuses this too — this only saves the
-            # round trip and says something more useful than a rejection.
-            self.status_bar.notify(
-                "Sesja na PG — umiejętności postaci są zablokowane")
+        blocked = self.state.ability_refusal()
+        if blocked is not None:
+            # Sesja na PG, or a pawn still on START.  The engine refuses this
+            # too — asking it for the reason means the interface cannot drift
+            # out of step with the rule, and the player is told which of the
+            # two it is rather than getting a bare rejection.
+            self.status_bar.notify(blocked)
             return True
         self.submit(cmd.UseAbility(player_index=player.index, source=source))
         return True
@@ -1349,6 +1572,14 @@ class GameScreen(Screen):
                 return
         else:
             self.session.poll()
+            # A hot-seat game has no server, so this session is the authority
+            # and owes the table the same periodic work a room does: closing a
+            # Nie masz Rosji window whose time is up.  Real time, passed in, so
+            # nothing here depends on the frame rate and nothing sleeps.
+            self.session.tick(time.monotonic())
+        self.movement_decision.update(dt, self.app.layout, mouse)
+        self.check_decision.update(dt, self.app.layout, mouse)
+        self.breakup_choice.update(dt, self.app.layout, mouse)
         self._sync_match_overlays()
         # Holding Backspace in the rename box only deletes continuously while
         # this is called; the field has no clock of its own.
@@ -1480,6 +1711,10 @@ class GameScreen(Screen):
 
         self.round_panel.draw(ctx)
         self.board_view.draw(surface)
+        # Immediately after the board, so it is an OVERLAY on it rather than a
+        # control that happens to sit nearby — and before the panels, so a
+        # panel edge is never painted underneath it.
+        self._draw_undo_button(ctx)
         self.recently_played.draw(ctx)
         self.deck_panel.draw(ctx)
         self.mod_panel.draw(ctx)
@@ -1509,6 +1744,17 @@ class GameScreen(Screen):
                                ctx.mouse)
         self.card_library.draw(self.app.renderer, self.cards, self.app.layout,
                                surface, ctx.mouse)
+        self.movement_decision.draw(self.app.renderer, self.app.layout,
+                                    surface, ctx.mouse)
+        self.movement_decision.draw_confirm(self.app.renderer, self.cards,
+                                            self.app.layout, surface,
+                                            ctx.mouse)
+        self.breakup_choice.draw(self.app.renderer, self.app.layout, surface,
+                                 ctx.mouse)
+        self.check_decision.draw(self.app.renderer, self.app.layout, surface,
+                                 ctx.mouse)
+        self.check_decision.draw_confirm(self.app.renderer, self.app.layout,
+                                         surface, ctx.mouse)
         self._draw_connection_banner(ctx)
         # Above everything except the pause menu: these two ARE the screen
         # while they are up.

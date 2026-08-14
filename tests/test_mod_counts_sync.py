@@ -40,12 +40,12 @@ def mods_of(service) -> collections.Counter:
 
 def test_the_host_settings_reach_every_client(table, library):
     host, clients = table.seated("Kuba", "Ola", "Ala")
-    host.set_settings(mod_counts={"Speedrun": 4, "Shady": 0})
+    host.set_settings(mod_counts={"Speedrun": 4, "Obóz Harcerski": 0})
     table.pump()
 
     for service in (host, *clients):
         assert service.lobby_state.mod_counts["Speedrun"] == 4
-        assert service.lobby_state.mod_counts["Shady"] == 0
+        assert service.lobby_state.mod_counts["Obóz Harcerski"] == 0
 
 
 def test_only_the_host_may_change_them(table, library):
@@ -71,7 +71,7 @@ def test_every_machine_builds_the_same_deck(table, library):
 
 def test_a_resized_deck_replicates(table, library):
     host, clients = table.seated("Kuba", "Ola", "Ala")
-    host.set_settings(mod_counts={"Speedrun": 4, "Shady": 0, "AKO": 3})
+    host.set_settings(mod_counts={"Speedrun": 4, "Obóz Harcerski": 0, "AKO": 3})
     table.pump()
     host.start_game(library)
     table.pump()
@@ -81,7 +81,7 @@ def test_a_resized_deck_replicates(table, library):
         counts = mods_of(service)
         assert counts["Speedrun"] == 4
         assert counts["AKO"] == 3
-        assert "Shady" not in counts
+        assert "Obóz Harcerski" not in counts
 
 
 def test_the_settings_do_not_split_the_fingerprint(table, library):
@@ -109,11 +109,11 @@ def test_a_host_that_sends_nothing_still_gets_the_printed_deck(table, library):
 def test_the_server_clamps_what_it_is_told(table, library):
     """The server settles the settings; a hand-written message does not."""
     host, _ = table.seated("Kuba", "Ola")
-    host.set_settings(mod_counts={"Speedrun": 999, "Shady": -5})
+    host.set_settings(mod_counts={"Speedrun": 999, "Obóz Harcerski": -5})
     table.pump()
 
     assert host.lobby_state.mod_counts["Speedrun"] == RULES.mod_count_max
-    assert host.lobby_state.mod_counts["Shady"] == RULES.mod_count_min
+    assert host.lobby_state.mod_counts["Obóz Harcerski"] == RULES.mod_count_min
 
 
 def test_changing_one_title_does_not_wipe_the_others(table, library):

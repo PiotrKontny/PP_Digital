@@ -4300,3 +4300,1981 @@ accident into the product. Worth knowing if art vanishes again after a zip trip.
   match `_OWNED_BY_PLAYER` means it can only ever be your own seat.
 - 'Dobierz kartę' does not change the library's quantity, and should not: the
   count is copies *in the match*, and a card in a hand is still in the match.
+
+---
+
+## Stage 34 — Card variants, and "Sesja na PG" gains a second one
+**Date:** 2026-08-11
+
+### Goal
+A reusable way to give a card two or more predefined readings that differ in
+what they SAY and what they DO, without splitting it into two cards — then use
+it for both versions of the Mod Patusa **Sesja na PG**. `AKO` and `Nie masz
+Rosji` are next and must need no new mechanism.
+
+### The shape of it: a variant is configuration, not a card
+
+    cards.json          Sesja na PG  ─┬─ lock              (the printed card)
+                                      └─ lock_and_cancel
+
+    this match          card_variants[("mods", "Sesja na PG")] = "lock_and_cancel"
+    another match       ...= "lock"          ← at the same moment, unaffected
+
+`CardVariant` may replace exactly three things — `text`, `passive` and
+`effect`. The title, the artwork, the count and the deck id are the card's
+IDENTITY and no variant can reach them; that is the whole difference between
+this and printing two cards. Anything a variant leaves out is inherited, so the
+smallest useful variant is an id and one key.
+
+`CardDef.with_variant` always resolves against `CardDef.printed` (kept in
+`base`). Without that, going 1 → 2 → 1 would leave variant 2's sentence on the
+card wherever variant 1 declares none — a bug the tests now pin.
+
+### Where the choice lives, and how it travels
+- `SessionConfig.card_variants` and `LobbyState.card_variants`, title → id.
+  **EMPTY MEANS AS PRINTED** — the fifth member of the `mod_counts` family and
+  it behaves exactly like them, so an older client, or any of the 1300 tests
+  that pass no mapping, gets each card's FIRST variant: the card that shipped.
+- `DeckDef.with_variants`, applied in `setup.build_decks` BEFORE the shuffle
+  beside `with_counts`/`with_uses`. It cannot change a `count`, so the pile is
+  the same permutation either way — pinned by a test, because two machines
+  building different piles from one seed is what every deck setting must avoid.
+- `server/room.set_settings` merges it through the same loop the other three
+  mappings use. Host-only, for free.
+- `GameState.card_variants` is seeded from the config and is **in the
+  snapshot**, so it is in the fingerprint: a table that agrees about every
+  count and every uid and disagrees about what one card DOES is exactly the
+  desync nothing else in that dictionary would notice.
+
+### Changing it mid-match
+`SetCardVariant(deck_id, title, variant)` — no `player_index`, so like the
+library's other bookkeeping commands it is in neither `_OWNED_BY_PLAYER` nor
+`_TURN_BOUND` and any seat may issue it. An ABSOLUTE id, not "next variant":
+two players cycling at once would otherwise land somewhere neither chose.
+
+Applying it rewrites `card.definition` on every copy of that title in the match
+(`_reread_copies`), which is what keeps the deck's two physical copies ONE
+logical card. `_adjust_deck_count` was also changed to build a new copy from
+`variant_definition` — a copy added from the library on the printed variant
+while the rest played another was the same failure arriving later.
+
+### How an ability effect is identified — the one genuinely new idea
+`Status` gained **`origin`** (`"ability"` / `"card"` / `"on_draw"`), stamped in
+ONE place: `effects.resolve_spec`, from the `EffectContext.origin` that already
+existed and already reached every handler. So the thirteenth effect gets it
+without knowing it exists.
+
+`source` is a NAME and is for humans ("Granny Costume"); `origin` is the
+machine's answer to "is this an ability effect?", which no amount of
+string-matching on the name could give without a table of every ability in the
+game. Selecting by kind would have been wrong: a frozen pawn may be Granny
+Costume's or a Chest card's and the two are identical from outside.
+
+### Sesja na PG
+    variant 1  "lock"             abilities_locked                    (unchanged)
+    variant 2  "lock_and_cancel"  abilities_locked
+                                  + cancel_ability_effects
+
+Variant 2's cancellation runs from `_arm_mod`, keyed on the declared `passive`
+and never on the title (N98) — so it is a TRANSITION, not a per-frame sweep.
+`_cancel_ability_effects` drops `statuses.cancel_origin("ability")` and nothing
+else: Mods, Chest promises, movement statuses and engine-attached statuses (a
+hidden pawn) all stay.
+
+Changing the variant of a card **already in the rack** asks whether the RACK's
+answer changed (`cancels_ability_effects`, an ordinary `mod_rule`) and fires the
+cancellation if it did, so the card does not have to be played again.
+
+**There is deliberately no departure half.** A cancelled effect does not come
+back when the mod leaves — it was cancelled, not suspended — and the ability
+lock is a passive that lifts by itself. Going 2 → 1 restores nothing either.
+
+### The two interfaces
+- **Lobby:** a fifth tab, "Warianty", in the shared `GameSettingsPanel` — so
+  both setup screens get it at once, as stage 26 intended. Only cards that
+  declare two or more variants appear; the rows are gathered from EVERY deck,
+  so `AKO` and `Nie masz Rosji` will show up with no code change. `SettingsTab`
+  grew `options`, which turns its number into an INDEX into named choices and
+  let bump/clamp/reset/merge be reused whole. Each row shows the variant's own
+  DESCRIPTION under the title, because reading the difference is the point.
+- **Card Library:** a button under 'Dobierz kartę' saying `WARIANT 2 (2/2)`.
+  UNDER the card, never on it (N36d / stage 31). The row's height is a property
+  of the TAB, not the card — a grid whose cells were each as tall as their own
+  contents would put every column out of line — so the mods tab reserves the
+  room for all its cells and only the cards with variants draw in it. The
+  display cards follow the live state through `_refresh_variants`, so the face,
+  and therefore the hover description, is always the variant in force.
+
+### Changed
+- `cards/base_card.py` — `CardVariant`, `CardDef.variants/variant/base` and
+  `has_variants`/`variant_ids`/`default_variant`/`printed`/`with_variant`,
+  `Card.variant`/`has_variants`, `DeckDef.with_variants`.
+- `data/cards.json` — Sesja na PG's two variants.
+- `config/settings.py` — `SessionConfig.card_variants`, `clean_card_variants`.
+- `net/lobby.py`, `server/room.py` — the field on the wire and its merge.
+- `engine/setup.py` — variants applied in `build_decks`.
+- `engine/statuses.py` — `Status.origin`, `of_origin`, `cancel_origin`.
+- `engine/effects.py` — `_stamp_origin` in `resolve_spec`.
+- `engine/commands.py`, `engine/events.py` — `SetCardVariant`,
+  `CardVariantChanged`.
+- `engine/game_state.py` — `card_variants`, `card_variant`,
+  `variant_definition`, `cancels_ability_effects`, `_cancel_ability_effects`,
+  `_set_card_variant`, `_reread_copies`, `_arm_mod`, `_adjust_deck_count`,
+  snapshot.
+- `ui/settings_panel.py`, `ui/layout.py`, `ui/card_library.py`,
+  `ui/game_screen.py`, `ui/menu.py`, `ui/network_screens.py`.
+
+### Verification
+- **1410 pass, 30 fail — the same 30 as the baseline on this task's ZIP**
+  (1347/30 before the stage). No regressions and nothing fixed by accident; the
+  30 are the pre-existing `Shady` → `Obóz Harcerski` rename in cards.json
+  versus mod tests still looking the card up by its old title, plus a health-page
+  and a real-socket test that already failed here.
+- 63 new tests: 54 in `test_card_variants.py`, 9 in
+  `test_card_variants_sync.py`. Two existing assertions in
+  `test_settings_panel.py` updated for the fifth tab.
+- Covered: the variant definitions (identity, artwork, wording, inheritance,
+  round-trip); variant 1 locking and LEAVING a running effect alone; variant 2
+  locking, cancelling on arrival, and cancelling ONLY ability-originated
+  effects with three other statuses in play; 1 → 2 mid-match cancelling; 2 → 1
+  restoring nothing; the lock lifting while the cancellation stands; two copies
+  staying one card; unknown ids refused; the command's JSON round trip and its
+  lack of a seat; lobby → clients; a mid-match change reaching every machine
+  and surviving four turns; the fingerprint; the library's control geometry at
+  all five reference resolutions (never touching a card face), its click, its
+  caption, and the other library controls still working under it.
+- NOT verified: no screenshots were reviewed and `inspect_frame.py` /
+  `--selftest` were not run this stage.
+
+### Limitations
+- `SessionConfig.card_variants` is keyed by TITLE while `GameState` keys by
+  (deck, title). One title with variants in two decks would therefore take the
+  same variant in both. No title is in two decks today; the day one is, the
+  config key is the thing to widen.
+- The library's variant button inherits stage 32's gate: like every other
+  library command it is refused before the match begins and after it ends.
+- The extra row makes the Mody Patusa tab scroll one row sooner. A control
+  scrolled out of sight is out of reach, which is stage 32's intended
+  behaviour, not a new limitation — but tests that click it must scroll first.
+- A variant may not change a card's artwork. That is the requirement today
+  (`Sesja na PG` keeps one picture); allowing it would mean letting a variant
+  reach `art`, which is deliberately one of the identity fields it cannot.
+
+---
+
+## Stage 35 — AKO, and the pawn that comes along
+**Date:** 2026-08-11
+
+### Goal
+Give the last placeholder Mod Patusa its rules, in both of the versions the
+owner wrote, on top of stage 34's variant system and with no new mechanism.
+
+    variant 1  "with_stack"  Wszystkie ruchy poruszają jednego sąsiadującego pionka
+    variant 2  "alone"       Wszystkie ruchy poruszają TYLKO jednego sąsiadującego pionka
+
+### Where it sits in the movement pipeline
+LAST, after the mover's own move is completely settled. `_move_pawn` asks its
+questions in the order the rules fix — Gambit Patusa, Speedrun's direction,
+which pawn, which half of a widened row — and AKO is appended after all of
+them, because the passenger is a detail of a move that has already been
+decided. The mover's operation goes into the plan first, so the companion walks
+into a field the mover has already left.
+
+    Gambit → Speedrun → pawn → distance (Masa solna, movement bonus)
+                                    → widened half → AKO's neighbour
+
+Because it joins after the distance is settled, it inherits every other
+modifier for free: Masa solna shortens the companion's move too, a ChatGPT
+bonus stretches it, Gambit and Speedrun decide its direction. Both are pinned
+by tests.
+
+`ako_companion()` is shared by `_move_pawn` AND `_move_pawns`, so Plagiat!
+brings a neighbour for each of its moves — keyed `pawns_ako0`, `pawns_ako1`, and
+judged against `MoveProjection.positions`, exactly as Halloween is, because an
+earlier move can put a neighbour beside a later pawn or take one away. The
+instructions' standing warning is that a rule added to one handler and not the
+other drifts; this is one function called from both.
+
+### Which pawn comes along
+    neighbour_side(steps) = -1 forward, +1 backward
+
+THE COMPANION FOLLOWS THE MOVER INTO THE SPACE IT LEAVES, so it stands on the
+far side of the direction of travel. Both of the brief's examples are that one
+rule — green forward from 3 takes blue from 2, green backward from 3 takes
+yellow from 4 — which is why it is a sign and not two cases. Board topology
+only: a position index, never a screen coordinate.
+
+`neighbour_candidates` offers everything standing on that ONE position — both
+halves of a widened row, and every pawn of a tower there, because the brief's
+own example picks the pawn at the BOTTOM of one. Nothing else on the board is
+eligible. Frozen pawns are left out (a freeze refuses a move everywhere else,
+so offering one would be offering a choice that cannot be carried out) and
+hidden pawns by `live_pawns`, without this having to know Shady exists.
+
+One candidate is taken silently; several open the ORDINARY pawn `Choice` every
+other card uses, so the existing selection overlay, the resubmission path and
+the network all work with no new UI. `can_ask=False` (a card played BY another
+card) takes the first candidate in palette order — AKO has no "decline" the way
+Speedrun does, and fizzling those cards is the failure the `can_ask` note warns
+about.
+
+**THE COMPANION MOVES THE SAME MOVE** — the same signed distance the mover is
+making, not "one field into the gap". On a one-field card, which is both of the
+brief's examples, the two readings coincide; this one keeps the pair adjacent on
+a longer card and composes with every other modifier instead of fighting them.
+
+### Variant 2 needed no new movement path
+`MoveBySteps.carry_riders` already existed, for Balbinka, and
+`_op_move_by_steps` already honours it by handing the executor an empty
+`carried` tuple. `board.place_pawn` then lifts that one pawn out of its tile's
+stack and leaves the rest standing — which is exactly "TYLKO jednego", with a
+valid board and no reconstruction. Variant 1 passes `carry_riders=True` and gets
+the ordinary tower rule, including Ondrej's Radar links, because `travellers`
+does the work and AKO never touches it.
+
+`MoveProjection.move` gained `with_riders=False` so the projection agrees with
+that on a multi-pawn card.
+
+### Changed
+- `data/cards.json` — AKO's passive and its two variants.
+- `engine/game_state.py` — `carries_neighbour`, `carries_neighbour_alone`.
+- `engine/effects.py` — `neighbour_side`, `neighbour_candidates`,
+  `ako_companion`, `_Companion`, `_with_companion`, the two calls in
+  `_move_pawn` / `_move_pawns`, `MoveProjection.move(with_riders=)`.
+
+### Verification
+- **1450 pass, 30 fail — the same 30 as the baseline**, unchanged since before
+  stage 34 (the `Shady` → `Obóz Harcerski` rename in cards.json versus mod
+  tests still using the old title, a health-page test and a real-socket test).
+  No regressions.
+- 39 new tests in `tests/test_ako.py`, including both of the brief's worked
+  examples asserted literally, both variants side by side, the selection rules,
+  the interaction with Masa solna / Halloween / a movement bonus / an ability,
+  Plagiat!'s separate handler, two copies in the rack, the variant changed
+  mid-match, and one over the in-process server.
+- FOUR existing tests were updated deliberately, not worked around:
+  `test_the_placeholder_mods_change_nothing[AKO]` became
+  `test_no_mod_is_a_placeholder_any_more` plus `test_ako_changes_only_its_own_rule`
+  (AKO is no longer inert, and asserting that it is would pin the opposite of
+  the card); `test_every_declared_mod_rule_has_a_reader` gained the three new
+  keys AND now walks VARIANT passives too — a gap stage 34 left, since a rule
+  that exists only on a card's second reading is just as unimplemented if
+  nothing reads it; and two stage-34 tests that asserted Sesja na PG was the
+  only card with variants.
+- NOT verified: no screenshots, and `inspect_frame.py` / `--selftest` were not
+  run this stage. The AKO prompt was not driven through the real UI overlay —
+  it is the same `Choice(kind="pawn")` every targeting card already returns, and
+  that path has its own tests, but this stage added none of its own.
+
+### Limitations and edge cases
+- AKO is gated on `ctx.from_movement_card`, like Masa solna, Halloween and
+  Gambit Patusa (N103), so a character ability that happens to move a pawn
+  (Dziad's Skrypt) and the Chest cards are untouched. The card says "wszystkie
+  ruchy"; this reading is the project's existing convention for the movement
+  mods, and one line plus one test would change it if the owner disagrees.
+- The companion takes the NEARER half of a widened destination rather than
+  asking: it is being dragged, not steered. That is the rule a pawn passing
+  through a widened row already follows (D8a); it asks nothing and consumes no
+  randomness.
+- A companion with nowhere to go (already at the finish, or at the start of a
+  backward move) is simply not brought. The mover's own move is unaffected —
+  not a refusal and not a fizzle.
+- With several candidates the prompt is a THIRD question on some cards
+  (direction, pawn, half, neighbour). It cannot be folded into the pawn
+  question, which is about a different pawn.
+- Two copies of AKO in the rack bring ONE neighbour: `mod_rule` reads a rule,
+  it does not accumulate, and the left slot wins. Both copies are one logical
+  card carrying one variant, per stage 34.
+
+---
+
+## Stage 36 — "Nie masz Rosji": stopping one opponent movement
+**Date:** 2026-08-12
+
+### Goal
+Implement the Chest card in both variants: for a while, one movement made by an
+opponent may be stopped. Variant 1 lasts two full rounds, variant 2 one.
+
+### 1. The temporary effect
+`StatusKind.MOVEMENT_VETO`, granted by a new `movement_veto` effect handler and
+nothing else. `charges=1` IS "one movement": the tracker removes a status whose
+last charge is spent, so a used veto cannot block again without anything having
+to remember that it was used.
+
+    data = {"pending": [seats that still owe a turn], "rounds_left": 1 or 2}
+
+### 2. A full round is NOT the round counter
+`_note_turn_completed`, called at the top of `_end_turn`, strikes the finishing
+seat off `pending`; when that empties, one full round has passed and either the
+next one begins or the status ends.
+
+THE OWNER IS NOT IN `pending`. That is what makes the brief's own example
+right: Lubin plays, and the round is up when the turn comes back to him — which
+is the moment everybody else has had one. It is also why Piotrek appearing
+again three slots later ends nothing: he is one seat, and the other five still
+owe their turns.
+
+### 3. Opponents
+`GameState.are_opponents(a, b)` is `is_piotrek != is_piotrek` — the roles the
+game already has. No character title appears anywhere in this feature.
+
+### 4. The decision window
+`SessionConfig.block_decision_seconds`, default 7, clamped 1–30, set in the
+lobby ("Zasady" tab of the shared settings panel) and carried through
+`LobbyState` and `room.set_settings` like every other setting.
+
+THE ENGINE HOLDS THE LENGTH; THE AUTHORITY HOLDS THE CLOCK. `seconds` is
+configuration, identical everywhere and in the snapshot. WHEN a window opened is
+wall-clock time, so it lives on the authority only — `room.expire_decisions()`
+on the existing hub tick, `LocalSession.tick(now)` hot-seat — and is
+deliberately not in the fingerprint. A client's countdown is a picture of the
+command that closes the window arriving. `ExpireMovementDecision` is
+`AUTHORITY_ONLY`, so a machine with a fast clock cannot time anybody out.
+
+### 5. Cancellation: there is nothing to roll back
+`_play_card` resolves the plan and then SETS IT ASIDE. The card stays in the
+hand, the board is untouched, and no operation runs:
+
+    play → resolve → (blockable? and an opponent holds a veto?)
+                          ↓ yes                      ↓ no
+                     hold the plan            execute as always
+                          ↓
+        accept → replay the SAME command   block → discard, never run it
+
+Accepting replays the original command through the ordinary path (guarded by
+`_resolved_movement` so it is not held a second time); nothing can have changed
+in between, because every other command is refused while a decision is open.
+
+This is why "movement-triggered consequences must not happen" needed no code:
+there is no tower, no check and no victory to prevent, because the movement
+never happened. Pinned by a test that stacks the table into a check position and
+shows `victory.review` finding nothing after a block.
+
+### 6. The blocked card
+Out of the hand and onto its own deck's discard pile — `_apply_block` uses the
+same two lines `_play_card` uses — then `_after_play`, so the turn ends exactly
+as playing that card would have ended it. No second discard system.
+
+### 7. The automatic final block
+`_veto_is_last_chance` simulates the rest of the effect's life against the REAL
+cadence: the current turn completes, seats keep completing turns, full rounds
+keep elapsing, and it asks whether any later turn belongs to an opponent while
+the effect is still alive. If none does, the block fires immediately and no
+window opens — a window nobody has a reason to answer is not a decision.
+
+### 8. Several vetoes at once
+All eligible opponents are blockers. The movement runs only when EVERY blocker
+has accepted, so one hunter's acceptance cannot spend Piotrek's chance. The
+first `BlockMovement` the authority applies wins; the second finds no decision
+and is refused — which is what stops two clients cancelling the same movement.
+
+### 9. The interface
+`ui/movement_decision.py`: two buttons under the recently-played strip (where
+the brief asks for them — the card being answered is the one at the top of that
+strip), a countdown, and a confirmation dialog that draws the card through the
+ordinary `CardRenderer.draw_in` with the ordinary reveal. It owns no game state:
+it reads `state.pending_movement` every frame and answers with Commands only.
+
+### Changed
+- `data/cards.json` — the card's effect and its two variants.
+- `engine/statuses.py` — `MOVEMENT_VETO` and its label.
+- `engine/effects.py` — `movement_veto`, `MOVEMENT_OPERATIONS`,
+  `plan_moves_pawns`.
+- `engine/game_state.py` — `PendingMovementDecision`, `pending_movement`,
+  `are_opponents`, `vetoes`, `veto_of`, `_note_turn_completed`,
+  `_upcoming_seats`, `_veto_is_last_chance`, `_blockers_for`,
+  `_open_movement_decision`, `_resume_movement`, `_apply_block`,
+  `_accept_movement`, `_block_movement`, `_expire_movement_decision`,
+  `_movement_decision_refusal`, snapshot.
+- `engine/commands.py`, `engine/events.py` — three commands, three events.
+- `net/session.py`, `server/room.py`, `server/hub.py` — the authority's clock.
+- `config/settings.py`, `net/lobby.py` — the cooldown setting.
+- `ui/movement_decision.py` (new), `ui/layout.py`, `ui/game_screen.py`,
+  `ui/settings_panel.py`, `ui/menu.py`, `ui/network_screens.py`.
+
+### Verification
+- **1513 pass, 30 fail — the same 30 as the baseline**, unchanged since before
+  stage 34. No regressions.
+- 63 new tests in `tests/test_movement_veto.py`: the variants and durations;
+  the three opponent rules; movement cards and movement-causing Chest cards
+  blockable, while a dragged pawn, a character ability, a card that moves
+  nobody and a teammate's movement are not; the window's configured length, the
+  table stopping while it is open, accepting, timing out (through both the
+  session's and the room's clock) and the authority-only expiry; blocking,
+  the discard, the consumed use, the second movement that cannot be blocked;
+  the consequence-free rollback; full rounds including the Piotrek cadence
+  case; the automatic final block and that an earlier movement still opens a
+  window; two vetoes with one authoritative answer; the lobby setting; the
+  snapshot; the whole exchange over the in-process server; and eleven UI tests
+  driving the real buttons and the confirmation dialog.
+- FOUR existing tests updated: two stage-34/35 tests that listed which cards
+  have variants, and the two tab-list tests for the new "Zasady" tab.
+- NOT verified: no screenshots were reviewed and `inspect_frame.py` /
+  `--selftest` were not run. Nothing was played end-to-end by hand.
+
+### Limitations and edge cases
+- "Blockable" is asked of the RESOLVED PLAN (`plan_moves_pawns`), not of a list
+  of card titles, so a card that gains a movement later becomes blockable the
+  day it does. It is additionally restricted to the movement and chest decks,
+  because the brief asks for a played movement action.
+- The whole table is frozen while a window is open: every turn-bound command,
+  `PlayCard` and `PlaceMod` are refused. That is deliberate — a card played
+  into the pause would resolve against a board that is about to change, or
+  about not to.
+- A veto granted WHILE a window is open does not join it: the blockers are
+  fixed when the window opens.
+- The automatic final block picks the lowest seat when two vetoes are both on
+  their last chance. Deterministic, and the same on every replica.
+- A hot-seat game's window is closed by `LocalSession.tick`, which the game
+  screen calls with `time.monotonic()`. A screen that never updates never times
+  out — which is the same property every other animation in the project has.
+- The countdown drawn on a client starts when the event arrives, so it can
+  differ from the authority's by the network latency. It is a picture; the
+  buttons stop working when the authority says the window is over, not when the
+  local number reaches zero.
+
+---
+
+## Stage 36 — "Nie masz Rosji": stopping one movement
+**Date:** 2026-08-11
+
+### Goal
+The Chest card, in both variants, on top of stage 34's variant system.
+
+    variant 1  "two_rounds"  two full rounds, one block
+    variant 2  "one_round"   one full round, one block
+
+### The effect
+A status, `StatusKind.MOVEMENT_VETO`, granted by the new `movement_veto`
+effect. It carries `pending` (the seats that still owe it a turn),
+`rounds_left`, and `charges=1` — the single use is the tracker's ordinary
+charge, so a spent veto removes itself and nothing has to remember it was used.
+
+### A full round is not the round counter
+`_note_turn_completed`, called at the top of `_end_turn`, strikes each
+finishing seat off `pending`; when that set empties, one full round has passed
+and the next one starts with the same debt again.
+
+`pending` deliberately EXCLUDES the owner. That is what makes the brief's own
+example right: Lubin plays, everybody else takes a turn, and the round is up at
+the moment the turn comes back to Lubin. It is also what stops Piotrek's second
+slot in a round ending anything — he holds every third slot, so the round
+counter and "everybody has had a turn" are genuinely different things here.
+
+### Pausing instead of rolling back
+`_play_card` resolves the plan and then SETS IT ASIDE: the card stays in the
+hand, the board is untouched, `_after_play` is not reached.
+
+    play → resolve → (blockers?) → hold → answer → replay, or discard
+
+So there is nothing to undo. A blocked movement cannot have built a tower,
+cannot have triggered an identity check and cannot have won anybody the game,
+because it never happened — which is what the brief asks for and what a rollback
+would only have approximated. Accepting replays the SAME command through the
+ordinary path (`_resolved_movement` guards against holding it twice); blocking
+discards the card through the ordinary lifecycle and ends the turn exactly as
+playing it would have.
+
+Every other command is refused while a decision is open: the table is genuinely
+stopped, and a card played into the pause would resolve against a board that is
+about to change — or about to not change.
+
+### Who may block
+`are_opponents(a, b)` is `is_piotrek != is_piotrek`, read from the roles the
+game already has. No character title appears anywhere near this feature.
+
+### The clock, and who owns it
+The engine holds HOW LONG the window is (configuration, identical everywhere,
+in the snapshot). WHEN it started is wall-clock time, different on every
+machine, so it lives on the authority only — `Room.expire_decisions()` on the
+existing hub tick, `LocalSession.tick(now)` hot-seat, `now` passed in so
+nothing depends on a frame rate and nothing sleeps.
+`ExpireMovementDecision` is AUTHORITY_ONLY: a client's countdown is a picture of
+that command arriving, and a machine with a fast clock cannot time anybody out.
+
+### The automatic final block
+`_veto_is_last_chance` simulates the rest of the effect's life against the real
+cadence — the current turn completes, seats keep completing turns, full rounds
+keep elapsing — and asks whether any LATER turn belongs to an opponent while the
+effect is still alive. If none does, the block fires immediately with no window,
+because a window nobody has a reason to answer is not a decision.
+
+### Several vetoes at once
+All eligible opponents are blockers. The movement runs only when EVERY blocker
+has accepted, so one hunter's acceptance cannot spend Piotrek's chance; the
+first `BlockMovement` the authority applies wins and the second finds nothing to
+answer. One authority applying commands in order is the whole mechanism — no
+client ever cancels anything locally.
+
+### The interface
+`ui/movement_decision.py`: two buttons under the recently-played strip (where
+the brief asks for them — the card being answered is at the top of that strip),
+a countdown, and a confirmation dialog that draws the card through the ordinary
+`CardRenderer.draw_in` with the ordinary reveal hover. It owns no game state:
+whether there is a decision, who may answer and whether an answer is still valid
+are all read from the state on the frame they are drawn, and both buttons
+produce a Command and nothing else.
+
+The lobby setting is a sixth tab in the shared settings panel, "Zasady" — a
+number per TABLE rather than per card. In the panel rather than as another row
+on the two setup screens because both lay themselves out by measuring rows, and
+stage 21 already records a fifth row pushing Start off a 1280x760 window.
+
+### Changed
+- `data/cards.json` — the card's effect and its two variants.
+- `engine/statuses.py` — `MOVEMENT_VETO` and its label.
+- `engine/effects.py` — `movement_veto`, `MOVEMENT_OPERATIONS`,
+  `plan_moves_pawns`.
+- `engine/commands.py`, `engine/events.py` — `AcceptMovement`,
+  `BlockMovement`, `ExpireMovementDecision`; `MovementDecisionOpened`,
+  `MovementAccepted`, `MovementBlocked`.
+- `engine/game_state.py` — `PendingMovementDecision`, `pending_movement`,
+  `vetoes`/`veto_of`/`are_opponents`, `_note_turn_completed`,
+  `_upcoming_seats`, `_veto_is_last_chance`, `_blockers_for`,
+  `_open_movement_decision`, `_resume_movement`, `_apply_block`, the three
+  handlers, the refusal gate and the snapshot.
+- `config/settings.py`, `net/lobby.py`, `server/room.py` — the cooldown.
+- `net/session.py`, `server/room.py`, `server/hub.py` — the authority's tick.
+- `ui/movement_decision.py` (new), `ui/layout.py`, `ui/game_screen.py`,
+  `ui/settings_panel.py`, `ui/menu.py`, `ui/network_screens.py`.
+
+### Verification
+- **1516 pass, 30 fail — the same 30 as the baseline**, unchanged since before
+  stage 34. No regressions, and NO existing test was modified this stage.
+- 66 new tests in `tests/test_movement_veto.py`: the variants and durations;
+  the three opponent rules; movement cards and movement-causing Chest cards
+  blockable, while a Chest card that moves nobody, a dragged pawn, a character
+  ability and a teammate's movement are not; the window's configured length,
+  the table stopping while it is open, acceptance, timeout, and that neither
+  spends the veto; blocking (board unchanged, card discarded, veto spent, turn
+  passed, never twice); a blocked movement triggering no identity check; full
+  rounds including Piotrek's repeated slots; the last chance recognised and
+  fired automatically; two vetoes with one authoritative answer; the snapshot;
+  the interface at four window sizes; and two over the in-process server — one
+  playing the whole exchange through commands, one timing the window out from
+  the room's own tick with an injected clock.
+- NOT verified: no screenshots were reviewed, `inspect_frame.py` / `--selftest`
+  were not run, and the feature has not been played by a human. The countdown
+  was tested as a number, not as pixels.
+
+### Limitations and edge cases
+- ONE decision at a time. A second blockable movement cannot open while one is
+  pending, which cannot happen today because the table is stopped meanwhile.
+- Accepting requires EVERY blocker to accept. The alternative — first answer
+  closes the window — would let a hunter spend Piotrek's chance, so this is a
+  deliberate reading of an ambiguity in the brief.
+- The automatic final block picks the LOWEST seat when two vetoes are both on
+  their last chance. Deterministic on every replica; the other veto survives.
+- A client that reconnects mid-window rebuilds the pause from the snapshot and
+  starts its countdown from the full length, so it may see a few seconds more
+  than remain. The authority's deadline is unaffected.
+- `_veto_is_last_chance` walks at most 200 upcoming slots. A table whose cadence
+  could not produce an opponent turn in 200 slots would fire the block early;
+  no configuration reaches that.
+- A blocked Chest card goes to the Chest discard pile, and a blocked movement
+  card to the movement one — the card's own deck, as the ordinary lifecycle
+  does it. Neither is returned to the hand.
+
+## Stage 37 — Granny Costume, Jazdy, Where are you Marcus?, and Plac
+**Date:** 2026-08-12
+
+### Goal
+Four character abilities, and one rule that sits above all of them.
+
+    Big D Randy  Granny Costume        freeze one lone pawn for a full round
+    Lubin        Jazdy                 skip Piotrek's NEXT turn
+    Glockboy     Where are you Marcus? one staked check, after three others
+    Norbur       Plac                  deliberately a no-op, for now
+
+### The rule above them: no abilities while a pawn is on START
+`GameState.ability_refusal()` is the ONE gate. `_use_ability` asks it once,
+before any charge is spent; `hud.CharacterPanel` greys the button from the same
+method, and `game_screen._ability_click` reports the same sentence. A fifth
+ability written tomorrow inherits the rule without its author knowing it exists
+— which is the whole point of not writing it four times.
+
+Sesja na PG's lock moved INTO that method rather than sitting beside it, so the
+call sites ask one question rather than a growing list of them.
+
+`pawns_on_start()` deliberately excludes a pawn Obóz Harcerski is holding off
+the map. It has left START; it is simply somewhere else for a round. Treating
+it as still in the camp would lock every ability in the game for the length of
+that card, which is a rule nobody wrote.
+
+### Can this pawn move? — asked in one place
+`effects.pawn_is_frozen`, `pawn_may_move` and `movable_pawns`. The seven
+scattered `statuses.pawn_has(FROZEN, ...)` reads now all route through them, so
+a second reason a pawn may not move (a future Radar link, a future Dług u
+Tomasza separation) is one edit here rather than a search for every place
+somebody remembered to check.
+
+`_ordered_pawns`, `hindmost_pawn`, `foremost_pawn` and `_named_pawn` gained
+`movable_only`. That single flag is how Przepis, Obniżenie progu and PAA skip a
+frozen pawn and act on the next one — the skipping lives in the ORDERING, not
+in the three effects, so a fourth card that names a pawn by position inherits
+it. A card that names a pawn by COLOUR (`fixed`) gets no substitution: Zerówka
+- czerwony means the red one.
+
+### A full round is the owner's round — and not Nie masz Rosji's
+`full_round_payload` stamps `until_seat` and `granted_turn` on the status;
+`_expire_full_round_statuses` retires it when that seat BEGINS a turn again,
+from both `_end_turn` and `_set_active_player`.
+
+Stage 36's `pending` set would have been WRONG here, and this is worth reading
+before anybody "unifies" the two. On the brief's own six-player order that set
+empties two slots BEFORE the turn returns to Big D Randy, because the seats
+still owing a turn are Piotrek's earlier slots. The brief says the freeze ends
+when the turn REACHES Big D Randy. Three different rules; this is the third.
+
+`duration_turns = 1` therefore does NOT mean `turn_counter + 1`. That reading —
+one global turn — is the one the brief rules out by name.
+
+### Jazdy is a turn taken, not a window of time
+`SKIP_TURN` now carries NO expiry and is spent by the first matching turn. It
+used to carry `turn_counter + 1`, which is a different promise and a real bug:
+on a table where Piotrek holds every third slot that deadline can pass before
+his next slot, and the skip expired having skipped nothing.
+
+Nothing marks WHICH slot in advance, and nothing should — "the next one" is
+whichever comes first, and a recorded slot number goes stale the moment the
+round order changes. One status is spent by one turn, so exactly one of
+Piotrek's three slots is lost.
+
+Refused during the target's own turn, in the engine as well as the interface.
+
+### Where are you Marcus? — the question is public, the answer is not
+`RequestPawnCheck` records the colour and the seat staking itself on it, on
+every machine. `victory._asked_check` answers it on the authority, exactly as
+Squid Game's automatic check is already answered: a correct guess produces the
+EXISTING `DeclareVictory(HUNTERS)`, a wrong one `EliminatePawn` +
+`EliminatePlayer`. There is no second game-over path.
+
+`min_checked` reads `eliminated_pawns`, which IS the completed-check record and
+the only one: a colour lands there when a check resolved and the answer was no,
+and a check whose answer was yes ended the match. Previews and unanswered
+prompts never touch it.
+
+### Elimination is a permission withdrawn, not a seat removed
+`Player.eliminated`. The seat stays in `players`, stays in the turn order and
+stays connected — every index in the command log, the server's seat map and
+every snapshot assumes the seats never move.
+
+`_resolve_eliminated` runs BEFORE `_resolve_skip_turn` (a one-off skip must not
+be spent on a turn that was never going to happen) and before the interrupt (a
+card cannot hijack the turn of somebody who has none). `_reject_eliminated` in
+the authorisation layer refuses everything else, because the brief says they
+cannot MOVE either and their turns being skipped means such a command is stale
+or malicious by definition. Renaming and answering a movement are still
+allowed: an observer keeps their name and their vote.
+
+### Two bugs the new tests found
+`Gejtos` (Mężczyzna) MOVED the frozen pawn. `TransferStack` picked up whole
+towers without consulting the freeze. Fixed in `_op_transfer_stack` through
+`pawn_may_move`, so every future user of that operation inherits it rather than
+Gejtos getting a clause.
+
+`Skrypt` OFFERED the frozen pawn. Ability prompts now filter it out (§16 asks
+for exactly that). Card prompts deliberately do NOT — §8 asks for the opposite,
+"choosing it does nothing", which is a thing that happens at the table and
+should be allowed to happen on screen. Both end with the pawn not moving.
+
+### Plac is a declared no-op
+New `no_effect` handler; `characters.json` points at it and KEEPS `min_gap` and
+`duration_turns` as documentation. It is not a stub that pretends: the plan
+holds a Fizzle carrying the card's own text, so the status bar tells the table
+what the card says and the table settles it — the ability-shaped version of
+what `manual` does for Chest cards. `restrict_movement` stays registered and
+working, so building the rule later is a JSON edit back.
+
+### Changed
+- `data/characters.json` — Norbur's ability type.
+- `engine/effects.py` — `pawn_is_frozen`, `pawn_may_move`, `movable_pawns`,
+  `pawn_stands_alone`, `freezable_pawns`, `completed_checks`,
+  `full_round_payload`/`FULL_ROUND_KEY`; `RequestPawnCheck`, `EliminatePlayer`;
+  `movable_only` on the ordering helpers; `_freeze_pawn`, `_freeze_player`,
+  `_check_pawn`, `_no_effect` rewritten or added; `_movement_target`'s prompt.
+- `engine/game_state.py` — `pawns_on_start`, `ability_refusal`,
+  `pending_pawn_check`, `_op_request_pawn_check`, `_op_eliminate_player`,
+  `_eliminate_seat`, `_eliminate_player`, `_expire_full_round_statuses`,
+  `_resolve_eliminated`, `_reject_eliminated`, `_thaw_dragged`, the freeze in
+  `_op_transfer_stack`, and the snapshot.
+- `engine/commands.py` — `EliminatePlayer` (AUTHORITY_ONLY).
+- `engine/events.py` — `PawnCheckRequested`, `PlayerEliminated`.
+- `engine/victory.py` — `_asked_check`.
+- `players/player.py` — `eliminated`, and it in `to_public_dict`.
+- `ui/board_view.py` — `frozen_tiles`, `_draw_frozen_fields`.
+- `ui/hud.py` — the button's blocked state, `_elimination_cross`.
+- `ui/game_screen.py` — `_ability_click`, `_on_player_eliminated`.
+
+### Verification
+- **1616 pass, 0 fail.** The baseline was 1519 pass / 27 fail; all 27 were
+  pre-existing and are fixed below.
+- 71 new tests in `tests/test_stage37_abilities.py`: the START rule for all
+  four abilities and its release; target filtering including the brief's
+  six-pawn worked example; the freeze walked one real turn at a time until it
+  reaches Big D Randy, and NOT ending after one global turn; the frozen pawn
+  unmoved by Zerówka / Fillerski przedmiot / Wejściówka / Kolos z paki / Astral
+  2019 / Astral 2022 / Plagiat! / Seks z pedałami (over twelve seeds) / AKO,
+  and Przepis and Obniżenie progu acting on the next pawn instead; a rider on a
+  frozen pawn moving alone; Sesja na PG both variants, Obóz Harcerski,
+  Dzieckorolka (asserting the mover's route really crossed the field),
+  Balbinka, Gejtos both halves, PAA, Skrypt; manual drag cancelling the freeze
+  and cards working again afterwards; the highlight derived and never stale;
+  Jazdy's timing rule, one skip out of three Piotrek slots, and the order
+  resuming; Glockboy's three-check threshold, hunter victory, elimination,
+  observer status, and the snapshot; and Plac's six no-op assertions.
+- Several tests were STRENGTHENED after being caught passing vacuously — wrong
+  choice keys left cards sitting on unanswered prompts, which moves nothing and
+  looks like success. Plagiat! (`pawns`, comma-separated), Gejtos
+  (`gather`/`scatter`) and AKO (`ako`, with a control proving it WOULD have
+  taken the pawn) now assert the card actually resolved.
+- Existing tests updated for two deliberate rule changes: ability tests now
+  clear the camp (the START rule), and the Big D Randy / Norbur / Glockboy
+  tests were rewritten for filtering, the no-op and the implemented check.
+- Pre-existing failures fixed, unrelated to this stage: 26 from the `Shady` →
+  `Obóz Harcerski` MOD rename (the CHEST card `Shady` still exists and its
+  references were left alone), and `test_an_undesigned_card_resolves_and_is_discarded`,
+  which still named `Nie masz Rosji` after stage 36 implemented it.
+- NOT verified: no screenshots were reviewed, `inspect_frame.py` / `--selftest`
+  were not run, and nothing here has been played by a human. The blue highlight
+  and the elimination X are tested as STATE — `frozen_tiles()` returns the
+  right tile indices, `to_public_dict()["eliminated"]` is true — not as pixels.
+
+### Limitations and edge cases
+- A frozen pawn's card returns `Refusal` (the card stays in the hand), where
+  Obóz Harcerski returns `Fizzle` (the card resolves, does nothing, is
+  discarded). The brief says "no effect", which reads more like a Fizzle; the
+  existing behaviour and its tests predate this stage, so it was left alone and
+  is flagged here rather than changed unasked. THIS NEEDS A DECISION.
+- Ability prompts filter frozen pawns and card prompts do not. Deliberate: §16
+  and §8 of the brief ask for opposite things. If that asymmetry is wrong, the
+  one place to change it is `_movement_target`.
+- `Jazdy` refuses when the target already has a skip pending rather than
+  queueing a second one. Two Lubins at one table is the only way to reach it.
+- Radar, Dług u Tomasza and PAA's future mechanics are NOT implemented, per the
+  brief. They will consult `pawn_may_move`; nothing else was built for them.
+- An eliminated seat is not dealt movement cards on its skipped turns, or the
+  deck would drain one card per skipped turn for the rest of the match.
+- If EVERY seat were eliminated the turn loop would stop after
+  `MAX_TURN_INTERRUPTS` hand-offs. Only Glockboy can be eliminated today, so
+  this is unreachable.
+
+## Stage 38 — Ondrej's "Radar", and pawns that travel as one
+**Date:** 2026-08-12
+
+### Goal
+Two pawns become one movement unit without ceasing to be two pawns, for one
+full round, in two variants.
+
+    variant 1  "check_both"  checking either linked pawn checks both
+    variant 2  "check_one"   checking one checks only that one
+
+Movement is identical under both; only the checking rule differs.
+
+### What was already there, and what was wrong with it
+`StatusKind.LINKED`, `linked_partners` and a `link_pawns` effect existed from
+an earlier stage, and `travellers` already dragged a partner along. Four things
+were wrong, and all four mattered:
+
+* the members were stored `sorted()`, which threw away the selection order —
+  the one thing the same-field reordering rule needs;
+* the duration was `turn_counter + 1`, one global turn, not a full round;
+* the partner was appended as a RIDER and placed on top, so moving the upper
+  pawn of a pair landed it under its own partner and inverted the pair every
+  time it moved;
+* nothing brought the two pawns together in the first place.
+
+### Ordered selection, asked once
+One `Choice` with `key="pawns"`, `count=2`, `ordered=True` — the same ordered
+multi-select Plagiat! uses, rather than two prompts in a row. The order is
+stored on the status as `members`, first pick first.
+
+### The same-field rule, from four examples to one expression
+`restack_for_link` reads the brief's four cases as a single rule: the pair ends
+up ADJACENT with the first pick directly under the second, everybody else keeps
+their relative order, and the pair sits where the first pick was standing
+RELATIVE TO THE PAWNS THAT ARE NOT IN IT.
+
+The anchor is the interesting part and the three obvious guesses all fail one
+of the four cases. Counting non-pair pawns below the first pick is what makes
+all four come out, including case D returning the tower unchanged without being
+special-cased.
+
+Carried out by a new `RestackTile` operation, deliberately not built out of
+moves: no pawn changes field, no route is walked, no distance exists. The tower
+is simply standing in a different order afterwards.
+
+### Different fields
+The pawn further behind walks onto the one further ahead and lands on top by
+the ordinary stacking rule. WHICH pawn moves is decided by the board, not by
+the picking order — picking the front pawn first still moves the rear one.
+
+### One movement unit, either end, right way up
+`travellers` now returns its group ORDERED BOTTOM-TO-TOP over the current
+board, and `_op_move_pawn` sorts the whole group — mover included — before
+placing it. The mover is not always the bottom: a linked partner may be
+standing under it. For an ordinary tower the mover IS the bottom, so this is
+the old behaviour with the order written down instead of assumed.
+
+`travelling_group` exposes the same list for anything that needs to reason
+about the unit rather than move it.
+
+No double movement falls out of this rather than being special-cased: a card
+that moves everybody moves the pair once because the pair is one placement.
+
+### Checking follows the link
+`victory.checked_with` answers "which colours does a check on this pawn
+actually inspect", and all THREE checking routes — the completed tower, Squid
+Game's automatic check and Glockboy's deliberate one — now go through one
+`_resolve_check`. A linked partner that turns out to be Piotrek ends the match
+exactly as the checked pawn would have; checking a pawn and declining to notice
+the answer would be a different rule.
+
+The variant is recorded ON THE STATUS as `check_together` at the moment the
+link is made, not looked up from the character card when the check happens.
+Two reasons: `victory` has no business knowing which abilities exist, and a
+variant switched mid-match must not retroactively rewrite a running link.
+
+### A character card is a card
+`CardVariant` gained an `ability` field and `with_variant` applies it. That is
+the whole of the variant support — the seeding, the lobby tab, the Card
+Library, `SetCardVariant` and `_reread_copies` are all deck-agnostic already,
+so Ondrej appears in the variants tab beside two Mods and a Chest card without
+a line of new plumbing.
+
+### Granny Costume stays authoritative
+Making the link is itself a movement, so a frozen pawn that would have to walk
+cannot, and the ability is REFUSED — not allowed to bypass the freeze, and not
+allowed to leave a "pair" standing on two fields, which is not a pair any
+movement rule below could honour. A frozen ANCHOR is fine: it is stood next to,
+not moved. A refusal spends no charge.
+
+A freeze landing on one member of an existing pair leaves that member behind
+and the other still moves. Same answer AKO already gives a frozen neighbour:
+the effect does less rather than being refused.
+
+### Changed
+- `data/characters.json` — Ondrej's two variants.
+- `cards/base_card.py` — `CardVariant.ability`, applied in `with_variant`.
+- `engine/effects.py` — `linked_group`, `link_status`, `checks_together`,
+  `stack_order_key`, `travelling_group`, `restack_for_link`, `RestackTile`;
+  `travellers` reordered and made freeze-aware; `_link_pawns` rewritten.
+- `engine/game_state.py` — `_op_move_pawn` places a sorted group,
+  `_op_restack_tile`, `_thaw_dragged` also ends a link.
+- `engine/events.py` — `TileRestacked`.
+- `engine/victory.py` — `checked_with`, `_resolve_check`, and the three
+  checking routes rewired through it.
+
+### Verification
+- **1665 pass, 0 fail.** The previous stage ended at 1616 pass / 0 fail.
+- 49 new tests in `tests/test_stage38_radar.py`: the ordered prompt and that
+  the order is stored rather than sorted; the START rule; the rear pawn walking
+  onto the front one from either picking order, and stacking onto a third pawn
+  already there; the four brief examples asserted TWICE — against the pure
+  reordering function and again through a real activation on a real board —
+  plus the invariant they are instances of and the untouched pawns keeping
+  their order; movement from either end with the pair's order intact, landing
+  on an occupied field, a pawn stacked above not unlinking it, an unrelated
+  pawn still moving alone, and Balbinka moving the pair exactly one step;
+  variant 1 checking both and variant 2 checking one, each through the real
+  check, including a linked partner who IS Piotrek winning the match under
+  variant 1 and not under variant 2; a colour already ruled out not being
+  checked twice; a mid-match variant switch not rewriting a running link;
+  expiry after a full round with movement and checking both individual again
+  and no stale state anywhere; and four freeze tests.
+- Two existing tests updated for deliberate changes: the Ondrej ability test
+  now uses the ordered prompt, and the two variant INVENTORIES gained Ondrej.
+- NOT verified: no screenshots, no `--selftest`, no human play. The link line
+  the board already draws between linked pawns was not looked at.
+
+### Limitations and edge cases
+- The DIFFERENT-FIELDS case does not reorder: the arriving pawn lands on top by
+  the ordinary stacking rule, whichever was picked first. §5 asks for
+  reordering only when both pawns already share a field, and §4 asks for the
+  stacking rules to be respected. So the first pick is guaranteed to be under
+  the second ONLY in the same-field case.
+- Radar refuses rather than linking in place when the rear pawn is frozen. The
+  brief asks for "the smallest consistent solution"; the alternative — a pair
+  spanning two fields — has no meaning under §7.
+- Dragging either member by hand ends the link, following the freeze's
+  existing manual-movement semantics. The brief asks for consistency with the
+  existing architecture rather than naming this outcome.
+- A third pawn stacked between the pair by an unrelated effect is carried along
+  by the tower rule and stays between them. The pair keeps its relative order,
+  which is what §7 asks; it does not become adjacent again.
+- `check_together` is fixed when the link is made. A table that switches
+  variant mid-round finishes the round under the rule it started.
+
+## Stage 38a — Two Radar bugfixes: the invisible reorder and the roof landing
+**Date:** 2026-08-12
+
+### Bug 1 — a reordered tower stayed on screen in its old order
+`board_view.visual` is the board's own copy of where each pawn is DRAWN, and it
+was written by exactly two reactions: `TokenMoved` and `TokenWalked`. A Radar
+reorder changes a pawn's HEIGHT without moving it between fields, so it emits
+neither — it emits `TileRestacked`, which nothing was listening to. The engine
+had the tower right immediately; the screen went on showing the old order until
+some later card happened to touch those pawns and dragged the view back into
+step, which is exactly the "it fixes itself after another move" symptom.
+
+Fixed by subscribing to the event that already existed and gliding the affected
+pawns to the positions the ENGINE already computed. No stack state was touched:
+this is the missing propagation, not a redraw hack, and the pawn whose height
+did not change is snapped rather than animated so nothing twitches.
+
+### Bug 2 — the arriving pawn landed on the roof instead of beside its partner
+`_link_pawns` moved the rear pawn onto the anchor's field and left the ordinary
+stacking rule to place it, which appends to the top of the tower. With `pink`
+under `yellow`, linking `pink -> green` gave `pink, yellow, green` instead of
+`pink, green, yellow`.
+
+That is worse than cosmetic. It left the pair split by a pawn that is not in
+it, and it left `green` standing ON `yellow` — so the next card to move
+`yellow` would carry `green` off by the tower rule while the Radar link was
+still active, tearing the pair apart across two fields.
+
+Fixed with a new pure function, `effects.insert_above`, and a second operation
+in the plan: the move puts the block on the field (an ordinary move, unchanged)
+and the existing `RestackTile` decides where in the tower it belongs. Bottom,
+middle and top all fall out of one expression — at the top, "directly above"
+IS the roof, so that case needs no special handling and gets none.
+
+Deliberately NOT a second stacking system and not a Radar-shaped `MovePawn`:
+`RestackTile` is the operation the same-field case already used, so both halves
+of Radar now seat the pair through the same mechanism.
+
+### What did NOT change
+Duration, selection, the ordered pair, checking, both variants, the freeze
+interaction and every other card. `insert_above` is called from one place.
+
+### Changed
+- `engine/effects.py` — `insert_above`; `_link_pawns`'s cross-field branch now
+  plans `MovePawn` + `RestackTile`.
+- `ui/board_view.py` — `_on_tile_restacked`, subscribed to `TileRestacked`.
+
+### Verification
+- **1682 pass, 0 fail.** The previous stage ended at 1665 pass / 0 fail.
+- 14 new tests in `tests/test_stage38_radar.py`: `insert_above` at the bottom,
+  middle and top of a five-tower and preserving everybody else's order; the
+  brief's `pink -> green` case on a real board; the anchor at each of three
+  heights; the pair surviving the insertion; a pawn above the pair NOT being
+  part of it — moving it leaves the pair alone, which is the gameplay bug
+  asserted directly; either member still moving the pair afterwards; and the
+  insertion going through exactly one `TileRestacked`.
+- 3 new tests in `tests/test_ui.py`, and these were **checked against the bug**:
+  with the subscription commented out, two of the three fail. They assert
+  `display_position` — what the renderer actually asks — against the engine's
+  own token positions, so they cannot pass by the view inventing coordinates.
+- Two stage-38 tests were UPDATED because they encoded the old, wrong
+  behaviour: the arrival landing on the roof, and a pawn above the pair being
+  expected to stay behind.
+- All four same-field orderings from the original brief re-verified unchanged.
+- NOT verified: no screenshots, no `--selftest`, no human play. The settle
+  animation is tested as end-state positions, not as pixels over time.
+
+### Limitations
+- A pawn standing ABOVE the pair is still carried along when either member
+  moves. That is the ordinary tower rule and not a Radar rule — the pair stays
+  adjacent and in order, and the passenger is not a member of it.
+
+## Stage 39 — Dziubdziuch's "Przerwanie Systemowe"
+**Date:** 2026-08-12
+
+### Goal
+Dziubdziuch may interrupt Piotrek's movement, in four variants crossing
+duration with card category.
+
+    Variant 1  forever_any        rest of the game   Movement + Chest
+    Variant 2  forever_movement   rest of the game   Movement only
+    Variant 3  round_any          one full round     Movement + Chest
+    Variant 4  round_movement     one full round     Movement only
+
+### One mechanism, not two
+The ability is Nie masz Rosji's interception with different numbers on it, so
+NOTHING was reimplemented. The pause, the decision window, the configurable
+seven-second cooldown, the confirmation, the timeout, the automatic final
+block, the "the movement never happened" guarantee and the blocked-card
+lifecycle are all the existing code, untouched.
+
+What was EXTRACTED is the scope rule. `movement_veto` grew three parameters —
+`targets`, `rounds`, `decks` — and `GameState.veto_covers(status, mover,
+deck_id)` is now the single place that answers "is this veto entitled to stop
+this movement". `_blockers_for`, `_open_movement_decision` and the last-chance
+simulation all ask it instead of each working the answer out.
+
+### The four differences, as parameters
+* WHO. `targets: "piotrek"` is narrower than Nie masz Rosji's `"opponents"` —
+  narrower even for a hunter, because a table with no Piotrek gives nobody to
+  interrupt rather than everybody. Read from roles; no title is compared.
+* WHAT. `decks` is the game's own card category. Variants 2 and 4 allow the
+  movement deck only, so a Chest card that moves a pawn is simply not a
+  blockable movement FOR THEM — no window opens and the veto is not spent.
+  A Chest card that moves nobody is still not held, because `plan_moves_pawns`
+  is asked as it always was.
+* HOW LONG. `rounds: 0` (`effects.UNLIMITED_ROUNDS`) means no clock: ageing
+  skips it entirely and turns passing do nothing. `rounds: 1` reuses Nie masz
+  Rosji's `pending`/`rounds_left` machinery unchanged.
+* USES. The existing ability-use system IS the counter, and there is no other.
+
+### Uses, and what "until all uses are consumed" means
+Activating spends one use and grants a veto with ONE CHARGE. Blocking spends
+the charge and the status is gone. With uses remaining the ability may be
+activated again; with none left it cannot, so the blocking power is over —
+which is exactly "the effect remains available until all uses have been
+consumed", expressed entirely in machinery that already existed.
+
+A stale block command after exhaustion does nothing: with no veto there is no
+window, and a late `BlockMovement` finds nothing to block.
+
+### The automatic final block, and why it does not fire here
+An unlimited veto always has another chance coming, so `_veto_is_last_chance`
+returns false for it and it opens a window rather than spending itself unasked.
+The forced block belongs to a veto that is running out of time; a veto with no
+clock has none to run out of.
+
+### Changed
+- `data/characters.json` — Dziubdziuch's ability is `movement_veto`, with four
+  variants. It was `freeze_player`, which is Lubin's skip-a-turn mechanism and
+  would have skipped Piotrek's turn rather than interrupting a movement.
+- `engine/effects.py` — `blockable_decks`, `UNLIMITED_ROUNDS`,
+  `VETO_OPPONENTS`/`VETO_PIOTREK`; `_movement_veto` parameterised;
+  `_veto_description`.
+- `engine/game_state.py` — `veto_covers`; `_blockers_for` takes a deck;
+  `_open_movement_decision` passes it; `_note_turn_completed` and
+  `_veto_is_last_chance` understand an unlimited veto; `_BLOCKABLE_DECKS` now
+  points at the shared definition.
+
+### Verification
+- **1722 pass, 0 fail.** The previous stage ended at 1682 pass / 0 fail.
+- 40 new tests in `tests/test_stage39_przerwanie.py`: activation granting the
+  same status kind and charge as the Chest card, spending a use, and obeying
+  the START rule; Piotrek intercepted, a hunter NOT intercepted, Dziubdziuch
+  not interrupting himself; every variant holding a Movement Card; variants 1
+  and 3 holding a movement-causing Chest card and variants 2 and 4 letting it
+  through WITHOUT spending the veto; a Chest card that moves nobody never held;
+  the forever variants carrying no clock and surviving forty turns, and still
+  blocking twenty-five turns later; blocking spending the veto, leaving no
+  second block, and the ability being unusable with no uses left; a second use
+  re-arming it; a stale block command doing nothing; the round variants
+  expiring after a full round and not after one turn, and opening no window
+  afterwards; the configurable cooldown, accept, and timeout all reaching the
+  movement; the blocked card reaching its own discard pile; an unlimited veto
+  never firing automatically; the snapshot; a seat without a veto unable to
+  block; and four tests that Nie masz Rosji still has its WIDER rule, including
+  both vetoes live at once with only the right one offered the window.
+- Both halves of the new rule were MUTATION-TESTED: breaking the deck
+  restriction fails three tests, breaking the unlimited-duration skip fails
+  three others.
+- Two variant INVENTORIES updated — Dziubdziuch legitimately joins them.
+- NOT verified: no screenshots, no `--selftest`, no human play. The interface
+  was not changed and its existing veto tests still pass.
+
+### Limitations and edge cases
+- "spala użytą kartę" was read as the existing behaviour: a blocked card leaves
+  the hand and goes to its own deck's DISCARD pile, exactly as Nie masz Rosji
+  already does. If "burn" was meant as removed-from-the-game entirely, that is
+  a different lifecycle and is not implemented. FLAGGED FOR A DECISION.
+- The ability arms a veto that must then wait for Piotrek to play something.
+  It cannot interrupt a movement already in progress, and it does not stop
+  movement caused by a Mod, a character ability or a manual drag — none of
+  those is a played card and none comes through `_open_movement_decision`.
+  Nie masz Rosji has always had the same boundary.
+- With more than one use configured, the uses are spent one activation at a
+  time rather than one veto carrying several charges. Either reading fits the
+  brief; this one needs no new counter.
+
+## Stage 40 — Ice Block, tower breakup, and the Piotrek victory variants
+**Date:** 2026-08-12
+
+### Ice Block: one gate in front of every check
+`victory.ice_block_pending()` is asked by all THREE checking routes — the
+completed tower, Squid Game's automatic check and Glockboy's deliberate one —
+before any of them resolves, so a fourth route added later inherits the ability
+by calling the same function rather than by remembering to.
+
+It returns a COMMAND (`OpenCheckDecision`) rather than mutating, like
+everything else in that module: the window is state every client must agree
+about, so it is opened by a logged command and not by the authority quietly
+setting a flag.
+
+ICE BLOCK IS A PIOTREK **SKILL**, NOT A CHARACTER ABILITY. Read off
+`player.character` first, it silently never fired — the ability existed, the
+window never opened, and every existing check test still passed. `ice_block_card`
+now checks `player.skill` and falls back to `character`, so a future table that
+hands it out the other way needs no change.
+
+### The window, and why nothing sleeps
+`PendingCheckDecision` is `PendingMovementDecision`'s shape and for its reasons:
+`seconds` is configuration and travels in the snapshot, `opened_at` is
+wall-clock and lives on the authority only. The timeout runs on the SAME tick
+in `room.py` and `session.py`, via authority-only `ExpireCheckDecision` — so a
+client with a fast clock cannot time Piotrek out early, and a stale one cannot
+refuse after the deadline.
+
+Default ten seconds (`RULES.check_decision_default`), clamped by the limits the
+movement window already uses.
+
+### Allowing, refusing, and timing out
+Allow and timeout are the SAME PATH and cost nothing — which is the brief's
+rule and also the only one that makes a timeout safe, because a player who
+loses their connection must not lose a charge for it. `check_allowed` records
+the colour so `review` resolves the check instead of re-asking about the same
+unchanged tower.
+
+Refusing spends one use and CANCELS the check rather than answering it: no
+colour is crossed off, no identity is compared, nothing is revealed — there is
+no answer to leak because the question was never put.
+
+The re-check lock is the card's own text — "Pionki muszą być rozdzielone przed
+kolejnym sprawdzeniem" — as `check_needs_separation`, released from
+`_sync_token_positions` when the pawns are no longer gathered. Without it the
+identical tower would be re-checked on the very next command and the refusal
+would have bought nothing.
+
+### Checking variant 2: the tower comes apart
+Armed in `_eliminate_pawn`, because that is the one place every FAILED check
+goes through. A check Ice Block refused produces no elimination at all, so "no
+check, no breakup" falls out rather than needing to be stated.
+
+The two-second pause is a deadline on the authority's clock aged by the same
+tick as the other two, never a sleep. `effects.tower_pairs` /
+`breakup_positions` / `tower_breakup_plan` are pure functions asked of the
+BOARD: positions are the game's own logical steps, so a doubled row is one
+position with two fields and counts as one step back — which is what makes
+"2a or 2b" a choice rather than two destinations. Nothing is hard-coded.
+
+Five pawns work because nothing assumes six: the last group is simply a group
+of one and travels alone.
+
+### ⚠ ONE DELIBERATE DEVIATION FROM THE BRIEF — NEEDS A RULING
+§8 states the principle as "divide the tower into groups of two according to
+their position inside the original tower, then place those groups on the fields
+behind the original tower". Implemented literally: bottom group nearest, top
+group furthest back — which is what §7 and §9 both need, since the group
+Piotrek places on the doubled 2a/2b field is the top one.
+
+The brief's WORKED EXAMPLE instead puts the bottom pair on 3 and the middle
+pair on 4, i.e. those two swapped. No rule stated anywhere produces that
+ordering; both worked examples share it, so it reads as a slip carried between
+them. Everything else in both examples comes out exactly: the pairing, each
+pair's internal order, the top group on 2a/2b, the lone fifth pawn.
+
+IF THE EXAMPLE IS RIGHT AND THIS IS WRONG, the fix is one line in
+`tower_breakup_plan` — swap the first two entries of `groups`. It is a single
+function for exactly that reason.
+
+### Piotrek's 2a/2b choice
+`pending_breakup.choice_position` is the doubled row the furthest-back group
+lands on; `ChooseBreakupTile` is refused for anybody but Piotrek's seat — NOT
+the player whose card built the tower, which the brief is explicit about. No
+answer before the deadline uses the first field, deterministically, so a
+disconnected Piotrek cannot hang the table.
+
+### Victory variants
+`victory.escaped_pawn()` — `own_pawn` (the game as it was) or `any_pawn`. The
+`Verdict` still names the HIDDEN colour under both, so winning on somebody
+else's pawn does not rename Piotrek or leak which pawn he was. Nothing else in
+the module asks the question, which is what keeps §11 true.
+
+### Configuration
+`check_variant`, `victory_variant` and `check_decision_seconds` on
+`SessionConfig`, with `CHECK_VARIANTS` / `VICTORY_VARIANTS` id→label tables so
+the lobby, the panel and the config read one list. Unknown values fall back to
+the default rather than crashing. Defaults preserve the old game exactly.
+
+### Changed
+- `config/settings.py` — the two variant tables, three new fields, clamps,
+  `check_decision_default`, `tower_breakup_seconds`.
+- `engine/victory.py` — `ice_block_card`/`ice_block_uses`/`ice_block_pending`,
+  `escaped_pawn`, and the three checking routes gated.
+- `engine/effects.py` — `tower_pairs`, `breakup_positions`,
+  `tower_breakup_plan`; `refuse_check` now explains that it is reactive.
+- `engine/game_state.py` — `PendingCheckDecision`, `PendingTowerBreakup`, the
+  five handlers, `_arm_tower_breakup`, `_release_check_lock`, snapshot fields.
+- `engine/commands.py`, `engine/events.py` — the new commands and events.
+- `server/room.py`, `net/session.py` — both deadlines on the existing tick.
+
+### Verification
+- **1769 pass, 0 fail.** The previous stage ended at 1722 pass / 0 fail.
+- 47 new tests in `tests/test_stage40_ice_block.py`: the window opening before
+  a check resolves and NOT opening with no skill or no uses; the ten-second
+  default and its configurability; allow → check proceeds and the use remains;
+  refuse → check cancelled, one use spent, nothing revealed, no victory; the
+  same tower not re-checked until the pawns separate, and separating re-arming
+  it; only Piotrek answering; nothing at all decided while the window is open,
+  not even a victory; the timeout driven through the real session tick, costing
+  nothing, and a late refusal after the deadline rejected; variant 1 leaving
+  the tower alone; a SUCCESSFUL check breaking nothing; the two-second wait
+  driven tick by tick; six-pawn and five-pawn towers (the latter hidden through
+  the real HIDDEN status, since a pawn merely lifted off the board leaves the
+  tower incomplete and no check happens); pair order preserved; the pairing
+  rule as a pure function; Piotrek choosing 2a/2b, a hunter refused, and no
+  answer defaulting deterministically; a refused check breaking no tower and an
+  allowed one still doing so; both victory variants including the verdict still
+  naming the hidden colour and checking being untouched; and the defaults.
+- Four existing tests updated for the deliberate rule change: `test_victory.py`
+  now answers the Ice Block window in its tower helper (Piotrek is DEALT a
+  skill at setup, so when it is Ice Block the window is correct behaviour), the
+  Ice Block button test now asserts the button explains itself, and
+  `test_the_automatic_check_reaches_every_machine` puts the skill aside.
+- THAT LAST ONE WAS FLAKY AND WAS ONLY CAUGHT BY THE CLEAN-EXTRACT RUN. Whether
+  Piotrek holds Ice Block depends on the shuffle, so the test passed or failed
+  on the deal — measured at three failures in five runs before the fix, eight
+  clean runs after. The check-dependent suites were then run six times over to
+  look for the same latent problem elsewhere: 350 pass every time.
+- 11 further tests for the interface and the lobby: the panel showing itself to
+  Piotrek and to nobody else; both buttons producing Commands and the refusal
+  asking first; the drawn countdown reaching zero WITHOUT closing the window;
+  the scatter choice offered to Piotrek only, naming the two real fields, and
+  going away once answered; the lobby carrying all three settings through
+  `to_dict`/`from_dict`; an unknown variant id falling back; the settings panel
+  defaulting to the old game and stepping to the new one; and the panel's
+  choices reaching a normalised `SessionConfig`.
+- The two panels were MUTATION-TESTED: removing the seat guard and removing the
+  confirmation each fail two tests.
+- NOT verified: no screenshots, no `--selftest`, no human play. The panels are
+  tested through their state, their hit-testing and the Commands they return,
+  never as pixels.
+
+### The interface, and the lobby (stage 40b)
+`ui/check_decision.py` carries both panels, built on the shapes that already
+existed rather than beside them:
+
+* `CheckDecision` — the same two buttons in the same place as the movement
+  window's, with the same confirmation in front of the destructive answer,
+  because spending the only use of a card by mis-clicking a small button is not
+  a decision anybody made. The two windows can never be up at once: `review`
+  decides nothing while a check is pending, and a paused movement is not a
+  command that can arm one, so `check_decision_panel` returns the movement
+  window's rect rather than finding somewhere else to live.
+* `BreakupChoice` — the 2a/2b pick, centred over the board because the choice
+  is about two fields and the panel names them.
+
+Both are windows onto authoritative state: they read the engine on the frame
+they are drawn, they own no copy of anything, and every button produces a
+Command. The countdown is a PICTURE — a client whose clock runs out simply
+stops responding; the command that ends the window comes from the authority.
+
+The rules tab grew three rows using the SAME named-option machinery the
+variants tab uses, so a rule variant is a labelled choice rather than a second
+kind of row. The choice travels menu → `SessionConfig`, and lobby → wire →
+`from_dict` → `SessionConfig` for an online table, with an unknown id falling
+back to the default rather than crashing.
+
+### Limitations
+- THE TOWER-BREAKUP ORDERING IS A JUDGEMENT CALL. See the warning above.
+- Ice Block's button refuses with an explanation rather than doing nothing.
+  The ability is reactive and there is no check on the table to refuse when it
+  is pressed.
+- A refusal locks checking until the pawns separate. If no effect ever
+  separates them the hunters cannot check again — which is the card's printed
+  rule, but worth knowing.
+
+## Stage 40a — Four bugs the screenshots exposed, and why the tests missed them
+**Date:** 2026-08-12
+
+Stage 40 shipped with a green suite and four real defects. Two screenshots from
+the running game found all four in minutes. The lesson is recorded here because
+it generalises: EVERY ONE OF THEM LIVED IN THE GAP BETWEEN A PASSING TEST AND A
+RUNNING FRAME.
+
+### Bug 1 — a whole sentence inside the stepper's well (screenshot 1)
+`CHECK_VARIANTS` / `VICTORY_VARIANTS` held ONE string per variant — "Wariant 1
+— nieudany check nic nie zmienia" — and the rules tab passed it as both the
+name and the description. The well is a ~100px box between -1 and +1, so
+`fit_text` shrank the sentence to its floor and drew it 243px wide: 65px over
+each button, exactly as the screenshot shows.
+
+Now `id -> (name, description)`. The well holds "Wariant 1"; the sentence goes
+on the row's help line, which is where `is_choice` rows already put it. Nothing
+about the drawing changed — the data was wrong, not the layout.
+
+MEASURED, not assumed: the new test renders both strings through the real
+`fit_text` and asserts the drawn rect clears both buttons. Against the old
+strings it fails by those same 65px.
+
+### Bug 2 — "Wariant 2, then -1" sat still
+`SettingsTab.bump` clamped to the TAB's `low`/`high`. The rules tab mixes a
+1..30 timer with a 0..1 variant, so index 1 minus one gave 0, which was below
+`low` of 1, and snapped straight back. The same bounds let +1 walk the stored
+index to 30 while the display stopped at the last variant — a row could look
+unchanged and be far out of range.
+
+`bounds_for` gives a CHOICE row its own list's bounds and a counting row the
+tab's, unchanged. The variants tab benefits too: a card with two variants on a
+tab whose longest list is four could previously drift past its own end.
+
+### Bug 3 — the ghost tower (screenshot 2)
+The breakup PLACES pawns rather than walking them, so it emitted neither
+`TokenWalked` nor `TokenMoved` — and those two were the only things that ever
+wrote `board_view.visual`. The engine had every pawn on its new field and the
+x2 badges (which count the authoritative stack) moved at once, while the pawns
+stayed drawn in a tower on the old field. Screenshot 2 is precisely that: three
+badges in the right places and six pawns stacked in the wrong one.
+
+Fixed by subscribing to `TowerGroupPlaced` and settling those pawns onto the
+positions the ENGINE already computed — the missing propagation, not a redraw
+hack and not hiding the old tower. `_settle_pawns` is now shared with the
+restack reaction, which had the identical problem in stage 38a. THAT IS TWICE
+NOW: any new operation that moves pawns without walking them must tell the view.
+
+### Bug 4 — the confirmation dialog crashed on its first draw
+`theme.text_body` does not exist. Nothing had ever reached that line: the panel
+tests drove the buttons and the engine, and the dialog is only PAINTED once a
+refusal has been started. One click in the running screen raised
+`AttributeError` immediately.
+
+### And the geometry was wrong
+`breakup_positions` started one field BEHIND the tower, so every group moved
+and the original field emptied. The owner's rule and the board screenshot agree:
+the bottom pair stays put, group *i* falls *i* fields back. A six-pawn tower on
+field 4 occupies 4, 3 and 2, with 2 the doubled row Piotrek picks a field on.
+Fixed in the one function that decides where a group goes.
+
+### Verified in the RUNNING GAME, not just in tests
+Driven through a real `GameScreen` + `LocalSession` against SDL's dummy driver,
+clicking real rects and ticking the real host clock:
+
+1. Ice Block window opens on a check — panel active, countdown running.
+2. Click REFUSE → confirmation appears; confirm → check cancelled, use 1→0,
+   `eliminated_pawns` empty, no breakup armed, separation lock set.
+3. Click ALLOW → use stays at 1, check resolves, colour crossed off, breakup
+   armed under variant 2.
+4. Six-pawn tower on field 4 → groups on 4, 3, 2; scatter panel offers 3a/3b;
+   clicking the SECOND field puts the top pair there (not the default).
+5. Host tick at +2.5s resolves it; all six pawns drawn exactly where the engine
+   says (distance < 1px). With the subscription disabled, four of six read
+   GHOST — the screenshot reproduced and then fixed.
+6. Five-pawn tower (real HIDDEN status) → 2/2/1, top pawn alone, no ghost.
+7. Variant 1 → nothing armed, all six pawns still on one field after the tick.
+8. Victory variant 1 → another pawn at the finish wins nothing; variant 2 →
+   `declare_victory`, and the verdict still names the HIDDEN colour under both.
+9. Both selectors stepped +1/+1/-1/-1: they walk both ways and stop at both
+   ends; the timer row still counts 1..30.
+
+### Verification
+- **1779 pass, 0 fail.** Stage 40 ended at 1769.
+- 10 new tests, and all three engine/UI fixes were MUTATION-TESTED: reverting
+  the per-row bounds fails 2, the geometry fails 3, the ghost fix fails 1.
+- Two stage-40 tests corrected — they encoded the old, wrong geometry.
+- The ghost test drives the SESSION rather than applying the command to the
+  state, because applying it directly moves the pawns and tells the view
+  nothing, which is the bug rather than a way of testing it.
+
+### Limitations
+- Still no human has played this. "Running game" here means the real screen,
+  real layout rects and real host clock under a dummy video driver; it is not
+  a person looking at a monitor.
+- Ice Block only appears if Piotrek is DEALT the Ice Block skill, which is
+  random. That is the existing skill-deal design, not something this stage
+  changed, but it means a given match may never show the window.
+
+## Stage 40b — Ice Block does not stop the breakup, and the scatter is centred
+**Date:** 2026-08-12
+
+Two focused corrections. Nothing else was touched.
+
+### 1 — the trigger is the ATTEMPT, not the answer
+`_arm_tower_breakup` was called from `_eliminate_pawn` only. A refusal
+deliberately eliminates nothing, so no breakup was ever armed — which encoded
+"no check, no breakup". That is one reading of the rule and not the one the
+game wants.
+
+It is now called from `_refuse_check` as well. Ice Block stops the CHECK — no
+identity compared, no colour crossed off, nothing revealed — but it does not
+stop the tower being pulled apart by the attempt. Same delay, same grouping,
+same 2a/2b choice. Under variant 1 there is no breakup to inherit, so a
+refusal there still leaves the tower standing.
+
+`checked` is now allowed to be a colour that is not in the tower's stack only
+when it is empty, so the elimination path keeps its "not a tower check" guard
+while the refusal path passes the colour it was asked about.
+
+### 2 — the scatter is centred on the tower, not walked backwards from it
+`breakup_positions` stepped -1, -2, -3, so a tower on field 4 landed on 4, 3
+and 2. The rule is symmetric: the bottom group stays, the next takes the field
+immediately BEFORE, the next the field immediately AFTER. A tower on 4 occupies
+3, 4 and 5.
+
+`breakup_offsets` states that as `0, -1, +1, -2, +2, ...` — a rule rather than
+three literals, because a rule cannot be wrong about a case nobody tried. Six
+pawns is the most the game can stack, so a fourth group is unreachable today.
+
+Positions are still the board's own logical steps, so a doubled row is ONE
+position holding two fields and counts as a single step in either direction —
+which is what keeps Piotrek's 2a/2b choice meaningful. A group with nowhere to
+go (a tower on the first field, or at the far end) stays on the tower's field
+rather than reflecting to the other side, which would silently make the
+breakup asymmetric.
+
+### Two things found while fixing those
+* THE BOTTOM GROUP WAS BEING RE-PLACED ON `tiles[0]`, so a tower standing on 4b
+  shuffled across to 4a on its way to standing still. It now keeps the exact
+  tile it was already on.
+* THE 2a/2b QUESTION WAS ASKED ABOUT THE LAST GROUP. With the scatter centred,
+  the doubled row can be the field before the tower as easily as the one after,
+  and the group that does NOT move should never be asked about at all. The
+  choice now goes to the first MOVING group whose destination is doubled.
+
+### A harness trap, recorded because it cost real time
+`GameScreen.update` ticks the session from the REAL clock. A test that draws a
+frame and then calls `session.tick(now=200.0)` has already had `opened_at`
+stamped with a monotonic timestamp, so its made-up `now` is in the past and the
+deadline never passes. Two manual runs looked as though the breakup had stalled
+and one test failed only outside its own file. Both now read the deadline the
+session actually recorded and step past that. NOT A GAME BUG — but a shape to
+watch for in every future timing test.
+
+### Verified in the running game
+Real `GameScreen` + `LocalSession`, real layout rects, real clicks:
+
+1. Variant 2, ordinary failed check, tower on 4 → groups on 4, 3 and 5; board
+   and state agree; nothing on field 2.
+2. Variant 2 + Ice Block REFUSE (clicked through the confirmation) → use 1→0,
+   `eliminated_pawns` empty, breakup armed, tower scatters onto 4, 3, 5, no
+   ghosts.
+3. Variant 1 + Ice Block REFUSE → use spent, no breakup, all six pawns still on
+   field 4.
+4. Five-pawn tower (real HIDDEN status) → 2 / 2 / 1 with the lone pawn on the
+   field AFTER the tower, no ghosts.
+5. Doubled row → the panel offers 4a and 4b, clicking the second puts that
+   group on tile 7 (not the default), and the bottom group keeps tile 8.
+
+### Verification
+- **1788 pass, 0 fail.** Stage 40a ended at 1779.
+- 8 new tests; both fixes MUTATION-TESTED — reverting the centred scatter fails
+  9, reverting the refusal arming fails 2.
+- 6 stage-40 tests updated: five for the corrected geometry, one because
+  "a refused check breaks no tower" is now exactly backwards.
+- The stage-40 suite was run six times over to confirm the timing fix removed
+  the flake.
+
+### Limitations
+- A group with nowhere to go stays on the tower's field, so a tower on the
+  first field puts two groups on one square. Rare, and better than inventing a
+  field, but it is a silent collapse rather than an announced one.
+- If BOTH neighbours are doubled rows, only the first moving group gets the
+  choice; the other takes its first field. The existing choice mechanism holds
+  one question at a time and was deliberately not extended.
+
+## Stage 41 — Movement undo, Dług u Tomasza, and Liskowy Konkurs
+**Date:** 2026-08-13
+
+Three features around ONE idea: the window between a player finishing a turn
+and the next player playing a card. Undo lives in it and so does Liskowy
+Konkurs, so they are offered and withdrawn by the same fact rather than by two
+rules that could drift.
+
+### Undo: a photograph, not a rewind script
+`engine/undo.py`. A `TurnCheckpoint` is taken in `_play_card` AFTER the
+questions and the refusals and BEFORE anything moves — earlier would photograph
+a table that was never reached, later would photograph the change.
+
+IT DOES NOT DEEP-COPY THE STATE. `copy.deepcopy` works and takes 9ms, but the
+pieces it produces are new objects, and `board_renderer` caches the board while
+the interface holds cards; swapping them out leaves half the screen drawing a
+game nobody is playing. So the checkpoint stores POSITIONS AND MEMBERSHIP — by
+card uid and tile index — and puts the EXISTING objects back. Card identity
+survives a rewind, which is what keeps `find_discarded(uid) is card` meaningful.
+
+Restored: pawn positions, every tower's order, hands, both piles of every deck,
+ability charges, all statuses, the RNG state, and the plain turn values
+(`_SCALARS`, listed rather than discovered so a new field is a decision).
+
+### The card that came back, and the card that goes back
+The played card returns to the hand because the hand and the discard pile are
+both restored by membership. The card DRAWN at the end of the turn goes back to
+the top of the draw pile for the same reason — the pile's ORDER is restored, so
+the drawn card is wherever it was, which is on top.
+
+§6's harder requirement falls out of the same fact: because the order is exact,
+the corrective turn draws THAT SAME CARD again. It is not implemented as a rule
+anywhere, and that is precisely why it can be relied on.
+
+### The window
+`_open_turn_window` both takes the checkpoint and closes the previous player's,
+because the next card played is what ends the previous window. `can_undo` is
+the engine's answer; the button being hidden is a convenience, not the rule, so
+a stale or forged `UndoMove` is refused rather than obeyed.
+
+### Dług u Tomasza
+Adjacency is counted in board POSITIONS, not tiles, so a doubled row is one
+place: 3a and 3b are the same field for this rule and neither is a gap from 2
+or 4. That is what makes it read identically on single and double rows.
+
+If the pair is already too close the ability separates them AS IT LANDS: the
+pawn further ahead steps forward until a whole field is clear, the one behind
+does not move. The stacked case is not a second branch — a tower is two pawns
+on the same position, so it needs two fields, and the tower order breaks the
+tie so the pawn on top is the one that steps off.
+
+Enforcement is ONE question asked in ONE place: `_op_move_pawn`, which every
+movement in the game lands through, calls `effects.separation_blocks`. No card
+knows the ban exists, and a card written next year inherits it. The offending
+movement is CANCELLED rather than trimmed — shortening it would invent a
+distance the card never had — and other pawns' movements are untouched.
+
+Manual dragging cancels it, alongside the freeze and the Radar link, through
+the same `_thaw_dragged`: all three are promises about where pawns stand, and
+hand-placing one is exactly what makes such a promise unkeepable.
+
+### Liskowy Konkurs — TWO different things
+Conflating them is the mistake the brief warns about, so the effect branches on
+one question: does he hold the turn right now?
+
+* BEFORE his move — an extra CARD dealt immediately and an extra PLAY owed.
+  `_after_play` spends the owed play INSTEAD of ending the turn, and does not
+  refill (the extra card was already dealt; refilling would hand out a third).
+* AFTER a move — the turn comes back whole. The card stays played, stays
+  discarded, and the card drawn at the end of that turn stays in his hand.
+  Nothing is rewound: this is not undo and must not behave like it.
+
+Taking the extra turn CLOSES the undo window, which is §22's choice made
+concrete — he picks one or the other, never both.
+
+### Changed
+- `engine/undo.py` — new.
+- `engine/game_state.py` — `turn_window`, `extra_plays`, `_open_turn_window`,
+  `_close_turn_window`, `can_undo`, `_undo_move`, `extra_play_pending`,
+  `_grant_extra_play`, `_op_grant_extra_play`, `_op_grant_extra_turn`,
+  `_adjacency_ban`; the ban enforced in `_op_move_pawn`; `_after_play` spends
+  an owed play; `_thaw_dragged` also drops the ban.
+- `engine/effects.py` — `forbidden_pairs`, `separation_ok`,
+  `separation_blocks`, `_closer_pair_order`; `_forbid_adjacency` and
+  `_grant_extra_turn` rewritten; `GrantExtraPlay`/`GrantExtraTurn`.
+- `engine/commands.py`, `engine/events.py` — `UndoMove`; `MoveUndone`,
+  `ExtraPlayUsed`, `ExtraTurnGranted`.
+
+### Verification
+- **1824 pass, 0 fail.** Stage 40b ended at 1788.
+- 36 new tests in `tests/test_stage41_undo.py`, and the three core mechanisms
+  were MUTATION-TESTED: making undo forget the deck fails 3, leaving the window
+  open for ever fails 2, and dropping the adjacency check fails 1.
+- Everything was also driven by hand against a real game before the tests were
+  written: undo restoring positions/hand/discard/top-of-deck and refusing a
+  second time or a foreign seat; the corrective turn drawing the same card; the
+  same-field, stacked and adjacent corrections; a card fizzling against the ban
+  while an unrelated pawn still moved; the drag cancelling it; and both halves
+  of Liskowy Konkurs including the closed window.
+- 4 existing tests updated: three Atencjusz tests (the ability no longer grants
+  an `EXTRA_TURN` status) and one UI test that asserted that status.
+
+### Limitations
+- NO INTERFACE. The undo button and a Liskowy Konkurs prompt are not drawn;
+  `can_undo` and `extra_play_pending` are the state a panel would read, and the
+  commands exist and are authoritative, but nothing is on screen yet.
+- `StatusKind.EXTRA_TURN` is now unused — Liskowy Konkurs does its work
+  directly rather than leaving a status for the turn loop to notice. Left in
+  place rather than removed, in case another ability wants it.
+- A checkpoint is taken for every played card, including Chest and Mod cards
+  that do not end a turn. Undoing one of those is possible and rewinds
+  correctly, but "the window closes when the next player plays" is a looser
+  promise there than for a movement card.
+- The ban cancels a whole movement operation when it would breach the gap. A
+  card that moves several pawns in one operation therefore loses all of them,
+  not just the offender.
+
+## Stage 41a — The undo button, and the bug it exposed
+**Date:** 2026-08-13
+
+Stage 41 shipped the engine with no interface. This is the interface, and
+building it found a real defect in the rule it was drawing.
+
+### THE BUG: the offer belongs to the window, not to the view
+`can_undo` was first written as `state.can_undo(self.view_seat)`. That reads
+correctly and is wrong: `view_seat` FOLLOWS THE ACTIVE PLAYER, so on a hot-seat
+table it moves to the next player the instant a card is played — which is the
+exact moment the previous player earns the undo. The button vanished precisely
+when it should have appeared, and every engine-level test passed throughout,
+because none of them had a view.
+
+`undo_seat` now asks the WINDOW who owns it and `may_control` whether this
+machine may act for that seat — the same question the rest of the screen asks,
+so the two cannot drift. Mutation-tested: putting `view_seat` back fails two
+tests.
+
+### The button
+`Layout.undo_button_rect` puts it under the turn bar rather than in the right
+column: it is about the turn that just happened, not about the card panel, and
+it appears and vanishes, so a place of its own keeps it from shoving a
+permanent control around every time a card is played. Drawn ONLY while the
+offer stands, so its absence is the rule rather than a greyed-out hint.
+
+Liskowy Konkurs needed no new control at all: the existing ability button
+already submits `UseAbility` for the seat this client is showing, and the
+engine decides which of the ability's two halves applies. The window it uses is
+the same one the button reads.
+
+### Three traps this cost, all recorded because they will recur
+* A CARD LANDING ON A WIDENED ROW ASKS WHICH HALF. An unanswered question
+  resolves nothing and opens no window, so a test that plays a card and walks
+  on measures the wrong thing. `_play_card_fully` answers whatever is asked.
+* A CARD AIMED AT A PAWN STILL IN THE CAMP REFUSES, and a refused card opens no
+  window either. The helper places everybody first.
+* `_hot_seat` ALREADY EXISTED in `test_ui.py` with a different signature. The
+  new helper shadowed it and broke six unrelated tests — which is how it was
+  caught. Renamed to `_allow_every_seat`.
+
+### Changed
+- `ui/layout.py` — `undo_button_rect`.
+- `ui/game_screen.py` — `undo_seat`, `can_undo`, `_undo_click`,
+  `_draw_undo_button`, and the click routing.
+
+### Verification
+- **1829 pass, 0 fail.** Stage 41 ended at 1824.
+- 5 new tests in `tests/test_ui.py`: the button appearing for the player who
+  just moved and NOT for the view; the window MOVING to the next player rather
+  than closing, so each earns their own undo while the first player's becomes
+  unreachable; clicking it rewinding the card, the pawn and the turn; the rect
+  not overlapping the end-turn button; and the ability button taking the extra
+  turn from inside the window on somebody else's turn.
+
+### Limitations
+- The undo button says nothing about WHAT it would undo. The checkpoint knows
+  the card, so a caption naming it is a small change if the table wants one.
+- There is no separate prompt for Liskowy Konkurs — it shares the ability
+  button, so a player has to know the window exists. A hint in the status bar
+  when the window opens would be the natural next step.
+- Still no human has played this. Everything here is the real screen, real
+  layout rects and real clicks under a dummy video driver.
+
+## Stage 41b — Undo redraws the board, and the button moves onto it
+**Date:** 2026-08-13
+
+### THE BUG, AND WHY IT IS THE THIRD TIME
+`board_view.visual` is the board's own copy of where each pawn is DRAWN, and
+until now only the movement reactions ever wrote it. Undo emits `MoveUndone`,
+walks nobody, and nothing was listening — so the engine restored the pawn and
+the screen went on drawing it where the card had put it.
+
+This is the same shape as stage 38a (restack) and stage 40a (tower breakup).
+Three times is a pattern, so the fix this time is GENERAL rather than another
+subscriber that settles one event's pawns:
+
+`BoardView.resync()` rebuilds every drawn position from the engine and throws
+away the animation state that could contradict it — the in-flight walks, the
+tweens, a drag, the route preview, an expanded tile. It SNAPS rather than
+glides, because a rewind is not a journey anybody made and animating pawns
+backwards would invent a movement the game does not contain.
+
+`_on_move_undone` simply calls it. Deliberately not "move the pawn back": a
+checkpoint may have restored several pawns, a tower's order, or nothing
+visible, and the view cannot know which — asking the engine for every position
+is the only answer that is right for every undoable action rather than for the
+one that happened to be tested.
+
+Everything else on screen is derived per frame — towers, the x2 badges, the
+highlights, the counters, the hand, the last-played card — so what is CACHED is
+exactly what is reset, and nothing else needed touching.
+
+### An in-flight walk had to be cancelled too
+Clicking undo mid-animation is exactly what a real player does. A surviving
+walk keeps writing its old destination into `visual` AFTER the resync has
+corrected it — the same bug arriving a frame later. `Animator.clear()` and
+`walks.clear()` are part of the resync for that reason, and the regression test
+clicks while the pawn is provably still walking.
+
+### The button moved onto the board
+`undo_button_rect` is now anchored to `board_viewport` — the same rect the
+board is drawn into — at a scaled inset from its top-left. It therefore keeps
+the same RELATIVE place at every resolution rather than a fixed pixel offset:
+measured at 1280×760, 1600×900, 1920×1080 and 2560×1440 it sits at 0.9–1.2% of
+the board's width from the left and 2.1–2.5% from the top.
+
+It covers no field. Checked against the real tile geometry at three window
+sizes × three board lengths (18, 24 and 40 cells): the track is laid out from
+the viewport's centre outwards, so the top-left corner is empty in every case,
+including START.
+
+It does not follow the camera, so panning or zooming slides the road under a
+control that stays where the player left it — which is what an overlay should
+do.
+
+### AND IT HAD TO MOVE IN THE EVENT CHAIN TOO
+Putting the button over the map broke it silently: `board_view.handle_event`
+claims any click offered to it as a map drag, so the button drew correctly and
+did nothing. It now sits with the card-library and end-turn buttons in the
+group checked BEFORE the board, guarded by `can_undo` so it does not swallow
+drags over an empty corner when no offer stands. The manual scenarios caught
+this; the first run showed "card back=False" on every undo.
+
+### Changed
+- `ui/board_view.py` — `resync`, `_on_move_undone`, subscribed to `MoveUndone`.
+- `ui/layout.py` — `undo_button_rect` anchored to the board viewport.
+- `ui/game_screen.py` — the button drawn immediately after the board, and
+  handled before it.
+
+### Verified in the running game
+Real screen, real layout rects, real clicks: two undoable moves in a row, each
+rewound with the pawn drawn where the engine says (0 ghosts); a move that
+carried a six-pawn TOWER, rewound with the tower's order intact and no ghosts;
+and the Ice Block + variant 2 breakup path re-run end to end — window opens,
+refusal accepted, breakup still armed, groups land on 3/4/5, no ghosts.
+
+### Verification
+- **1841 pass, 0 fail.** Stage 41a ended at 1829.
+- 12 new tests in `tests/test_ui.py`, and all three fixes MUTATION-TESTED:
+  removing the `MoveUndone` subscription fails 3, removing the animation cancel
+  fails 1, and putting the button back on the turn bar fails 4.
+- The in-flight test was strengthened after the first mutation run passed it —
+  it had asserted "a walk OR a tween exists", which was true of an unrelated
+  tween. It now names the pawn's own walk.
+
+### Limitations
+- `resync` is a blunt instrument by design: it discards an expanded tile and a
+  route preview along with everything else, so an undo clicked mid-inspection
+  closes the fan. Correct, but abrupt.
+- The button still does not name the card it would undo.
+- Still no human has played this. "Running game" means the real screen and real
+  clicks under a dummy video driver.
+
+## Stage 42 — Herold: the character, the Mod, and one copy mechanism
+**Date:** 2026-08-13
+
+Two entities that do the same thing, sharing all of it: a new CHARACTER whose
+ability is Messenger, and a new MODY PATUSA card called Herold.
+
+### One effect, two doors
+`copy_ability` is the whole mechanism, and neither Herold has any code of its
+own. The character resolves that spec through the ordinary `UseAbility` path;
+the mod resolves the SAME spec through a new `CopyAbility` command. That is
+what makes "shared" a fact rather than an intention — and the tests compare the
+two by running the same copy through both doors and diffing the resulting
+board, because "shared" is a claim about BEHAVIOUR, not about which file the
+code sits in.
+
+### How the copy works
+The chosen character's ability spec is handed to its own handler with HEROLD'S
+context — his seat, his choices. Everything else follows from not touching the
+spec:
+
+* the ability acts for Herold ("copy the effect, not the ownership");
+* its target rules are untouched — Jazdy still names Piotrek, because that is
+  written in the spec and not inferred from who was holding the card;
+* its own questions reach Herold, because the inner handler asks `ctx.choice`
+  for its own keys and the pipeline carries the answers back. Granny Costume
+  still asks which pawn; Radar still asks for an ordered pair. NOTHING is
+  flattened into a single click;
+* the VARIANT in play is the table's, because the card object is read live and
+  `with_variant` has already been applied to it. There is no Herold-specific
+  variant and no code that could produce one;
+* all of the borrowed ability's validation runs, because it is the same handler
+  doing the same refusing.
+
+`COPY_CHOICE_KEY` is `"ability"`, deliberately unlike every key a borrowed
+ability uses, so the outer and inner questions can never collide.
+
+### Eligibility is asked of the table
+Any character a player actually HOLDS, with an activated ability, not the
+borrower's own seat, and not already spent. A character nobody drew is not in
+the game and is not offered. Messenger is excluded by ability TYPE rather than
+by title, so the recursion is unreachable even with two Herolds at the table.
+
+### Uses
+Herold's one Messenger use is spent only by a SUCCESSFUL copy: opening the
+picker costs nothing, an inner Choice costs nothing, and an inner refusal costs
+nothing. Whether the ORIGINAL owner also pays is a lobby setting —
+`copy_consumes_use`, defaulting to Glockboy's "Where are you Marcus?" — matched
+on the skill name and applied by a `SpendAbilityUse` operation against the card
+that player is holding. The printed definition is never touched; it is a
+per-match rule and nothing assumes Glockboy is the only entry.
+
+### The mod
+A mod is "played" by reaching the rack, so `_arm_mod` is the hook — the same
+one Paczka and Obóz Harcerski use. It cannot ask its question there (arming
+happens deep inside resolving a selection, with no way to carry an answer
+back), so it RAISES the question and waits: `pending_ability_copy`, exactly the
+shape the Ice Block window and the movement decision already use. The card then
+stays racked, which is the ordinary mod lifecycle.
+
+The chooser is the seat that owns the slot the card landed in.
+
+### Changed
+- `data/characters.json` — Herold / Messenger, one use.
+- `data/cards.json` — the Herold mod, count 1.
+- `config/settings.py` — `copy_consumes_use`.
+- `engine/effects.py` — `COPY_ABILITY`, `COPY_CHOICE_KEY`,
+  `copyable_abilities`, `consumes_original_use`, `_copy_ability`,
+  `SpendAbilityUse`.
+- `engine/game_state.py` — `PendingAbilityCopy`, `_open_ability_copy`,
+  `_mod_owner_seat`, `_copy_ability`, `_op_spend_ability_use`, the arm hook and
+  the snapshot field.
+- `engine/commands.py`, `engine/events.py` — `CopyAbility`;
+  `AbilityCopyOpened`, `AbilityCopied`.
+
+### Verification
+- **1873 pass, 0 fail.** Stage 41b ended at 1841.
+- 33 new tests in `tests/test_stage42_herold.py`, and the four core rules were
+  MUTATION-TESTED: ignoring the exception list fails 3, letting Messenger offer
+  itself fails 1, spending Messenger on a refused copy fails 2, and never
+  raising the mod's question fails 9.
+- Two of the new tests were strengthened after writing: one had no control (it
+  now proves the refusal was the START rule by making the same copy succeed
+  afterwards), and one could silently skip half of itself.
+- 8 existing tests updated: the printed mods deck is 14 cards over 9 titles,
+  the character deck 11, and "every mod declares a rule" now accepts an ABILITY
+  as a rule — Herold is the first mod whose rule is not a passive.
+
+### Limitations
+- NO INTERFACE. The picker is a `ChoiceRequired` of kind ``ability`` carrying
+  the character name, skill, text and an art key in ``data`` — everything an
+  Ability Library card needs — but nothing draws it yet, so today it renders
+  through the generic option list. The mod's `pending_ability_copy` has no
+  panel either.
+- No art files were added. `Messenger` and `Herold` are independent lookup
+  names in different decks, so neither can pick up the other's image, but both
+  currently resolve to nothing.
+- Copying Liskowy Konkurs gives HEROLD the extra turn, and copying Przerwanie
+  Systemowe gives Herold the veto. That follows from "the copier is the actor"
+  and is almost certainly right, but it is the class of ability where the brief
+  warns about identity-dependent semantics and is worth a ruling.
+- The mod's chooser is the slot's faction, defaulting to the first hunter when
+  no hunter holds the turn. A table that wants a specific hunter to decide has
+  no way to say so.
+
+## Stage 42a — The Herold lobby tab
+**Date:** 2026-08-13
+
+Stage 42 shipped `copy_consumes_use` as a `SessionConfig` field with no way to
+set it. The brief's §4 is mandatory language — "the lobby MUST contain a
+configuration determining which character abilities consume the original
+character's use" — so a field only a test could reach did not meet it.
+
+### The tab
+A new `copy` tab labelled "Herold": one row per borrowable ability, each a
+two-answer choice (Zachowuje / Traci). THE SAME named-option machinery the
+variants and rules tabs use, so bump, clamp, reset and merge all keep working
+on an int and this is not a third kind of row. It also inherits stage 40a's
+per-row bounds, so the rows walk both ways and stop at both ends.
+
+THE ROWS ARE BUILT FROM THE CARDS, never typed out: every character and skill
+that has an activated ability, minus Messenger itself, which is not borrowable
+and so has nothing to decide about. A tenth character appears here the day it
+is added.
+
+The default marks Glockboy and is asserted to equal `SessionConfig()`'s, so the
+lobby and the config cannot disagree about what a table that never opens the
+tab is playing.
+
+### Wired the whole way
+`GameSettingsPanel.copy_consumes_use` translates indices to skill NAMES at the
+boundary — the same translation every other choice row does, for the same
+reason: a number would break the moment somebody reordered the tab. From there
+into `SessionConfig` (hot seat), into `LobbyState` and back out of it (online).
+An unknown name from another build matches nothing rather than raising.
+
+### What was already covered
+§18's other two items needed no work, which is what "integrate it into the
+current lobby configuration system" should look like: Herold's PRESENCE is the
+Umiejętności tab (uses 0 leaves him out) and the CARD QUANTITY is the Mody
+Patusa tab. Both listed him the moment he was added to the data.
+
+### Verification
+- **1883 pass, 0 fail.** Stage 42 ended at 1873.
+- 10 new tests, and both halves of the plumbing MUTATION-TESTED: cutting the
+  panel out of the menu's config fails 1, and hard-coding the tab's answer
+  fails 2. The end-to-end test drives the real MenuScreen, clicks the rows and
+  captures the `SessionConfig` the Start button builds.
+- 2 existing tab inventories updated.
+
+### Still not done
+- THE ABILITY PICKER STILL HAS NO UI. §2 and §9 ask for the Ability Library's
+  card-art language; the choice carries the character name, skill, text and an
+  art key, but nothing draws them, so it renders as the generic option list.
+  That is the one remaining gap in this feature.
+
+## Stage 43 — Herold is a Chest card, and only a Chest card
+**Date:** 2026-08-13
+
+A design decision reversed after play-testing. Stage 42 built Herold as a
+CHARACTER with a Messenger ability, plus a Mody Patusa card carrying the same
+effect. Both are gone. Herold is now one thing:
+
+    Herold → Chest card → the existing card-play pipeline → the same effect
+
+**THIS SUPERSEDES STAGE 42 AND 42a WHEREVER THEY DESCRIBE HEROLD AS A
+CHARACTER OR A MOD.** Those entries are kept as history, not as description.
+
+### Removed as a character
+Out of `characters.json` entirely — no card, no `Messenger` skill, no ability
+definition. Nothing in character selection, the lobby's Umiejętności tab, turn
+order or the character panel had a Herold-specific branch to remove, because
+Herold was only ever a row in that file; deleting the row removed him from all
+of them at once. The Herold lobby tab's own row list is built from the cards,
+so Messenger disappeared from it without being named anywhere.
+
+### Removed as a Patus Mod
+Out of the mods deck in `cards.json`, and with it the entire mod-arrival
+machinery that existed only for it: `PendingAbilityCopy`, `_open_ability_copy`,
+`_mod_owner_seat`, the `CopyAbility` command, the `AbilityCopyOpened` and
+`AbilityCopied` events, the snapshot field and the `_arm_mod` hook. A mod is
+played by reaching the rack and cannot ask a question there, which is why all
+of that existed; a Chest card is played from a hand and asks questions the
+ordinary way, so none of it is needed. Deleted rather than left dead.
+
+### THE EFFECT WAS NOT REWRITTEN
+`copy_ability`, `copyable_abilities`, `consumes_original_use` and
+`SpendAbilityUse` are the stage 42 code, unchanged in behaviour. What changed
+is how it is REACHED: an `effect` on a Chest card, resolved by `_play_card`
+through the same pipeline as Dzieckorolka or Gejtos. Its questions travel the
+ordinary ``choices`` road, so the borrowed ability's own multi-step selection
+works with no code at all — Radar still asks for its ordered pair.
+
+### One thing DID have to be adapted
+The global "no abilities while a pawn is on START" rule used to arrive free:
+Herold was a character, so `_use_ability` asked `ability_refusal` before the
+handler ran. `_play_card` asks no such thing and should not, because most cards
+are not abilities. So the gate moved INTO `_copy_ability`, which is the only
+place that knows an ability is being borrowed.
+
+FOUND BY TESTING THE REAL FLOW, not by reading the code: the first end-to-end
+run played Herold with a pawn still in the camp and the copy went through.
+
+### One behaviour deliberately preserved rather than reasoned afresh
+The player's OWN character is still excluded from the list. That rule existed
+because Herold was a character and must not copy himself; as a card it means
+you cannot double your own ability. Arguably it should now change — but that
+would be a gameplay change, not a refactor, so it stays as it behaved and is
+flagged here for a ruling.
+
+### Kept, because it is not character-specific
+`copy_consumes_use` and its Herold lobby tab: which abilities cost their OWNER
+a use when copied. That is a property of the EFFECT, not of what carries it.
+
+### The guard that looks dead but is not
+`copyable_abilities` still skips a character whose ability is `copy_ability`.
+Nothing carries that as an ability any more, so it never fires — it is kept as
+the one line between a future second copier and infinite recursion, and a test
+asserts no card anywhere carries it, which is what makes the guard's silence
+meaningful rather than accidental.
+
+### Changed
+- `data/characters.json` — Herold removed.
+- `data/cards.json` — removed from `mods`, added to `chest` (count 1).
+- `engine/game_state.py` — the mod-arrival machinery deleted.
+- `engine/commands.py`, `engine/events.py` — `CopyAbility`,
+  `AbilityCopyOpened`, `AbilityCopied` deleted.
+- `engine/effects.py` — the START gate added; comments re-framed.
+- `ui/settings_panel.py` — one comment re-framed.
+
+### Verification
+- **1877 pass, 0 fail.** Stage 42a ended at 1883; the drop is the 42-era tests
+  that described a character and a mod, replaced by 36 in
+  `tests/test_stage43_herold_card.py`.
+- Driven through the REAL UI: the lobby lists Herold under Karty Skrzyni and
+  not under Mody Patusa, its count steps up and clamps at 0 like any other
+  Chest card; in game it is dealt into a hand, appears in that seat's chest
+  cards, is played, asks which ability to copy, runs it (Piotrek skipped by a
+  borrowed Jazdy), leaves the hand and reaches the discard pile.
+- 11 existing deck-inventory tests updated in BOTH directions: the mods deck
+  went back to 13 cards over 8 titles and the characters deck to 10, while the
+  chest deck went to 18.
+- New tests assert the ABSENCE of the old design directly: not a character, not
+  a mod, exactly one definition, no card carrying `copy_ability` as an ability,
+  and no `CopyAbility` command or `pending_ability_copy` on the state.
+
+### Limitations
+- Still no bespoke picker UI. The choice carries the character name, skill,
+  text and an art key, and now renders through the ordinary Chest card choice
+  prompt — which is at least the same prompt every other Chest card uses.
+- The card art key is `Herold` in the chest deck. No art file was added.

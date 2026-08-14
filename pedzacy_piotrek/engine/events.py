@@ -516,6 +516,74 @@ class AbilityUsesChanged(GameEvent):
     restored: bool = False
 
 
+@dataclass
+class CardVariantChanged(GameEvent):
+    """A card is now being played under a different one of its variants.
+
+    Carries the new text as well as the id so a listener can say what changed
+    without going back to the definitions — and because that sentence IS the
+    change as far as anyone reading the status bar is concerned.
+
+    ``cancelled`` is how many already-running ability effects the switch ended,
+    which is the one consequence of a variant change that is not visible on the
+    card itself.
+    """
+
+    deck_id: str
+    title: str
+    variant: str
+    label: str = ""
+    text: str = ""
+    cancelled: int = 0
+
+
+# ── Nie masz Rosji (stage 36) ────────────────────────────────────────────────
+@dataclass
+class MovementDecisionOpened(GameEvent):
+    """A movement is waiting: these seats may stop it, for this long.
+
+    ``seconds`` travels so a client can draw a countdown without asking; the
+    countdown is a picture, and the deadline that matters is the authority's.
+    """
+
+    player_index: int
+    card_uid: int
+    title: str
+    deck_id: str
+    blockers: List[int] = field(default_factory=list)
+    seconds: float = 7.0
+
+
+@dataclass
+class MovementAccepted(GameEvent):
+    """The paused movement was let through.
+
+    ``blocker_index`` is -1 when nobody answered and the window simply ran out.
+    Nobody's veto is spent either way.
+    """
+
+    blocker_index: int
+    player_index: int
+    card_uid: int
+    timeout: bool = False
+
+
+@dataclass
+class MovementBlocked(GameEvent):
+    """A movement was stopped before it happened, and a veto was spent.
+
+    ``automatic`` marks the final-chance block, which fires without a window
+    because there would be no later movement for the veto to be saved for.
+    """
+
+    blocker_index: int
+    player_index: int
+    card_uid: int
+    title: str
+    deck_id: str
+    automatic: bool = False
+
+
 # ── the match itself ─────────────────────────────────────────────────────────
 @dataclass
 class MatchBegan(GameEvent):
@@ -531,6 +599,124 @@ class PawnEliminated(GameEvent):
     """
 
     pawn_id: str
+
+
+@dataclass
+class TileRestacked(GameEvent):
+    """One field's tower is standing in a new order; nobody changed field.
+
+    Radar's same-field link.  Separate from TokenWalked because nothing walked
+    — the view redraws the tower rather than animating a journey.
+    """
+
+    tile_index: int = -1
+    order: List[str] = field(default_factory=list)
+
+
+@dataclass
+class MoveUndone(GameEvent):
+    """A turn was rewound; the table is as it was before that card."""
+
+    player_index: int = -1
+    card_uid: int = -1
+
+
+@dataclass
+class ExtraPlayUsed(GameEvent):
+    """A card was played that did NOT end the turn (Liskowy Konkurs)."""
+
+    player_index: int = -1
+    plays_left: int = 0
+
+
+@dataclass
+class ExtraTurnGranted(GameEvent):
+    """The turn has been handed back to a player who had already finished."""
+
+    player_index: int = -1
+    before_move: bool = False
+
+
+@dataclass
+class TowerGroupPlaced(GameEvent):
+    """One group of a broken tower has landed, bottom pawn first."""
+
+    tile_index: int = -1
+    position: int = -1
+    pawns: List[str] = field(default_factory=list)
+
+
+@dataclass
+class TowerBrokeUp(GameEvent):
+    """The tower is gone; every group has been placed."""
+
+    tile_index: int = -1
+
+
+@dataclass
+class BreakupTileChosen(GameEvent):
+    """Piotrek picked 2a or 2b for the group that falls furthest back."""
+
+    tile_index: int = -1
+    seat: int = -1
+
+
+@dataclass
+class CheckDecisionOpened(GameEvent):
+    """Piotrek has been asked whether to allow a check.
+
+    Carries the colour, which is public, and the length of the window, which is
+    configuration.  Never the answer.
+    """
+
+    pawn_id: str = ""
+    seat: int = -1
+    source: str = "tower"
+    seconds: float = 10.0
+
+
+@dataclass
+class CheckRefused(GameEvent):
+    """Ice Block cancelled a check.  Nothing about the pawn is revealed."""
+
+    pawn_id: str = ""
+    seat: int = -1
+    uses_left: int = 0
+
+
+@dataclass
+class CheckAllowed(GameEvent):
+    """The check goes ahead — Piotrek said yes, or the clock ran out."""
+
+    pawn_id: str = ""
+    seat: int = -1
+    timed_out: bool = False
+
+
+@dataclass
+class PawnCheckRequested(GameEvent):
+    """Somebody has named a colour to be checked, and staked their game on it.
+
+    Carries no verdict, for the same reason :class:`LeadCheckAnnounced` does
+    not: the question is public, the answer is the authority's, and it comes
+    back as :class:`PawnEliminated` plus :class:`PlayerEliminated`, or as
+    :class:`MatchEnded`.
+    """
+
+    pawn_id: str = ""
+    staked_seat: int = -1
+
+
+@dataclass
+class PlayerEliminated(GameEvent):
+    """A seat is out of the game and is now an observer.
+
+    They keep their connection, their seat number and their cards; they lose
+    their turns and their abilities.  Nobody is disconnected by this.
+    """
+
+    player_index: int = -1
+    reason: str = ""
 
 
 @dataclass

@@ -535,6 +535,16 @@ class HostSetupScreen(_FormScreen):
                              movement_counts=self.settings_panel.movement_counts,
                              chest_counts=self.settings_panel.chest_counts,
                              ability_uses=self.settings_panel.ability_uses,
+                             card_variants=self.settings_panel.card_variants,
+                             block_decision_seconds=(
+                                 self.settings_panel.block_decision_seconds),
+                             check_decision_seconds=(
+                                 self.settings_panel.check_decision_seconds),
+                             check_variant=self.settings_panel.check_variant,
+                             victory_variant=(
+                                 self.settings_panel.victory_variant),
+                             copy_consumes_use=(
+                                 self.settings_panel.copy_consumes_use),
                              double_percent=self.double_percent,
                              debug_version=self.debug_version)
         self._enter_lobby(service, embedded=embedded)

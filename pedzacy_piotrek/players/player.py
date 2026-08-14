@@ -38,6 +38,13 @@ class Player:
     secret_pawn: Optional[str] = None
     #: Set once a network client claims this seat.
     owner_id: Optional[str] = None
+    #: Out of the game, still at the table.  Glockboy's wrong guess is the only
+    #: thing that sets it today.  An eliminated seat keeps its cards, its
+    #: character and its connection and loses only the right to act: its turns
+    #: are skipped, its abilities refuse, and the interface crosses it out.
+    #: NOT a removal from the player list — the turn order, the seat map and
+    #: every index in the command log all assume the seats never move.
+    eliminated: bool = False
 
     # ── derived ──────────────────────────────────────────────────────────────
     @property
@@ -109,6 +116,9 @@ class Player:
             "hand_size": len(self.hand),
             "has_character": self.character is not None,
             "owner_id": self.owner_id,
+            # PUBLIC.  Everybody has to know whose turns are being skipped, and
+            # being out of the game reveals nothing about who Piotrek is.
+            "eliminated": self.eliminated,
         }
 
     def to_private_dict(self) -> Dict[str, object]:

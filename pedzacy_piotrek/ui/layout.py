@@ -471,6 +471,106 @@ class Layout:
         board = self.board_viewport
         return (board.right - 14, board.top + 10)
 
+    # ── Nie masz Rosji: answering a paused movement (stage 36) ───────────────
+    def movement_decision_panel(self) -> pygame.Rect:
+        """The blocker's two buttons, UNDER the recently-played strip.
+
+        Where the brief asks for them: beside the card history, because the
+        card being answered is the one sitting at the top of that strip and the
+        decision is about it.  Sized from the strip so the two stay together at
+        every window size.
+        """
+        strip = self.recent_slot_rect(0)
+        width = strip.width + int(30 * self.ui_scale)
+        height = int(96 * self.ui_scale)
+        left = strip.right - width
+        return pygame.Rect(left, strip.bottom + int(10 * self.ui_scale),
+                           width, height)
+
+    def movement_decision_buttons(self) -> Tuple[pygame.Rect, pygame.Rect]:
+        """``(block, accept)``, stacked inside the panel under the countdown."""
+        panel = self.movement_decision_panel()
+        pad = int(6 * self.ui_scale)
+        top = panel.top + int(28 * self.ui_scale)
+        height = (panel.bottom - pad - top - pad) // 2
+        block = pygame.Rect(panel.left + pad, top,
+                            panel.width - 2 * pad, height)
+        accept = pygame.Rect(block.left, block.bottom + pad,
+                             block.width, height)
+        return block, accept
+
+    # ── Ice Block: answering a paused CHECK (stage 40) ───────────────────────
+    def check_decision_panel(self) -> pygame.Rect:
+        """Piotrek's two buttons while a check waits on him.
+
+        The same place and the same size as the movement window's, because it
+        is the same kind of thing — a paused action waiting on one seat — and
+        the two can never be open at once: ``review`` decides nothing while a
+        check is pending, and a movement window blocks the command that would
+        have opened a check.
+        """
+        return self.movement_decision_panel()
+
+    def check_decision_buttons(self) -> Tuple[pygame.Rect, pygame.Rect]:
+        """``(refuse, allow)``, laid out exactly as block/accept are."""
+        return self.movement_decision_buttons()
+
+    def breakup_choice_panel(self) -> pygame.Rect:
+        """Piotrek picking 2a or 2b, centred over the board.
+
+        Over the BOARD rather than beside the card strip: the choice is about
+        two fields, and the panel names them, so it belongs where the player is
+        already looking.
+        """
+        board = self.board_viewport
+        width = int(300 * self.ui_scale)
+        height = int(104 * self.ui_scale)
+        return pygame.Rect(board.centerx - width // 2,
+                           board.centery - height // 2, width, height)
+
+    def breakup_choice_buttons(self) -> Tuple[pygame.Rect, pygame.Rect]:
+        """``(first, second)`` — the two fields of the doubled row."""
+        panel = self.breakup_choice_panel()
+        pad = int(10 * self.ui_scale)
+        top = panel.top + int(38 * self.ui_scale)
+        height = panel.bottom - pad - top
+        width = (panel.width - 3 * pad) // 2
+        first = pygame.Rect(panel.left + pad, top, width, height)
+        second = pygame.Rect(first.right + pad, top, width, height)
+        return first, second
+
+    def movement_confirm_panel(self) -> pygame.Rect:
+        """The confirmation dialog: one card, a warning and two buttons."""
+        card_w, card_h = self.movement_confirm_card_rect().size
+        width = card_w + int(120 * self.ui_scale)
+        height = card_h + int(180 * self.ui_scale)
+        return pygame.Rect(self.win_w // 2 - width // 2,
+                           self.win_h // 2 - height // 2, width, height)
+
+    def movement_confirm_card_rect(self) -> pygame.Rect:
+        """The card whose movement is being considered, drawn full size.
+
+        Its OWN size, not a thumbnail: the dialog exists so the player can read
+        what they are about to stop, and it goes through the ordinary card
+        renderer like every other card in the game.
+        """
+        height = int(_clamp(self.win_h * 0.30, 190, 380))
+        width = int(height / CARD_ASPECT)
+        centre_y = self.win_h // 2 - int(20 * self.ui_scale)
+        return pygame.Rect(self.win_w // 2 - width // 2,
+                           centre_y - height // 2, width, height)
+
+    def movement_confirm_buttons(self) -> Tuple[pygame.Rect, pygame.Rect]:
+        """``(confirm, cancel)`` — Akceptuj and Anuluj."""
+        panel = self.movement_confirm_panel()
+        width = int(_clamp(panel.width * 0.42, 120, 230))
+        height = int(_clamp(42 * self.ui_scale, 34, 60))
+        y = panel.bottom - height - int(18 * self.ui_scale)
+        gap = int(10 * self.ui_scale)
+        confirm = pygame.Rect(panel.centerx - width - gap // 2, y, width, height)
+        cancel = pygame.Rect(panel.centerx + gap // 2, y, width, height)
+        return confirm, cancel
+
     # ── board controls ───────────────────────────────────────────────────────
     @property
     def zoom_slider(self) -> pygame.Rect:
@@ -645,6 +745,31 @@ class Layout:
             pair_x + card_w + self.left_card_gap, row_y, card_w, card_h
         )
         return rects
+
+    def undo_button_rect(self) -> pygame.Rect:
+        """The 'Cofnij ruch' button, INSIDE the board's upper-left corner.
+
+        Anchored to ``board_viewport`` and not to the window, so it keeps the
+        same relative place at every resolution and through every resize; the
+        viewport is the same rect the board itself is drawn into, which is what
+        makes "upper-left of the board" mean the same thing to both.
+
+        It sits OVER the board rather than on the turn bar because it is about
+        the board's contents — and because the turn bar is a permanent strip
+        that should not reflow every time a card is played.
+
+        The inset keeps it clear of the road: the track is laid out from the
+        viewport's centre outwards and the first field sits well inside, so the
+        top-left corner is empty at every board size the game builds.  It does
+        not follow the CAMERA, so panning or zooming the board slides the road
+        under a button that stays where the player left it — which is what an
+        overlay control should do.
+        """
+        board = self.board_viewport
+        inset = int(12 * self.ui_scale)
+        width = int(150 * self.ui_scale)
+        height = int(32 * self.ui_scale)
+        return pygame.Rect(board.left + inset, board.top + inset, width, height)
 
     def ability_button_rect(self, show_skill: bool) -> pygame.Rect:
         """The 'use ability' button, tucked under the ability card.
@@ -1038,13 +1163,22 @@ class Layout:
         """
         return int(_clamp(34 * self.ui_scale, 30, 54))
 
-    def card_library_cell_size(self, abilities: bool) -> Tuple[int, int]:
+    def card_library_cell_size(self, abilities: bool,
+                               variants: bool = False) -> Tuple[int, int]:
         """One grid cell: the card plus whatever the tab puts under it.
 
         The two tabs stack different things, and the cell is the sum of what it
         actually holds rather than one height with the difference padded out —
         which is what keeps 'Dobierz kartę' inside its own cell instead of over
         the card in the row below.
+
+        ``variants`` adds the row the variant selector sits in.  It is a
+        property of the TAB rather than of the card, and deliberately: a grid
+        whose cells were each as tall as their own contents would put every row
+        at a different height and every column out of line the moment one card
+        in it had variants.  So a tab that contains at least one variant card
+        gives the room to all of its cells and only the cards that have
+        variants draw anything in it.
         """
         card_w, card_h = self.card_library_card_size
         gap = self.card_library_gap
@@ -1055,10 +1189,13 @@ class Layout:
         else:
             # 'Dobierz kartę', under the stepper (stage 33).
             height += self.card_library_button_h + gap // 2
+            if variants:
+                height += self.card_library_button_h
         return (card_w + gap, height + gap)
 
     def card_library_cell_rect(self, index: int, abilities: bool,
-                               scroll: int = 0) -> pygame.Rect:
+                               scroll: int = 0,
+                               variants: bool = False) -> pygame.Rect:
         """Where entry ``index`` sits, with the scroll offset already applied.
 
         One function for the painter AND the hit test, so a card that looks
@@ -1066,7 +1203,7 @@ class Layout:
         """
         content = self.card_library_content
         columns = self.card_library_columns
-        cell_w, cell_h = self.card_library_cell_size(abilities)
+        cell_w, cell_h = self.card_library_cell_size(abilities, variants)
         # Whatever the cards do not use is split evenly, so the grid sits
         # centred in the viewport rather than hard against its left edge.
         spare = max(0, content.width - columns * cell_w)

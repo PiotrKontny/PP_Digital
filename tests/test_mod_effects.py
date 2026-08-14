@@ -357,7 +357,7 @@ def test_piotrek_can_still_win_by_reaching_the_finish(library):
 def test_shady_declares_its_rule_in_the_data(library):
     game = make(library)
     assert not game.hides_leader
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     assert game.hides_leader
 
 
@@ -366,7 +366,7 @@ def test_shady_removes_the_leading_pawn_at_once(library):
     spread(game)
     leader = pawns(game)[-1]
 
-    events = install(game, "Shady")
+    events = install(game, "Obóz Harcerski")
     hidden = [e for e in events if isinstance(e, ev.PawnHidden)]
     assert len(hidden) == 1 and hidden[0].pawn_id == leader
     assert game.hidden_pawn_ids == (leader,)
@@ -383,7 +383,7 @@ def test_shady_takes_the_bottom_pawn_of_a_shared_field(library):
     tile = game.board.pawn_tile(bottom)
     assert tile.stack == [bottom, rider]
 
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     assert game.hidden_pawn_ids == (bottom,)
     # The rider stays exactly where it was and simply settles onto the field.
     assert game.board.pawn_tile(rider) is tile
@@ -394,7 +394,7 @@ def test_a_hidden_pawn_is_ignored_by_hindmost_and_foremost(library):
     game = make(library)
     spread(game)
     leader = pawns(game)[-1]
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     assert effects.foremost_pawn(game) != leader
     assert effects.hindmost_pawn(game) != leader
 
@@ -403,7 +403,7 @@ def test_a_hidden_pawn_is_never_offered_as_a_target(library):
     game = make(library)
     spread(game)
     leader = pawns(game)[-1]
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     offered = [option.id for option in effects.pawn_options(game)]
     assert leader not in offered
     assert len(offered) == len(pawns(game)) - 1
@@ -414,7 +414,7 @@ def test_a_movement_card_aimed_at_a_hidden_pawn_resolves_and_does_nothing(librar
     game = make(library)
     spread(game)
     leader = pawns(game)[-1]
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
 
     spec = effects.EffectSpec("move_pawn", {"target": "fixed", "pawn": leader,
                                             "steps": 1, "direction": "forward"})
@@ -430,7 +430,7 @@ def test_a_hidden_pawn_is_ignored_by_the_neighbour_test(library):
     lonely, leader = pawns(game)[0], pawns(game)[1]
     place(game, **{lonely: 4, leader: 5})
     assert effects.has_neighbour(game, lonely)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     assert game.hidden_pawn_ids == (leader,)
     assert not effects.has_neighbour(game, lonely)
 
@@ -439,7 +439,7 @@ def test_checking_needs_only_the_pawns_that_are_left(library):
     """Shady's exception: five on one field is enough while one is away."""
     game = make(library)
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
     for pawn_id in pawns(game):
         if pawn_id != hidden:
@@ -453,7 +453,7 @@ def test_checking_needs_only_the_pawns_that_are_left(library):
 def test_the_full_table_is_required_again_once_the_pawn_is_back(library):
     game = make(library)
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
     for pawn_id in pawns(game):
         if pawn_id != hidden:
@@ -470,7 +470,7 @@ def test_the_full_table_is_required_again_once_the_pawn_is_back(library):
 def test_the_hidden_pawn_comes_back_a_round_later(library):
     game = make(library)
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
 
     events = game._begin_round(game.round_number + 1)
@@ -483,7 +483,7 @@ def test_the_hidden_pawn_comes_back_a_round_later(library):
 def test_it_comes_back_on_top_of_the_rearmost_pawn(library):
     game = make(library)
     spread(game, start=3)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
     rear = effects.hindmost_pawn(game)
 
@@ -496,7 +496,7 @@ def test_it_comes_back_on_top_of_the_rearmost_pawn(library):
 def test_it_does_not_come_back_where_it_left(library):
     game = make(library)
     spread(game, start=3)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
     where_it_was = 3 + len(pawns(game)) - 1
 
@@ -508,7 +508,7 @@ def test_shady_is_a_one_time_effect(library):
     """It stays in the rack afterwards and never hides anybody again."""
     game = make(library)
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     game._begin_round(game.round_number + 1)
     assert not game.hidden_pawn_ids
 
@@ -516,17 +516,17 @@ def test_shady_is_a_one_time_effect(library):
         events = game._begin_round(game.round_number + 1)
         assert not [e for e in events if isinstance(e, ev.PawnHidden)]
         assert not game.hidden_pawn_ids
-    assert game.mod_slots[0].title == "Shady", "it is still on display"
+    assert game.mod_slots[0].title == "Obóz Harcerski", "it is still on display"
 
 
 def test_a_second_shady_hides_a_pawn_again(library):
     """A new card is a new arrival; only the same one is spent."""
     game = make(library)
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     game._begin_round(game.round_number + 1)
 
-    events = install(game, "Shady", slot=1)
+    events = install(game, "Obóz Harcerski", slot=1)
     assert [e for e in events if isinstance(e, ev.PawnHidden)]
     assert len(game.hidden_pawn_ids) == 1
 
@@ -535,7 +535,7 @@ def test_removing_shady_puts_the_pawn_back_at_once(library):
     """Nothing on the table keeps a pawn off the map, so it cannot be stranded."""
     game = make(library)
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
 
     events = game.apply(cmd.DiscardMod(slot=0))
@@ -548,7 +548,7 @@ def test_a_hidden_pawn_is_a_status_so_it_survives_a_snapshot(library):
     """N18: the mechanic is a StatusKind, so serialisation comes for free."""
     game = make(library)
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
 
     statuses = game.snapshot()["statuses"]
@@ -565,7 +565,7 @@ def test_the_carried_stack_is_recorded(library):
     place(game, **{bottom: 12})
     place(game, **{rider: 12})
 
-    events = install(game, "Shady")
+    events = install(game, "Obóz Harcerski")
     hidden_event = next(e for e in events if isinstance(e, ev.PawnHidden))
     assert hidden_event.riders == [rider]
 
@@ -575,7 +575,7 @@ def test_a_hidden_pawn_cannot_be_the_leader_squid_game_checks(library):
     game = make(library)
     set_secret(game, pawns(game)[0])
     spread(game)
-    install(game, "Shady")
+    install(game, "Obóz Harcerski")
     hidden = game.hidden_pawn_ids[0]
     install(game, "Squid Game", slot=1)
 
@@ -594,10 +594,21 @@ def test_every_declared_mod_rule_has_a_reader(library):
         "reveal_chest": "chest_cards_revealed",
         "lead_check_only": "lead_check_only",
         "hide_leader": "hides_leader",
+        # Stage 34/35: the two cards that declare rules through a VARIANT.
+        "cancel_ability_effects": "cancels_ability_effects",
+        "carry_neighbour": "carries_neighbour",
+        "carry_neighbour_alone": "carries_neighbour_alone",
     }
     game = make(library)
     deck = next(d for d in library.decks.values() if d.id == settings.DECK_MODS)
     for card in deck.cards:
-        for key in (card.passive or {}):
-            assert key in readers, f"{card.title} declares {key!r}, nothing reads it"
-            assert hasattr(game, readers[key])
+        # A VARIANT's passive counts too (stage 34).  A rule that only exists
+        # on the second reading of a card is exactly as unimplemented as one on
+        # the first if nothing reads it, and it is easier to miss.
+        bags = [card.passive or {}] + [variant.passive or {}
+                                       for variant in card.variants]
+        for bag in bags:
+            for key in bag:
+                assert key in readers, (
+                    f"{card.title} declares {key!r}, nothing reads it")
+                assert hasattr(game, readers[key])

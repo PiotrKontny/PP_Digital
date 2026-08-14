@@ -1,8 +1,9 @@
 ================================================================================
 LLM_Instructions.txt — PROJECT MEMORY FOR "PĘDZĄCY PIOTREK"
-Last updated: stage 33 — the Card Library retuned to FOUR cards per row, and
-              every deck card given a "Dobierz kartę" button that fetches that
-              exact card out of its live deck into the clicking player's hand
+Last updated: stage 36 — "Nie masz Rosji" implemented, in both variants: an
+              opponent's movement can be PAUSED before it happens and stopped
+              once per card, with a configurable decision window owned by the
+              authority
               (see CHANGELOG_LLM.md)
 ================================================================================
 
@@ -82,6 +83,24 @@ WORKING:
   by the engine despite the ribbon marking him since the chest existed.  The
   chest deck was SIXTEEN cards (eight titles, two of each) because two cards a
   round need more supply than eight could give a full table.
+- NIE MASZ ROSJI (stage 36): a Chest card granting one block of one opponent
+  movement, for one full round (variant 2) or two (variant 1).  A blockable
+  movement is PAUSED before it happens — the card stays in the hand and nothing
+  resolves — so a block cancels nothing, it simply never runs.  See "NIE MASZ
+  ROSJI".
+- AKO (stage 35): while it is in the rack every MOVEMENT CARD brings one
+  neighbouring pawn along the same move — the pawn on the far side of the
+  direction of travel, which follows the mover into the space it leaves.
+  Variant 1 lets the ordinary tower rule carry whatever stands on it; variant 2
+  ("TYLKO jednego") lifts that one pawn out of the stack and leaves the rest.
+  See "AKO: THE PAWN THAT COMES ALONG".
+- CARD VARIANTS (stage 34): a card may declare two or more readings that differ
+  in text, passive and effect but NOT in title, artwork, count or deck.  Which
+  one a match plays is chosen in the lobby ("Warianty" tab) or in the Card
+  Library, travels as configuration, and is in the snapshot.  "Sesja na PG" has
+  two: variant 1 locks abilities (what shipped), variant 2 also CANCELS every
+  effect a character ability has already put into play — identified by
+  `Status.origin`, never by kind or name.  See "CARD VARIANTS".
 - CHEST DECK COMPOSITION (stage 27): SEVENTEEN cards, and no longer uniform —
   Dzieckorolka 2, Rage Quit 2, Balbinka 2, Nie masz Rosji 2, Gambit Patusa 3,
   Shady 2, Gejtos 3, Gamechanger 1.  Stage 23's doubling was uniform ON PURPOSE
@@ -1097,7 +1116,13 @@ rules are DECLARED IN cards.json:
     Speedrun     {"reverse_backward": true}
     Masa solna   {"movement_cap": 1}
     Halloween    {"require_neighbour": true}
-    Sesja na PG  {"abilities_locked": true}
+    Sesja na PG  {"abilities_locked": true}          + variant 2 (stage 34)
+    AKO          {"carry_neighbour": true}           + variant 2 (stage 35)
+
+A VARIANT'S passive is a declared rule exactly as the printed card's is, and
+``test_every_declared_mod_rule_has_a_reader`` walks both.  A rule that exists
+only on a card's second reading is just as unimplemented if nothing reads it,
+and easier to miss.
 
 ``GameState.mod_rule(key)`` scans the rack; ``movement_cap``,
 ``abilities_locked``, ``requires_neighbour`` and ``reverses_backward_moves``
@@ -2234,6 +2259,348 @@ LIMITATIONS TO KNOW ABOUT BEFORE "FIXING" THEM
   * The display cards are throwaway ``Card`` objects built from definitions and
     take uids from the global counter.  They are never submitted in a command
     and never enter a deck — commands address cards by TITLE.
+
+
+================================================================================
+NIE MASZ ROSJI  (stage 36 — read before touching the turn loop or _play_card)
+================================================================================
+
+    variant 1  "two_rounds"    two full rounds
+    variant 2  "one_round"     one full round
+
+One status (``StatusKind.MOVEMENT_VETO``), ``charges=1``.  The single use IS
+the charge: the tracker drops a status whose last charge is spent, so nothing
+has to remember that a veto was used.
+
+
+A FULL ROUND IS NOT THE ROUND COUNTER
+-------------------------------------
+``_note_turn_completed`` runs at the top of ``_end_turn`` and strikes the
+finishing seat off the veto's ``pending`` set.  Empty set = one full round.
+
+``pending`` EXCLUDES THE OWNER, and that is what makes the owner's example
+right: the round is up when the turn comes back to them, which is the moment
+everybody else has had one.  It is also why Piotrek's second slot in a round
+ends nothing — he holds every third slot, so "the round counter ticked" and
+"everybody has had a turn" are different events on this table.  Do not
+re-implement this on ``round_number``.
+
+
+THE PAUSE — THERE IS NO ROLLBACK, AND THERE MUST NOT BE ONE
+------------------------------------------------------------
+``_play_card`` resolves the plan and then SETS IT ASIDE.  The card stays in the
+hand, the board is untouched, ``_after_play`` is never reached.
+
+    play → resolve → blockers? → HOLD → accept → replay the same command
+                                     → block  → discard, never run it
+
+A blocked movement therefore cannot have built a tower, triggered an identity
+check or won anybody the game: it did not happen.  Anything that "performs the
+move and undoes it afterwards" is a regression of the whole design.
+
+Accepting replays the ORIGINAL command through the ordinary path;
+``_resolved_movement`` stops the replay being held a second time by the very
+veto that let it through.  Every other command is refused while a decision is
+open — the table is genuinely stopped.
+
+
+WHO MAY BLOCK
+-------------
+``are_opponents(a, b)`` is ``is_piotrek != is_piotrek``.  Read from the roles
+the game already has; no character title appears anywhere in this feature.
+
+BLOCKABLE = a played card from the MOVEMENT or CHEST deck whose RESOLVED PLAN
+contains a movement operation (``effects.plan_moves_pawns``).  Asking the plan
+rather than the card means a card that gains movement later is blockable the
+day it does.  A character ability, a Mod, and a dragged pawn are none of them
+played cards coming through ``_play_card``, so all three are outside by
+construction rather than by a list.
+
+
+THE CLOCK BELONGS TO THE AUTHORITY
+-----------------------------------
+    engine   how LONG the window is        (config, snapshot, everywhere equal)
+    authority WHEN it started              (wall clock, one machine only)
+
+``Room.expire_decisions()`` on the hub tick online; ``LocalSession.tick(now)``
+hot-seat, with ``now`` passed IN so nothing depends on a frame rate and nothing
+sleeps.  ``ExpireMovementDecision`` is AUTHORITY_ONLY.  A client's countdown is
+a PICTURE of that command arriving — if it reaches zero early the buttons stop
+responding and the table waits, which is correct.
+
+
+THE AUTOMATIC FINAL BLOCK
+-------------------------
+``_veto_is_last_chance`` simulates the rest of the effect's life against the
+real cadence and asks whether any LATER turn belongs to an opponent while the
+effect is still alive.  If none does, the block fires with no window: the card
+promised one block, and this was the last movement it could ever stop.
+
+
+SEVERAL VETOES
+--------------
+Every eligible opponent is a blocker.  The movement runs only when EVERY
+blocker has accepted — one hunter's acceptance must not spend Piotrek's chance
+— and the FIRST block the authority applies wins; the second finds nothing to
+answer.  One authority applying commands in order is the entire mechanism; no
+client ever cancels anything locally.
+
+
+THE INTERFACE OWNS NOTHING
+---------------------------
+``ui/movement_decision.py`` reads the state every frame and answers with
+Commands.  Whether there is a decision, who may answer it and whether an answer
+is still valid all come from ``GameState``.  The confirmation dialog draws the
+card with the ordinary ``CardRenderer.draw_in`` and the ordinary reveal, so a
+Signature card is a Signature card there too.
+
+The cooldown is a row in the settings panel's "Zasady" tab — a number per TABLE
+rather than per card.  In the panel and not as another row on the two setup
+screens, for the 1280x760 reason recorded in stage 21.
+
+
+================================================================================
+AKO: THE PAWN THAT COMES ALONG  (stage 35 — read before touching movement)
+================================================================================
+
+    variant 1  "with_stack"   {"carry_neighbour": true}
+    variant 2  "alone"        {"carry_neighbour": true,
+                               "carry_neighbour_alone": true}
+
+Read by ``GameState.carries_neighbour`` / ``carries_neighbour_alone``, which are
+``mod_rule`` wrappers like every other.  Nothing asks the mod what it is called.
+
+WHERE IT JOINS THE PIPELINE: LAST.  The order of the questions is already fixed
+(Gambit Patusa → Speedrun's direction → which pawn → which half of a widened
+row); AKO is appended after all of them, because the passenger is a detail of a
+move that has already been decided.  The mover's operation goes into the plan
+FIRST so the companion walks into a field the mover has already left.
+
+Joining after the distance is settled is what makes it compose: Masa solna
+shortens the companion too, a ChatGPT bonus stretches it, Gambit and Speedrun
+decide its direction.  Do not move the call earlier to "tidy" it.
+
+``ako_companion()`` IS CALLED FROM BOTH MOVEMENT HANDLERS — ``_move_pawn`` and
+``_move_pawns`` — because a rule added to one and not the other drifts, and the
+difference only ever shows on the one card that takes the other path.  On the
+multi-pawn path it is keyed per move (``pawns_ako0``…) and judged against
+``MoveProjection.positions``, exactly as Halloween is.
+
+
+WHICH PAWN, AND WHY IT IS A SIGN RATHER THAN TWO CASES
+-------------------------------------------------------
+    neighbour_side(steps) = -1 forward, +1 backward
+
+THE COMPANION FOLLOWS THE MOVER INTO THE SPACE IT LEAVES.  Both of the owner's
+examples are that one rule — green forward from 3 takes blue from 2, green
+backward from 3 takes yellow from 4.  Never hard-code "the one in front".  It is
+a POSITION INDEX, never a screen coordinate.
+
+``neighbour_candidates`` offers everything standing on that one position: both
+halves of a widened row, and every pawn of a tower there — the owner's example
+picks the pawn at the BOTTOM of one.  Nothing else on the board is eligible.
+Frozen pawns are excluded (a freeze refuses a move everywhere else, so offering
+one would offer a choice that cannot be carried out); hidden pawns are excluded
+by ``live_pawns`` without this knowing Shady exists.
+
+One candidate is taken silently.  Several open the ORDINARY ``Choice(kind=
+"pawn")``, so the existing overlay, the resubmission path and the network need
+no changes at all.  ``can_ask=False`` takes the first candidate in PALETTE ORDER
+— AKO has no "decline" the way Speedrun does, and fizzling a card played by
+another card is exactly what the ``can_ask`` note warns about.
+
+THE COMPANION MAKES THE SAME MOVE: the same signed distance, after every
+modifier.  Not "one field into the gap".  On a one-field card the two readings
+coincide; this one keeps the pair adjacent on a longer card.
+
+
+VARIANT 2 NEEDED NO NEW MOVEMENT PATH — DO NOT WRITE ONE
+---------------------------------------------------------
+``MoveBySteps.carry_riders`` already existed for Balbinka, and
+``_op_move_by_steps`` already honours it by handing the executor an empty
+``carried`` tuple.  ``board.place_pawn`` then lifts that one pawn out of its
+tile's stack and leaves the rest standing — a valid board, with nothing
+reconstructed afterwards.
+
+Variant 1 passes ``carry_riders=True`` and gets the ordinary tower rule,
+including Ondrej's Radar links, because ``travellers`` does the work and AKO
+never touches it.
+
+``MoveProjection.move(..., with_riders=False)`` is the same distinction seen
+from the projection's side, for the multi-pawn path.
+
+
+THINGS THAT ARE DELIBERATE
+--------------------------
+  * Gated on ``ctx.from_movement_card`` (N103), so abilities and Chest cards
+    are untouched.  The card says "wszystkie ruchy"; this is the convention
+    every movement mod already follows.  One line and one test would change it.
+  * The companion takes the NEARER half of a widened destination rather than
+    being asked — it is dragged, not steered (D8a).
+  * A companion with nowhere to go is simply not brought; the mover still
+    moves.  Not a refusal, not a fizzle.
+  * Two copies in the rack bring ONE neighbour.  ``mod_rule`` reads a rule, it
+    does not accumulate.
+
+
+================================================================================
+CARD VARIANTS  (stage 34 — read before giving a card a second reading)
+================================================================================
+
+A card with VARIANTS is one card that can be played more than one way.  It is
+not two cards, and every rule below follows from that sentence.
+
+    cards.json                 this match                  another match
+    Sesja na PG ─┬─ lock       "Sesja na PG" → lock        → lock_and_cancel
+                 └─ lock_and_cancel
+
+WHAT A VARIANT MAY CHANGE, and it is exactly three things:
+
+    text        what the card says
+    passive     what holding it does
+    effect      what playing it does
+
+WHAT IT MAY NOT TOUCH — the card's IDENTITY:
+
+    title       artwork (art / image)       count       deck_id
+
+That list is the whole design.  A variant that could change the title or the
+picture would be a second card wearing the first one's name, and the deck, the
+rack, the hand, the library and every command that addresses a card by title
+would all have to learn about it.  None of them does.
+
+Anything a variant leaves out is INHERITED, so the smallest useful variant is
+an id plus one key.
+
+``CardDef.with_variant`` always resolves against ``CardDef.printed`` (the
+pristine definition, kept in ``base``).  Do not "simplify" that away: without
+it, 1 → 2 → 1 inherits variant 2's sentence wherever variant 1 declares none,
+and the card ends up saying something no variant of it says.
+
+
+WHERE THE CHOICE LIVES
+----------------------
+    SessionConfig.card_variants     title -> variant id
+    LobbyState.card_variants        the same, on the wire
+    GameState.card_variants         (deck_id, title) -> variant id
+
+THE FIFTH MEMBER OF THE ``mod_counts`` FAMILY, and it obeys the family's rules:
+EMPTY MEANS AS PRINTED.  A host on an older build, or any of the hundreds of
+tests that pass no mapping, gets each card's FIRST variant — which is the card
+that shipped before variants existed.  An id a card does not declare is dropped
+rather than stored.
+
+``DeckDef.with_variants`` is applied in ``setup.build_decks`` BEFORE the
+shuffle, beside ``with_counts`` and ``with_uses``.  A variant cannot change a
+``count``, so the pile is the same permutation whichever variant is chosen —
+which is what keeps two machines building the same deck from one seed, and is
+asserted by a test rather than assumed.
+
+The chosen variants are IN THE SNAPSHOT.  They have to be: a table that agrees
+about every count, every pile size and every uid, and disagrees about what one
+of its cards DOES, is a desync nothing else in that dictionary would notice.
+
+
+CHANGING IT DURING A MATCH
+--------------------------
+    SetCardVariant(deck_id, title, variant)
+
+No ``player_index`` — like ``AdjustDeckCount`` and friends it is table
+bookkeeping, so it is in neither ``_OWNED_BY_PLAYER`` nor ``_TURN_BOUND`` and
+ANY seat may issue it at any time.  Adding a seat "for tidiness" would silently
+restrict it, exactly as the stage 32 note warns.
+
+An ABSOLUTE id, never "next variant": the control cycles, the command names
+what it wants, so two players clicking at the same moment cannot land on a
+variant neither of them chose.
+
+Applying it rewrites ``card.definition`` on EVERY copy in the match
+(``_reread_copies``).  That is what keeps two physical copies of a card one
+LOGICAL card.  ``_adjust_deck_count`` builds new copies through
+``variant_definition`` for the same reason — a copy conjured from the printed
+definition while the rest of the deck plays another variant is the same failure
+arriving an hour later.
+
+THE BASE DEFINITION IS NEVER EDITED.  cards.json is content; a variant is a
+setting of one match.
+
+
+HOW AN ABILITY EFFECT IS IDENTIFIED  (the part to reuse)
+--------------------------------------------------------
+``Status.origin`` — ``"ability"``, ``"card"``, ``"on_draw"`` or empty.
+
+Stamped in ONE place, ``effects.resolve_spec``, from the ``EffectContext.origin``
+that already existed and already reached every handler.  So an effect written
+next year gets it without knowing it exists.  Do not stamp it in the handlers:
+a rule that only holds for the ones somebody remembered to edit is not a rule.
+
+    source      a NAME, for humans ("Granny Costume")
+    origin      the machine's answer to "is this an ability effect?"
+
+Empty means the ENGINE attached the status directly — a pawn hidden by Obóz
+Harcerski, a queued turn interrupt — and that is not anybody's ability.
+
+NEVER SELECT ABILITY EFFECTS BY KIND.  A frozen pawn may be Granny Costume's or
+a Chest card's, and from the outside they are identical.
+
+
+SESJA NA PG'S TWO VARIANTS
+--------------------------
+    lock              abilities_locked                        (what shipped)
+    lock_and_cancel   abilities_locked + cancel_ability_effects
+
+The second one runs from ``_arm_mod``, keyed on the declared ``passive`` and
+never on the title (N98), so it is a TRANSITION — the moment the card becomes
+active — and not a sweep that runs every frame.  ``_cancel_ability_effects``
+drops ``statuses.cancel_origin("ability")`` and NOTHING else: Mod rules, Chest
+promises, movement statuses and engine-attached statuses all survive.  It is
+emphatically not a "clear everything".
+
+Changing the variant of a card ALREADY IN THE RACK asks whether the rack's
+answer changed (``cancels_ability_effects`` — an ordinary ``mod_rule``) and
+cancels if it did.  The card does not have to be played again.
+
+THERE IS NO DEPARTURE HALF, and that is deliberate — unlike Shady and Squid
+Game, which must leave nothing behind.  A cancelled effect does not come back
+when the mod leaves: it was cancelled, not suspended.  The ability lock is a
+passive and lifts by itself.  2 → 1 restores nothing either.
+
+
+THE TWO PLACES A VARIANT IS CHOSEN
+----------------------------------
+LOBBY — a fifth tab, "Warianty", in the shared ``GameSettingsPanel``, so both
+setup screens get it at once (the bargain stage 26 struck).  Only cards with
+TWO OR MORE variants appear; the rows are gathered from every deck, so ``AKO``
+and ``Nie masz Rosji`` will appear with no code change.  ``SettingsTab.options``
+turns the tab's number into an INDEX into named choices, which is what let
+bump / clamp / reset / merge be reused whole instead of forked.  Each row shows
+the variant's own DESCRIPTION: reading the difference is the point of the
+control.
+
+CARD LIBRARY — a button under 'Dobierz kartę' reading ``WARIANT 2  (2/2)``.
+UNDER the card and never on it (N36d).  THE ROW'S HEIGHT IS A PROPERTY OF THE
+TAB, not of the card: a grid whose cells were each as tall as their own
+contents would throw every column out of line the moment one card in a row had
+variants.  So the tab reserves the room for all of its cells and only the cards
+that have variants draw in it.  Display cards follow the live state through
+``_refresh_variants``, so the face — and therefore the hover description — is
+always the variant actually in force.
+
+
+LIMITATIONS TO KNOW ABOUT BEFORE "FIXING" THEM
+-----------------------------------------------
+  * ``SessionConfig.card_variants`` is keyed by TITLE, ``GameState`` by
+    (deck, title).  One title with variants in two decks would take the same
+    variant in both.  No title is in two decks today; widen the config key the
+    day one is.
+  * The library's variant button inherits stage 32's gate: refused before the
+    match begins and after it ends.
+  * A variant may not change artwork.  That is the requirement, not an
+    oversight — ``art`` is one of the identity fields a variant cannot reach.
+  * The extra row makes the Mody Patusa tab scroll one row sooner.  A control
+    scrolled out of sight is out of REACH (``_visible_indices`` is the hit test
+    as well as the painter's list), which is stage 32's intended behaviour — a
+    test that clicks it has to scroll first, as a player does.
 
 
 ================================================================================

@@ -94,7 +94,7 @@ def test_the_defaults_are_the_printed_deck(library):
     panel = screen.settings_panel
     assert panel.counts == {
         "Speedrun": 2, "Masa solna": 2, "AKO": 1, "Halloween": 1,
-        "Sesja na PG": 2, "Paczka": 2, "Squid Game": 1, "Shady": 2,
+        "Sesja na PG": 2, "Paczka": 2, "Squid Game": 1, "Obóz Harcerski": 2,
     }
     assert panel.total == 13
     assert panel.is_default
@@ -137,7 +137,7 @@ def test_a_count_cannot_go_below_zero_or_past_the_ceiling(library):
 def test_zero_is_allowed_because_leaving_a_mod_out_is_a_real_choice(library):
     screen, _ = menu(library)
     panel = screen.settings_panel
-    panel.counts["Shady"] = 0
+    panel.counts["Obóz Harcerski"] = 0
     assert panel.total == 11
 
 

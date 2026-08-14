@@ -35,6 +35,7 @@ from ..players.player import Player
 from ..players.roles import Role
 from . import commands as cmd
 from . import effects
+from . import undo
 from . import events as ev
 from .statuses import STATUS_LABELS, Status, StatusKind, StatusTracker, Subject
 from .turn_order import (NextTurn, TurnSlot, chest_recipient_for_round,
@@ -52,6 +53,127 @@ MAX_TURN_INTERRUPTS = 12
 #: Depth limit for cards that draw cards that draw cards.  Troll replaces
 #: itself, and the replacement can be another Troll.
 MAX_DRAW_CHAIN = 8
+
+
+@dataclass
+class PendingTowerBreakup:
+    """A failed check under variant 2: the tower is about to come apart.
+
+    NOT A SLEEP.  The two-second pause is a deadline on the authority's clock,
+    aged by the same tick that times out a movement decision and an Ice Block
+    window, so nothing blocks and every machine sees the same thing happen at
+    the same point in the command log.
+
+    ``choice_position`` is a doubled row — 2a / 2b — that PIOTREK picks a field
+    on.  It is his choice and not the mover's: the tower was built by somebody
+    else's card, and the brief gives the scattering to him.  If he says nothing
+    before the deadline the first field is used, deterministically, so a
+    disconnected Piotrek cannot hang the table.
+    """
+
+    tile_index: int
+    #: ``[(board position, [pawns bottom-to-top]), ...]``, nearest field first.
+    groups: List[Tuple[int, List[str]]] = field(default_factory=list)
+    seat: int = -1
+    #: The doubled position awaiting Piotrek's pick, or ``None``.
+    choice_position: Optional[int] = None
+    chosen_tile: Optional[int] = None
+    seconds: float = 2.0
+    opened_at: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"tile": self.tile_index, "seat": self.seat,
+                "groups": [[position, list(pawns)]
+                           for position, pawns in self.groups],
+                "choice_position": self.choice_position,
+                "chosen_tile": self.chosen_tile,
+                "seconds": self.seconds}
+
+
+@dataclass
+class PendingCheckDecision:
+    """A CHECK that has been paused, waiting on Piotrek's Ice Block answer.
+
+    The same shape as :class:`PendingMovementDecision` and for the same
+    reasons.  The check has been RECOGNISED and not resolved: nothing has been
+    crossed off, no identity has been compared and no tower has been broken, so
+    refusing has nothing to undo.  Allowing runs the same check against the
+    same table, which is deterministic.
+
+    ``pawn_id`` — the colour about to be checked — is PUBLIC and always was:
+    everybody can see which pawn is at the bottom of the tower.  What stays
+    secret is the answer, which is why refusing produces no reveal.
+
+    THE CLOCK IS NOT HERE, for the reason given on the movement decision:
+    ``seconds`` is configuration and identical everywhere, ``opened_at`` is
+    wall-clock time and lives on the authority only.
+    """
+
+    #: Where the check came from, so the authority resolves the right one.
+    source: str
+    pawn_id: str
+    #: Piotrek's seat — the only one entitled to answer.
+    seat: int
+    seconds: float = 10.0
+    opened_at: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"source": self.source, "pawn": self.pawn_id,
+                "seat": self.seat, "seconds": self.seconds}
+
+
+@dataclass
+class PendingMovementDecision:
+    """A movement that has been PAUSED, waiting on the opponents who may stop it.
+
+    The card has been played and its effect RESOLVED, and then nothing else has
+    happened: the plan was thrown away rather than carried out, and the card is
+    still in its owner's hand.  That is the whole of "rollback before
+    irreversible consequences" — there is nothing to roll back, because nothing
+    ran.  Accepting re-runs the same command against the same board, which is
+    deterministic; blocking discards the card and never runs it at all.
+
+    Everything here is REAL GAME STATE and travels in the snapshot, because two
+    machines that disagree about whether the table is waiting for an answer
+    disagree about whose turn it is.
+
+    THE CLOCK IS NOT HERE.  ``seconds`` is the length of the window, which is
+    configuration and identical everywhere; WHEN it started is wall-clock time,
+    which is different on every machine, so it lives on the authority
+    (``opened_at``, set by the session or the room) and is deliberately left
+    out of the fingerprint.
+    """
+
+    #: The seat whose card is waiting, and the command that will replay it.
+    player_index: int
+    card_uid: int
+    deck_id: str
+    title: str
+    choices: Dict[str, str] = field(default_factory=dict)
+    #: Seats holding a usable veto against THIS movement.  Fixed when the
+    #: window opens: a veto granted while the window is open belongs to the
+    #: next movement, not to the one already on the table.
+    blockers: List[int] = field(default_factory=list)
+    #: Blockers who have said "let it happen".  The window ends when every
+    #: blocker has, so one hunter's acceptance cannot spend Piotrek's chance.
+    accepted: List[int] = field(default_factory=list)
+    seconds: float = 7.0
+    #: Wall clock, on the authority only.  ``None`` on a client, which counts
+    #: its own countdown from the event it was sent purely to draw it.
+    opened_at: Optional[float] = None
+
+    @property
+    def waiting_for(self) -> List[int]:
+        return [seat for seat in self.blockers if seat not in self.accepted]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "player": self.player_index,
+            "card": self.card_uid,
+            "blockers": sorted(self.blockers),
+            "accepted": sorted(self.accepted),
+            "seconds": self.seconds,
+        }
 
 
 @dataclass
@@ -196,6 +318,60 @@ class GameState:
         #: turns it into a verdict, because only the authority knows the
         #: hidden colour.  Cleared by whichever command settles it.
         self.pending_lead_check: Optional[str] = None
+        #: A check somebody ASKED for, as ``(colour, seat staking themselves)``.
+        #: Glockboy's ability is the only thing that raises it today.  Exactly
+        #: the same split as ``pending_lead_check`` above and for exactly the
+        #: same reason: naming the colour is public and happens everywhere,
+        #: answering it needs the secret and happens on the authority only.
+        #: The seat is carried because a wrong answer costs that player the
+        #: game, and the authority has to know who to charge.
+        self.pending_pawn_check: Optional[Tuple[str, int]] = None
+        #: (deck id, title) -> the variant THIS MATCH plays that card under.
+        #:
+        #: Seeded from the config the match was built from, so it starts out
+        #: agreeing with the definitions ``setup.build_decks`` already applied,
+        #: and it is the thing ``SetCardVariant`` moves.  It is configuration
+        #: rather than a second copy of the cards: the definitions on the
+        #: physical copies are its PROJECTION, rewritten from here whenever it
+        #: changes, and cards.json is never touched by either.
+        #:
+        #: Every title the content declares variants for is in here from the
+        #: start, including titles with no copies in the match — a deck the
+        #: lobby set to zero copies still has a setting, and it has to survive
+        #: somebody adding a copy back from the library.
+        self.card_variants: Dict[Tuple[str, str], str] = {}
+        self._seed_card_variants()
+        #: The movement waiting on an opponent's answer, or ``None``.
+        #: Nothing about that card has happened while this is set — see
+        #: :class:`PendingMovementDecision`.
+        self.pending_movement: Optional[PendingMovementDecision] = None
+        #: The last played card's checkpoint, and the seat that may rewind it.
+        #: Undo and Liskowy Konkurs share it, which is what makes them share a
+        #: window without either knowing about the other.
+        self.turn_window: Optional[undo.TurnCheckpoint] = None
+        #: seat -> card plays still owed this turn.  Liskowy Konkurs used
+        #: BEFORE playing grants one, and ``_after_play`` spends it instead of
+        #: handing the turn on.
+        self.extra_plays: Dict[int, int] = {}
+        #: A check paused on Piotrek's Ice Block answer.
+        self.pending_check: Optional[PendingCheckDecision] = None
+        #: A colour Piotrek has ALLOWED through, so the check that opened the
+        #: window resolves instead of re-opening it for ever.  Cleared the
+        #: moment it is used.
+        self.check_allowed: Optional[str] = None
+        #: Set when Ice Block refuses.  "Pionki muszą być rozdzielone przed
+        #: kolejnym sprawdzeniem" — the card's own text is the rule that stops
+        #: the same intact tower being re-checked on the very next command.
+        #: Cleared as soon as the pawns are no longer all on one field.
+        self.check_needs_separation: bool = False
+        #: Checking variant 2: a failed check has armed a tower breakup.
+        self.pending_breakup: Optional[PendingTowerBreakup] = None
+        #: The card uid currently being REPLAYED after its decision window
+        #: closed.  Not game state — it never leaves the command that set it,
+        #: exactly as ``_draw_depth`` does not — and it exists so that a
+        #: movement which has just been allowed is not held for a second
+        #: decision by the very veto that let it through.
+        self._resolved_movement: Optional[int] = None
 
         self.tokens: Dict[str, TokenState] = {}
         for i, pawn in enumerate(library.pawns):
@@ -351,6 +527,58 @@ class GameState:
                 return value
         return default
 
+    # ── card variants ────────────────────────────────────────────────────────
+    def _seed_card_variants(self) -> None:
+        """Start every variant card off on the variant the config chose.
+
+        Falls back to the card's FIRST variant, which is why a match built by
+        an older client — or by any of the hundred tests that pass no mapping
+        at all — plays exactly the card that shipped before variants existed.
+        An id the card does not declare is dropped here rather than stored, so
+        one stale entry cannot make the library and the deck disagree.
+        """
+        chosen = dict(getattr(self.config, "card_variants", {}) or {})
+        for deck_id in self.library.deck_order:
+            try:
+                definition = self.library.deck(deck_id)
+            except Exception:      # pragma: no cover - defensive
+                continue
+            for card in definition.cards:
+                if not card.has_variants:
+                    continue
+                wanted = str(chosen.get(card.title, ""))
+                if wanted not in card.variant_ids:
+                    wanted = card.default_variant
+                self.card_variants[(deck_id, card.title)] = wanted
+
+    def card_variant(self, deck_id: str, title: str) -> str:
+        """Which variant this match plays that card under, or "" for none."""
+        return self.card_variants.get((deck_id, title), "")
+
+    def variant_definition(self, deck_id: str, title: str) -> Optional[CardDef]:
+        """The card as this match reads it: printed definition plus variant.
+
+        What the Card Library draws.  It builds its display cards from the
+        content library, which holds the PRINTED definitions and knows nothing
+        about this match — so without this the book would show variant 1's
+        sentence on a table playing variant 2.
+        """
+        definition = self._definition_of(deck_id, title)
+        if definition is None or not definition.has_variants:
+            return definition
+        return definition.with_variant(self.card_variant(deck_id, title))
+
+    @property
+    def cancels_ability_effects(self) -> bool:
+        """True while a mod in the rack cancels ability effects as it lands.
+
+        Sesja na PG's second variant.  A ``mod_rule`` like every other, so the
+        rack answers it and no part of the engine asks a mod what it is called
+        or which variant it is — the variant chose the ``passive``, and the
+        passive is the rule.
+        """
+        return bool(self.mod_rule("cancel_ability_effects", False))
+
     @property
     def abilities_locked(self) -> bool:
         """True while a mod forbids character abilities (Sesja na PG).
@@ -371,6 +599,32 @@ class GameState:
         """
         value = self.mod_rule("movement_cap")
         return None if value is None else max(0, int(value))
+
+    @property
+    def carries_neighbour(self) -> bool:
+        """True while every movement card drags a neighbouring pawn along (AKO).
+
+        A ``mod_rule`` like every other, so the rack answers it and nothing in
+        the engine asks a mod what it is called.  WHICH neighbour is a decision
+        for the effect engine, which is the only thing that knows the direction
+        the card is about to move in.
+        """
+        return bool(self.mod_rule("carry_neighbour", False))
+
+    @property
+    def carries_neighbour_alone(self) -> bool:
+        """True while that neighbour travels WITHOUT its tower (AKO variant 2).
+
+        The card says "TYLKO jednego" and this is the whole of the difference
+        between the two variants: variant 1 lets the ordinary tower rule carry
+        whatever is standing on the chosen pawn, variant 2 lifts that one pawn
+        out of the stack and leaves the rest where it was.
+
+        Meaningless on its own — a rack that says this and not
+        :attr:`carries_neighbour` moves nobody — because both variants declare
+        both keys and the second only ever narrows the first.
+        """
+        return bool(self.mod_rule("carry_neighbour_alone", False))
 
     @property
     def requires_neighbour(self) -> bool:
@@ -444,6 +698,43 @@ class GameState:
         """
         return [pawn for pawn in self.library.pawns
                 if not self.pawn_is_hidden(pawn.id)]
+
+    # ── the gate every character ability passes through ──────────────────────
+    def pawns_on_start(self) -> List[str]:
+        """Pawns that have not left the starting camp yet.
+
+        A pawn Obóz Harcerski is holding off the map is NOT one of these.  It
+        has left START — it is simply somewhere else for a round — and treating
+        it as though it were still in the camp would lock every ability in the
+        game for the length of that card, which is not a rule anybody wrote.
+        """
+        return [pawn.id for pawn in self.visible_pawns
+                if self.board.position_of_pawn(pawn.id) is None]
+
+    def ability_refusal(self) -> Optional[str]:
+        """Why NO character ability may be activated right now, or ``None``.
+
+        ONE GATE FOR EVERY ABILITY, PRESENT AND FUTURE.  The brief's global
+        rule — nothing may be activated while a pawn is still on START — is
+        deliberately not implemented inside the four abilities this stage
+        touches.  A rule written four times is a rule the fifth ability will
+        not have, and the fifth ability is the one that will be written by
+        somebody who never read this paragraph.
+
+        Sesja na PG's lock lives here too, so that ``_use_ability`` asks one
+        question rather than a growing list of them and the interface can grey
+        the button using the same answer the engine will give.
+        """
+        if self.abilities_locked:
+            return "Sesja na PG — umiejętności postaci są zablokowane"
+        waiting = self.pawns_on_start()
+        if waiting:
+            names = ", ".join(
+                pawn.name for pawn in self.library.pawns if pawn.id in waiting
+            )
+            return (f"Nie można używać umiejętności, dopóki pionki stoją na "
+                    f"starcie ({names})")
+        return None
 
     def leading_pawn(self) -> Optional[str]:
         """The single pawn furthest along the road, or ``None`` if it is a tie.
@@ -701,6 +992,9 @@ class GameState:
         cmd.PlaceMod, cmd.KeepChestCards, cmd.DrawCharacter, cmd.DrawSkill,
         cmd.DiscardTopCharacterCard, cmd.ToggleMark, cmd.RenamePlayer,
         cmd.EndTurn, cmd.ChooseMod, cmd.VoteMod,
+        # Answering a movement is about a particular seat — and it happens on
+        # SOMEBODY ELSE's turn, so it is owned but deliberately not turn-bound.
+        cmd.AcceptMovement, cmd.BlockMovement,
     )
 
     #: Commands that are a *move*.  Outside edit mode they may only be issued
@@ -963,6 +1257,21 @@ class GameState:
         if not result.ok:
             return [self._refusal_event(result, command.kind)]
 
+        # THE CHECKPOINT IS TAKEN HERE, after the questions and the refusals
+        # and before anything moves.  Earlier would photograph a table that was
+        # never reached (a card that turns out to be illegal changes nothing);
+        # later would photograph the change itself.  It also CLOSES the
+        # previous player's window — see ``_open_turn_window``.
+        self._open_turn_window(player.index, card.uid)
+
+        # Nie masz Rosji.  The plan is RESOLVED and then set aside: the card
+        # stays in the hand, the board is untouched, and nothing that a
+        # movement causes — a tower, a check, a victory — has happened yet.
+        # Accepting replays this exact command; blocking never runs it at all.
+        held = self._open_movement_decision(player, card, command, result)
+        if held is not None:
+            return held
+
         events = self._execute(result, player.index)
         player.remove_card(card)
         self.decks[card.deck_id].return_card(card)
@@ -971,6 +1280,189 @@ class GameState:
                           result.description)
         )
         events.extend(self._after_play(player, card))
+        return events
+
+    # ── pausing a movement (Nie masz Rosji, Przerwanie Systemowe) ────────────
+    #: Kept as a name because tests and the interface read it, but the list
+    #: itself now lives in ``effects.blockable_decks`` — a veto narrows it per
+    #: variant, and two copies would drift the moment one of them did.
+    _BLOCKABLE_DECKS = effects.blockable_decks()
+
+    def _open_movement_decision(
+        self, player: Player, card: Card, command: cmd.PlayCard, result
+    ) -> Optional[List[ev.GameEvent]]:
+        """Hold this movement if an opponent is entitled to stop it.
+
+        Returns the events to send instead of playing the card, or ``None``
+        when the card should simply be played — which is the ordinary case and
+        the one every other card in the game takes.
+
+        The AUTOMATIC FINAL BLOCK is decided here rather than after a window,
+        because a window nobody has a reason to answer is not a decision: if
+        this is the last movement the veto could ever stop, the card promised
+        one block and this is it.
+        """
+        if self.pending_movement is not None:
+            return None
+        if self._resolved_movement == card.uid:
+            return None
+        if card.deck_id not in effects.blockable_decks():
+            return None
+        if not effects.plan_moves_pawns(result):
+            return None
+        blockers = self._blockers_for(player.index, card.deck_id)
+        if not blockers:
+            return None
+
+        forced = [seat for seat in blockers
+                  if self._veto_is_last_chance(self.veto_of(seat), player.index)]
+        if forced:
+            # Lowest seat, so every replica picks the same one without anybody
+            # being asked — the same fixed tie-break the rest of the engine uses.
+            return self._apply_block(forced[0], player, card, automatic=True)
+
+        self.pending_movement = PendingMovementDecision(
+            player_index=player.index, card_uid=card.uid, deck_id=card.deck_id,
+            title=card.title, choices=dict(command.choices or {}),
+            blockers=blockers, seconds=self.block_decision_seconds,
+        )
+        return [ev.MovementDecisionOpened(
+            player_index=player.index, card_uid=card.uid, title=card.title,
+            deck_id=card.deck_id, blockers=list(blockers),
+            seconds=self.block_decision_seconds,
+        )]
+
+    def _resume_movement(self) -> List[ev.GameEvent]:
+        """Let the held card be played after all.
+
+        Replays the ORIGINAL command through the ordinary path, with the
+        decision cleared so it is not held a second time.  Nothing has changed
+        in between — every other command is refused while a decision is open —
+        so the effect resolves to what it resolved to before.
+        """
+        decision = self.pending_movement
+        self.pending_movement = None
+        if decision is None:
+            return []
+        self._resolved_movement = decision.card_uid
+        try:
+            return self._play_card(cmd.PlayCard(
+                player_index=decision.player_index,
+                card_uid=decision.card_uid,
+                choices=dict(decision.choices),
+            ))
+        finally:
+            self._resolved_movement = None
+
+    def _apply_block(self, seat: int, player: Player, card: Card,
+                     automatic: bool = False) -> List[ev.GameEvent]:
+        """Stop a movement: spend the veto, discard the card, pass the turn.
+
+        THE MOVEMENT NEVER HAPPENS.  There is no board change to undo and no
+        consequence to prevent afterwards, because the plan is simply dropped —
+        which is why a blocked movement cannot have moved a pawn onto a tower,
+        cannot have triggered a check and cannot have won anybody the game.
+
+        The card goes through the ordinary card lifecycle: out of the hand and
+        onto its own deck's discard pile, exactly as a played card does, and
+        the turn ends the way playing that card would have ended it.
+        """
+        status = self.veto_of(seat)
+        events: List[ev.GameEvent] = []
+        if status is not None:
+            self.statuses.spend_charge(status)
+            events.append(ev.StatusEnded(
+                status.kind.value, status.subject.value, status.subject_id,
+                STATUS_LABELS.get(status.kind, status.kind.value)))
+        self.pending_movement = None
+
+        player.remove_card(card)
+        self.decks[card.deck_id].return_card(card)
+        events.append(ev.MovementBlocked(
+            blocker_index=seat, player_index=player.index, card_uid=card.uid,
+            title=card.title, deck_id=card.deck_id, automatic=automatic,
+        ))
+        events.append(ev.CardDiscarded(player.index, card.deck_id, card.uid))
+        events.extend(self._after_play(player, card))
+        return events
+
+    def _decision_card(self):
+        """The held card and its owner, or ``(None, None)``."""
+        decision = self.pending_movement
+        if decision is None:
+            return None, None
+        player = self.player(decision.player_index)
+        if player is None:
+            return None, None
+        return player, player.card_by_uid(decision.card_uid)
+
+    def _accept_movement(self, command: cmd.AcceptMovement) -> List[ev.GameEvent]:
+        """One blocker says "let it happen".
+
+        The veto is NOT spent — the card promises one block during its whole
+        life, and declining to use it here leaves it available for the next
+        eligible movement.  The window closes once every blocker has said so,
+        because one hunter's acceptance must not spend Piotrek's chance.
+        """
+        decision = self.pending_movement
+        if decision is None:
+            return [ev.ActionRejected("Nie ma ruchu do rozpatrzenia",
+                                      command.kind)]
+        seat = int(command.player_index)
+        if seat not in decision.blockers:
+            return [ev.ActionRejected("Nie możesz rozpatrywać tego ruchu",
+                                      command.kind)]
+        if seat not in decision.accepted:
+            decision.accepted.append(seat)
+        events: List[ev.GameEvent] = [ev.MovementAccepted(
+            blocker_index=seat, player_index=decision.player_index,
+            card_uid=decision.card_uid, timeout=False,
+        )]
+        if decision.waiting_for:
+            return events
+        events.extend(self._resume_movement())
+        return events
+
+    def _block_movement(self, command: cmd.BlockMovement) -> List[ev.GameEvent]:
+        """One blocker stops the movement.  First one through wins.
+
+        The authority applies commands one at a time and in order, so the
+        second blocker's message finds no decision to answer and is refused —
+        which is what stops two machines from independently cancelling the same
+        movement.
+        """
+        decision = self.pending_movement
+        if decision is None:
+            return [ev.ActionRejected("Nie ma ruchu do zablokowania",
+                                      command.kind)]
+        seat = int(command.player_index)
+        if seat not in decision.blockers:
+            return [ev.ActionRejected("Nie możesz zablokować tego ruchu",
+                                      command.kind)]
+        player, card = self._decision_card()
+        if player is None or card is None:
+            self.pending_movement = None
+            return [ev.ActionRejected("Karty już nie ma", command.kind)]
+        return self._apply_block(seat, player, card)
+
+    def _expire_movement_decision(
+        self, command: cmd.ExpireMovementDecision
+    ) -> List[ev.GameEvent]:
+        """The window ran out: the movement is accepted, nobody's veto is spent.
+
+        AUTHORITY ONLY.  The countdown a client draws is a picture of this
+        command arriving, never the thing that decides it — a machine with a
+        fast clock cannot time anybody else out, and one with a slow clock
+        cannot give itself longer to think.
+        """
+        decision = self.pending_movement
+        if decision is None:
+            return []
+        events: List[ev.GameEvent] = [ev.MovementAccepted(
+            blocker_index=-1, player_index=decision.player_index,
+            card_uid=decision.card_uid, timeout=True,
+        )]
+        events.extend(self._resume_movement())
         return events
 
     # ── the automatic turn loop ──────────────────────────────────────────────
@@ -988,6 +1480,17 @@ class GameState:
         """
         if not RULES.auto_turn_flow or card.deck_id != settings.DECK_MOVEMENT:
             return []
+        if self.extra_play_pending(player.index):
+            # LISKOWY KONKURS, USED BEFORE THE MOVE: the turn does not pass
+            # after the first card.  No refill either — the extra card was
+            # dealt when the ability was activated, and drawing again here
+            # would hand out a third.
+            self.extra_plays[player.index] -= 1
+            if self.extra_plays[player.index] <= 0:
+                self.extra_plays.pop(player.index, None)
+            return [ev.ExtraPlayUsed(player_index=player.index,
+                                     plays_left=int(self.extra_plays.get(
+                                         player.index, 0)))]
         events = self._refill_movement_hand(player)
         events.extend(self._end_turn())
         return events
@@ -1017,10 +1520,211 @@ class GameState:
             held += 1
         return events
 
+    # ── Nie masz Rosji: the veto, and what a "full round" means ─────────────
+    @property
+    def block_decision_seconds(self) -> float:
+        """How long an opponent gets to answer a blockable movement."""
+        return float(max(RULES.block_decision_min,
+                         min(RULES.block_decision_max,
+                             int(self.config.block_decision_seconds))))
+
+    @property
+    def check_decision_seconds(self) -> float:
+        """How long Piotrek gets to answer a check he may refuse."""
+        return float(max(RULES.block_decision_min,
+                         min(RULES.block_decision_max,
+                             int(getattr(self.config, "check_decision_seconds",
+                                         RULES.check_decision_default)))))
+
+    @property
+    def check_variant(self) -> str:
+        return str(getattr(self.config, "check_variant", "continue"))
+
+    @property
+    def victory_variant(self) -> str:
+        return str(getattr(self.config, "victory_variant", "own_pawn"))
+
+    def vetoes(self) -> List[Status]:
+        """Every live Nie masz Rosji, in seat order."""
+        return sorted(self.statuses.of_kind(StatusKind.MOVEMENT_VETO),
+                      key=lambda status: int(status.subject_id or 0))
+
+    def veto_of(self, seat: int) -> Optional[Status]:
+        return self.statuses.find(StatusKind.MOVEMENT_VETO, Subject.PLAYER,
+                                  str(seat))
+
+    def are_opponents(self, one: int, other: int) -> bool:
+        """Whether these two seats are on opposite sides of the table.
+
+        THE ONLY DEFINITION OF "OPPONENT" IN THIS FEATURE, and it is read from
+        the roles the game already has: Piotrek against every hunter, every
+        hunter against Piotrek, and no hunter against another hunter.  No
+        character title appears anywhere near it.
+        """
+        first, second = self.player(one), self.player(other)
+        if first is None or second is None or one == other:
+            return False
+        return first.is_piotrek != second.is_piotrek
+
+    def veto_covers(self, status: Status, mover: int,
+                    deck_id: Optional[str] = None) -> bool:
+        """Whether this veto is entitled to stop THIS movement.
+
+        THE ONE PLACE THE VARIANTS DIFFER, and everything downstream — the
+        window, the countdown, the automatic final block, the interface's
+        buttons — asks it rather than working the answer out again.  Two
+        questions, both read off the status rather than off a card title:
+
+        * WHO is moving.  ``opponents`` is Nie masz Rosji's rule, anybody on
+          the other side of the table.  ``piotrek`` is Przerwanie Systemowe's,
+          and it is narrower than "opponent" even for a hunter — a table with
+          no Piotrek seat gives nobody to interrupt rather than everybody.
+        * WHAT they played.  The deck, which is the game's own card category:
+          Przerwanie Systemowe's variants 2 and 4 allow the movement deck only,
+          so a Chest card that moves a pawn passes ``are_opponents`` and is
+          still not blockable by them.
+
+        ``deck_id`` of ``None`` asks the looser question "could this veto ever
+        stop a movement by that seat", which is what the last-chance simulation
+        needs when it is looking ahead at turns whose cards do not exist yet.
+        """
+        owner = int(status.subject_id or 0)
+        targets = str(status.data.get("targets", effects.VETO_OPPONENTS))
+        if targets == effects.VETO_PIOTREK:
+            piotrek = self.piotrek_seat
+            if piotrek is None or mover != piotrek or owner == piotrek:
+                return False
+        elif not self.are_opponents(owner, mover):
+            return False
+        if deck_id is None:
+            return True
+        allowed = status.data.get("decks") or effects.blockable_decks()
+        return deck_id in [str(deck) for deck in allowed]
+
+    def _note_turn_completed(self, seat: int) -> List[ev.GameEvent]:
+        """A seat has finished a turn: age every veto by that much.
+
+        A FULL ROUND IS NOT THE ROUND COUNTER.  It is "everybody has had a
+        turn since the card was played", which is a different thing on this
+        table because the round counter restarts on a cadence in which Piotrek
+        holds every third slot — so his second appearance inside one round must
+        not end anything, and a round boundary in the middle of the effect must
+        not either.  Each veto therefore carries the set of seats that still
+        owe it a turn; when that empties, one full round has passed.
+        """
+        events: List[ev.GameEvent] = []
+        for status in self.vetoes():
+            if int(status.data.get("rounds", 1)) == effects.UNLIMITED_ROUNDS:
+                # Przerwanie Systemowe's variants 1 and 2: no clock at all.
+                # It is spent by being used or it is not spent, and turns
+                # passing do nothing to it.
+                continue
+            pending = [int(s) for s in status.data.get("pending", [])]
+            if seat in pending:
+                pending.remove(seat)
+            if pending:
+                status.data["pending"] = pending
+                continue
+            left = int(status.data.get("rounds_left", 1)) - 1
+            status.data["rounds_left"] = left
+            if left <= 0:
+                self.statuses.discard(status)
+                events.append(ev.StatusEnded(
+                    status.kind.value, status.subject.value,
+                    status.subject_id,
+                    STATUS_LABELS.get(status.kind, status.kind.value)))
+                continue
+            # Another full round begins, and it owes the same debt again —
+            # every seat except the one whose veto this is, which has just been
+            # given its turn back by the round that ended.
+            status.data["pending"] = [
+                player.index for player in self.players
+                if str(player.index) != status.subject_id
+            ]
+        return events
+
+    def _upcoming_seats(self, limit: int = 200) -> List[int]:
+        """The seats that will act after the current one, in order.
+
+        Walks the real cadence forward through as many rounds as it needs,
+        which is the only honest way to answer "is there another opponent turn
+        before this expires?" on a table where one seat holds every third slot.
+        """
+        seats: List[int] = []
+        round_number = self.round_number
+        slot = self.current_slot()
+        order = self.seat_order(round_number)
+        while len(seats) < limit:
+            slot += 1
+            if slot >= len(order):
+                round_number += 1
+                order = self.seat_order(round_number)
+                slot = 0
+                if not order:
+                    break
+            seats.append(order[slot])
+        return seats
+
+    def _veto_is_last_chance(self, status: Status, mover: int) -> bool:
+        """Whether this movement is the veto's FINAL opportunity.
+
+        Simulates the rest of the effect's life against the real turn order:
+        the current turn completes, seats keep completing turns, full rounds
+        keep elapsing, and the question is whether any LATER turn belongs to an
+        opponent of the veto's owner while the effect is still alive.  If none
+        does, this movement is the last one it could ever stop — which is when
+        the brief says it fires by itself rather than opening a window nobody
+        would have a reason to answer.
+        """
+        owner = int(status.subject_id or 0)
+        pending = {int(s) for s in status.data.get("pending", [])}
+        rounds_left = int(status.data.get("rounds_left", 1))
+        unlimited = int(status.data.get("rounds", 1)) == effects.UNLIMITED_ROUNDS
+        everyone = [player.index for player in self.players]
+
+        def complete(seat: int) -> bool:
+            """Age the simulated veto by one finished turn.  False = expired."""
+            nonlocal pending, rounds_left
+            if unlimited:
+                # A veto with no expiry is never on its last chance because a
+                # turn passed; only a table with no opponent turns left at all
+                # could end it, and the walk below decides that.
+                return True
+            pending.discard(seat)
+            if pending:
+                return True
+            rounds_left -= 1
+            if rounds_left <= 0:
+                return False
+            pending = {index for index in everyone if index != owner}
+            return True
+
+        if not complete(mover):
+            return True
+        for seat in self._upcoming_seats():
+            if self.veto_covers(status, seat):
+                return False        # another chance is still to come
+            if not complete(seat):
+                return True
+        return True
+
+    def _blockers_for(self, mover: int,
+                      deck_id: Optional[str] = None) -> List[int]:
+        """Seats that may stop a movement made by ``mover``.
+
+        The DECK is passed through, so a veto restricted to Movement Cards is
+        simply not a blocker for a Chest card — it is not asked, no window
+        opens for it, and its interface shows nothing.  That is the whole of
+        Przerwanie Systemowe's variants 2 and 4.
+        """
+        return [int(status.subject_id) for status in self.vetoes()
+                if self.veto_covers(status, mover, deck_id)]
+
     def _end_turn(self, depth: int = 0) -> List[ev.GameEvent]:
         """Hand the turn to whoever the cadence says is next, then start it."""
+        events_veto = self._note_turn_completed(self.active_player_index)
         upcoming = self.next_turn()
-        events: List[ev.GameEvent] = []
+        events: List[ev.GameEvent] = list(events_veto)
         if upcoming.round_number != self.round_number:
             events.extend(self._begin_round(upcoming.round_number))
         # The cursor is MOVED, never looked up.  ``order.index(seat)`` would
@@ -1037,7 +1741,33 @@ class GameState:
         self.turn_counter += 1
         events.append(ev.ActivePlayerChanged(upcoming.seat))
         events.extend(self._expire_statuses())
+        events.extend(self._expire_full_round_statuses(upcoming.seat))
         events.extend(self._begin_turn(depth))
+        return events
+
+    def _expire_full_round_statuses(self, seat: int) -> List[ev.GameEvent]:
+        """End effects that were to last until this seat played again.
+
+        "One full round" for a character ability is "until the turn comes back
+        to the player who used it" — Big D Randy's freeze lasts from his turn
+        to his next turn, which is what the brief means and what the round
+        counter cannot express (a round is a variable number of turns here).
+
+        Checked when the seat BEGINS a turn, not when it ends one, so the
+        effect is already gone by the time that player acts.  ``granted_turn``
+        keeps the activation's own turn from satisfying it immediately.
+        """
+        events: List[ev.GameEvent] = []
+        for status in list(self.statuses.all()):
+            owner = status.data.get(effects.FULL_ROUND_KEY)
+            if owner is None or int(owner) != int(seat):
+                continue
+            if self.turn_counter <= int(status.data.get("granted_turn", -1)):
+                continue
+            self.statuses.discard(status)
+            events.append(ev.StatusEnded(
+                status.kind.value, status.subject.value, status.subject_id,
+                STATUS_LABELS.get(status.kind, status.kind.value)))
         return events
 
     # ── the start of a turn, which the player may not get to play ────────────
@@ -1065,14 +1795,33 @@ class GameState:
         if depth >= MAX_TURN_INTERRUPTS:
             return []
         player = self.active_player
-        events = self._resolve_skip_turn(player)
+        # AN ELIMINATED SEAT IS SKIPPED FIRST, and skipped for ever.  Before
+        # SKIP_TURN, because a one-off skip must not be SPENT on a turn that
+        # was never going to happen; before the interrupt, because a card
+        # cannot hijack the turn of somebody who has none.  The seat stays in
+        # the order and this runs every time it comes round, so a character
+        # holding several slots loses all of them.
+        events = self._resolve_eliminated(player)
+        if events is None:
+            events = self._resolve_skip_turn(player)
         if events is None:
             events = self._resolve_turn_interrupt(player)
         if events is None:
             return []
-        events.extend(self._refill_movement_hand(player))
+        # An eliminated seat is not dealt back up to a hand size it will never
+        # play from: that would drain the movement deck one card per skipped
+        # turn for the rest of the match.  Everybody else refills as usual,
+        # because a skipped turn is still a turn spent.
+        if not player.eliminated:
+            events.extend(self._refill_movement_hand(player))
         events.extend(self._end_turn(depth + 1))
         return events
+
+    def _resolve_eliminated(self, player: Player) -> Optional[List[ev.GameEvent]]:
+        """Hand straight on past a player who is out of the game."""
+        if not player.eliminated:
+            return None
+        return [ev.TurnSkipped(player.index, "odpadł z gry")]
 
     def _resolve_skip_turn(self, player: Player) -> Optional[List[ev.GameEvent]]:
         """Spend a SKIP_TURN status, if this seat has one."""
@@ -1456,6 +2205,36 @@ class GameState:
             events.append(self._chest_reveal_event())
         if card.passive.get("hide_leader"):
             events.extend(self._hide_leading_pawn(card.uid))
+        if card.passive.get("cancel_ability_effects"):
+            events.extend(self._cancel_ability_effects())
+        return events
+
+    # ── Sesja na PG, variant 2: what is already running stops ────────────────
+    def _cancel_ability_effects(self) -> List[ev.GameEvent]:
+        """End every effect that a character ability put into play.
+
+        THE SELECTION IS BY ORIGIN, NEVER BY KIND.  A frozen pawn may be Big D
+        Randy's Granny Costume or it may be something a Chest card did, and the
+        two look identical from the outside; ``Status.origin`` is stamped where
+        the effect was resolved and is the only thing that tells them apart.
+        Clearing by kind — or clearing everything — would cancel Mods, Chest
+        promises and ordinary movement statuses along with the abilities, which
+        is a different card from the one the brief describes.
+
+        NOTHING IS REMEMBERED.  A cancelled effect does not come back when the
+        mod leaves: it was cancelled, not suspended, and the departure half of
+        :meth:`_sync_mod_states` is deliberately silent about this rule for
+        that reason.  The ability lock is a passive and lifts by itself.
+        """
+        events: List[ev.GameEvent] = []
+        for status in self.statuses.cancel_origin("ability"):
+            events.append(ev.StatusEnded(
+                status.kind.value, status.subject.value, status.subject_id,
+                STATUS_LABELS.get(status.kind, status.kind.value),
+            ))
+        # A frozen pawn that has just been unfrozen is a pawn whose picture on
+        # the board is now wrong, and the board reads the statuses rather than
+        # being told, so there is nothing else to do here.
         return events
 
     # ── Paczka: every Chest card is face up ──────────────────────────────────
@@ -1528,6 +2307,12 @@ class GameState:
         riders = list(self.board.carried_pawns(pawn_id))
         tile = self.board.pawn_tile(pawn_id)
         self.board.remove_pawn(pawn_id)
+        # A pawn that is no longer on the board cannot go on being frozen in
+        # place (brief §11).  The freeze ends NOW rather than being suspended:
+        # when the pawn comes back a round later it comes back free, and the
+        # blue field highlight — which is drawn from the status — goes with it
+        # rather than being left behind on a field the pawn has left.
+        events = self._thaw_dragged(pawn_id)
         token = self.tokens.get(pawn_id)
         if token is not None:
             token.tile_index = None
@@ -1543,8 +2328,8 @@ class GameState:
                   "mod_uid": mod_uid},
             source="Shady",
         ))
-        return [ev.PawnHidden(pawn_id=pawn_id, riders=riders,
-                              round_number=self.round_number)]
+        return events + [ev.PawnHidden(pawn_id=pawn_id, riders=riders,
+                                       round_number=self.round_number)]
 
     def _restore_hidden_pawns(self, before_round: Optional[int] = None
                               ) -> List[ev.GameEvent]:
@@ -1712,15 +2497,21 @@ class GameState:
             return [ev.ActionRejected(
                 f"Umiejętność „{card.skill or card.title}” została już zużyta",
                 command.kind)]
-        if self.abilities_locked:
-            # Sesja na PG.  Refused BEFORE anything resolves, so no charge is
-            # spent and nothing is animated: when the mod leaves the rack the
-            # player has exactly the uses they walked in with.  In the engine
-            # rather than in the interface for the usual reason — a client that
-            # simply does not grey the button must still be unable to act.
+        if player.eliminated:
+            # A player who guessed wrong is an observer.  Their remaining
+            # charges are still printed on the card and still shown, and none
+            # of them may ever be spent again.
             return [ev.ActionRejected(
-                "Sesja na PG — umiejętności postaci są zablokowane",
-                command.kind)]
+                "Odpadłeś z gry — nie możesz używać umiejętności", command.kind)]
+        # THE GLOBAL GATE.  Sesja na PG and the pawns-on-START rule, asked as
+        # one question so that no ability can be added that forgets either.
+        # Refused BEFORE anything resolves, so no charge is spent and nothing
+        # is animated.  In the engine rather than in the interface for the
+        # usual reason — a client that simply does not grey the button must
+        # still be unable to act.
+        blocked = self.ability_refusal()
+        if blocked is not None:
+            return [ev.ActionRejected(blocked, command.kind)]
 
         title = card.skill or card.title
         result = effects.resolve_ability(self, card, player.index, command.choices)
@@ -1800,7 +2591,19 @@ class GameState:
         return events
 
     def _op_move_pawn(self, op: effects.MovePawn, actor: int) -> List[ev.GameEvent]:
-        """Move a pawn (and everything travelling with it) along its route."""
+        """Move a pawn (and everything travelling with it) along its route.
+
+        THE GROUP IS PUT DOWN IN THE ORDER IT WAS PICKED UP.  ``carried`` is
+        ordered bottom-to-top over the board the move started from, and the
+        mover's own place in that order is not always the bottom — a pawn
+        linked to it by Radar may have been standing UNDER it.  Sorting the
+        whole group before placing is what keeps a linked pair the right way up
+        after a move made from either end of it; placing the mover first and
+        the riders on top would silently invert the pair.
+
+        For an ordinary tower the mover IS the bottom, so this is exactly the
+        old behaviour with the order written down instead of assumed.
+        """
         tiles = list(op.tiles)
         if not tiles:
             return []
@@ -1811,9 +2614,29 @@ class GameState:
             if tile is not None:
                 waypoints.append(tile.position)
 
-        self.board.place_pawn(op.pawn_id, destination)
-        for rider in op.carried:
-            self.board.place_pawn(rider, destination)
+        group = [op.pawn_id, *op.carried]
+        group.sort(key=lambda pawn_id: effects.stack_order_key(self, pawn_id))
+
+        # DŁUG U TOMASZA, asked once, here.  Every movement in the game lands
+        # through this operation, so a pair that may not neighbour is protected
+        # from cards nobody has written yet — no effect needs to know the ban
+        # exists.  The move is CANCELLED rather than trimmed: shortening it
+        # would invent a distance the card never had, and the brief asks for
+        # the offending movement to be stopped, not rewritten.  Other pawns'
+        # movements are untouched, because this operation only ever describes
+        # one group.
+        landing = self.board.tile(destination)
+        if landing is not None:
+            would_be = {pawn_id: landing.slot for pawn_id in group}
+            clash = effects.separation_blocks(self, would_be)
+            if clash is not None:
+                first, second = clash
+                return [ev.MoveFizzled(
+                    f"Dług u Tomasza: {self.library.pawn(first).name} i "
+                    f"{self.library.pawn(second).name} nie mogą sąsiadować",
+                    op.pawn_id)]
+        for pawn_id in group:
+            self.board.place_pawn(pawn_id, destination)
         self._sync_token_positions()
 
         backward = bool(op.route) and op.route[0] < op.from_index
@@ -1895,6 +2718,125 @@ class GameState:
 
     def _op_turn_lost(self, op: effects.TurnLost, actor: int) -> List[ev.GameEvent]:
         return [ev.TurnSkipped(op.player_index, op.source)]
+
+    def _op_spend_ability_use(
+        self, op: effects.SpendAbilityUse, actor: int
+    ) -> List[ev.GameEvent]:
+        """Charge a use to the character whose ability Herold borrowed.
+
+        The card the OWNER is holding, not a copy of its definition: the
+        exception is a per-match lobby setting, so nothing about the printed
+        ability may change.
+        """
+        player = self.player(int(op.player_index))
+        card = getattr(player, "character", None) if player is not None else None
+        if card is None or not card.ability_available:
+            return []
+        card.spend_use()
+        title = op.title or (card.skill or card.title)
+        return [ev.AbilityUsed(int(op.player_index), title,
+                               "użycie zabrane przez Herolda",
+                               int(card.uses_left or 0))]
+
+    def _op_grant_extra_play(
+        self, op: effects.GrantExtraPlay, actor: int
+    ) -> List[ev.GameEvent]:
+        """An extra card, dealt now, and a second play owed this turn."""
+        player = self.player(int(op.player_index))
+        if player is None:
+            return []
+        events: List[ev.GameEvent] = []
+        deck = self.decks[settings.DECK_MOVEMENT]
+        if not player.hand_is_full:
+            drawn = deck.take_card()
+            if drawn is not None:
+                player.add_card(drawn)
+                events.append(ev.CardDrawn(player.index, deck.id, drawn.uid))
+        self._grant_extra_play(int(op.player_index))
+        events.append(ev.ExtraTurnGranted(player_index=int(op.player_index),
+                                          before_move=True))
+        return events
+
+    def _op_grant_extra_turn(
+        self, op: effects.GrantExtraTurn, actor: int
+    ) -> List[ev.GameEvent]:
+        """Give the turn back, WITHOUT rewinding the move that ended it.
+
+        The previous card stays played and discarded and the card drawn at the
+        end of that turn stays in hand — it is a second turn, not a second
+        chance.  The window closes as it is taken, so the same activation
+        cannot also be undone afterwards.
+        """
+        seat = int(op.player_index)
+        if self.player(seat) is None:
+            return []
+        self.active_player_index = seat
+        self.turn_counter += 1
+        self._close_turn_window()
+        events: List[ev.GameEvent] = [
+            ev.ExtraTurnGranted(player_index=seat, before_move=False),
+            ev.ActivePlayerChanged(seat),
+        ]
+        events.extend(self._begin_turn())
+        return events
+
+    def _op_restack_tile(
+        self, op: effects.RestackTile, actor: int
+    ) -> List[ev.GameEvent]:
+        """Stand one field's tower up in a new order.
+
+        Defensive about the order it was handed: anything named that is not on
+        the field is skipped and anything on the field that was not named is
+        appended in its current order, so a stale plan reorders what it can
+        instead of dropping a pawn off the board.
+        """
+        tile = self.board.tile(op.tile_index)
+        if tile is None or not tile.stack:
+            return []
+        present = list(tile.stack)
+        ordered = [pawn_id for pawn_id in op.order if pawn_id in present]
+        ordered.extend(pawn_id for pawn_id in present if pawn_id not in ordered)
+        if ordered == present:
+            return []
+        tile.stack[:] = ordered
+        for pawn_id in ordered:
+            self.board.pawn_tiles[pawn_id] = tile.index
+        self._sync_token_positions()
+        return [ev.TileRestacked(tile_index=tile.index, order=list(ordered))]
+
+    def _op_request_pawn_check(
+        self, op: effects.RequestPawnCheck, actor: int
+    ) -> List[ev.GameEvent]:
+        """Record that a colour is being checked, and say nothing about it.
+
+        This runs on EVERY machine, which is the point: the question is public
+        and identical everywhere.  The answer arrives separately, as commands
+        from the authority, exactly as Squid Game's does.
+        """
+        self.pending_pawn_check = (op.pawn_id, int(op.staked_seat))
+        return [ev.PawnCheckRequested(pawn_id=op.pawn_id,
+                                      staked_seat=int(op.staked_seat))]
+
+    def _op_eliminate_player(
+        self, op: effects.EliminatePlayer, actor: int
+    ) -> List[ev.GameEvent]:
+        return self._eliminate_seat(int(op.player_index), op.reason)
+
+    def _eliminate_seat(self, index: int, reason: str = "") -> List[ev.GameEvent]:
+        """Put a seat out of the game, keeping it at the table.
+
+        The seat is NOT removed from ``self.players`` and NOT removed from the
+        turn order.  Both are indexed by seat number in the command log, in the
+        server's seat map and in every snapshot ever taken, so removing one
+        would renumber the others and invalidate the log.  Elimination is a
+        property of the player instead, read by ``_begin_turn`` (the turns are
+        skipped) and by ``_use_ability`` (the abilities refuse).
+        """
+        player = self.player(index)
+        if player is None or player.eliminated:
+            return []
+        player.eliminated = True
+        return [ev.PlayerEliminated(player_index=index, reason=reason)]
 
     def _op_announce(self, op: effects.Announce, actor: int) -> List[ev.GameEvent]:
         return [ev.ActionRejected(op.text, "announce")]
@@ -2150,12 +3092,21 @@ class GameState:
         The pawns are read BEFORE anything moves.  ``Tile.stack`` is the live
         list, so walking it while placing out of it would skip every other
         pawn.
+
+        A FROZEN PAWN STAYS WHERE IT IS and the rest of the tower goes without
+        it.  Asked through the shared ``pawn_may_move`` rather than tested
+        here, so this is the freeze rule and not a Gejtos rule — the operation
+        does not know which card built it, and should not.  The tower's order
+        is preserved among the pawns that do travel.
         """
         source = self.board.tile(op.from_tile)
         destination = self.board.tile(op.to_tile)
         if source is None or destination is None or not source.stack:
             return []
-        travelling = list(source.stack)
+        travelling = [pawn_id for pawn_id in source.stack
+                      if effects.pawn_may_move(self, pawn_id)]
+        if not travelling:
+            return []
         for pawn_id in travelling:
             self.board.place_pawn(pawn_id, op.to_tile, on_top=True)
         self._sync_token_positions()
@@ -2515,7 +3466,12 @@ class GameState:
             return [ev.ActionRejected("Tej talii nie można zmieniać",
                                       command.kind)]
         deck = self.decks.get(command.deck_id)
-        definition = self._definition_of(command.deck_id, command.title)
+        # THE MATCH'S reading of the card, not the printed one.  A copy added
+        # here has to be the same card as the copies already in the pile: one
+        # arriving on the printed variant while the rest play another is
+        # exactly the "two physical copies became two different cards" that
+        # the variant system exists to prevent.
+        definition = self.variant_definition(command.deck_id, command.title)
         if deck is None or definition is None:
             return [ev.ActionRejected("Nieznana karta", command.kind)]
         delta = 1 if int(command.delta) > 0 else -1
@@ -2562,6 +3518,84 @@ class GameState:
                     del pile[index]
                     return name
         return None
+
+    def _set_card_variant(self, command: cmd.SetCardVariant) -> List[ev.GameEvent]:
+        """Play one card under a different variant, from now on, for everybody.
+
+        Three things happen, in this order, and the order is the rule:
+
+        1. the match's configuration moves — this is the record, and the one
+           thing the snapshot carries;
+        2. every physical copy already in the match is re-read under the new
+           variant, so the two copies of ``Sesja na PG`` stay ONE logical card
+           rather than becoming two different ones the moment somebody clicks;
+        3. if that turned a mod already sitting in the rack into a cancelling
+           one, the cancellation fires — because becoming active and being made
+           active are the same transition to everything downstream, and the
+           brief is explicit that a card already in play must not have to be
+           played again.
+
+        Step 3 is asked as "did the RACK's answer change", not "was this card
+        the one edited": the rule belongs to the rack (``mod_rule``), so a
+        second copy arriving later, a Rage Quit, or an edit to a card nobody
+        has in play all give the same honest answer.
+        """
+        definition = self._definition_of(command.deck_id, command.title)
+        if definition is None or not definition.has_variants:
+            return [ev.ActionRejected("Ta karta nie ma wariantów", command.kind)]
+        wanted = str(command.variant)
+        if wanted not in definition.variant_ids:
+            return [ev.ActionRejected(
+                f"Karta „{command.title}” nie ma wariantu {wanted!r}",
+                command.kind)]
+        key = (command.deck_id, command.title)
+        if self.card_variants.get(key) == wanted:
+            return [ev.ActionRejected(
+                f"„{command.title}” już gra w tym wariancie", command.kind)]
+
+        was_cancelling = self.cancels_ability_effects
+        self.card_variants[key] = wanted
+        chosen = definition.with_variant(wanted)
+        self._reread_copies(command.deck_id, command.title, chosen)
+
+        events: List[ev.GameEvent] = []
+        cancelled = 0
+        if self.cancels_ability_effects and not was_cancelling:
+            cancelled_events = self._cancel_ability_effects()
+            cancelled = len(cancelled_events)
+            events.extend(cancelled_events)
+        variant = chosen.variant_def(wanted)
+        events.append(ev.CardVariantChanged(
+            deck_id=command.deck_id, title=command.title, variant=wanted,
+            label=variant.label if variant else "", text=chosen.text,
+            cancelled=cancelled,
+        ))
+        return events
+
+    def _reread_copies(self, deck_id: str, title: str,
+                       definition: CardDef) -> int:
+        """Point every copy of a title at a new reading of its definition.
+
+        The DEFINITION is what a variant changes, and a definition is shared by
+        every copy — so this is how "the same logical card" survives a variant
+        change with two physical copies in the rack, a third in a hand and a
+        fourth in the discard pile.  The uid, the remaining uses and the card's
+        position are untouched: it is the same card, read differently.
+
+        A TRANSFORMED card (Gamechanger) is followed on both sides, so a card
+        that is currently something else still comes back to the right reading
+        of what it was printed as.
+        """
+        changed = 0
+        for card in self.cards_of_deck(deck_id):
+            if card.definition.title == title:
+                card.definition = definition
+                changed += 1
+            if (card.original_definition is not None
+                    and card.original_definition.title == title):
+                card.original_definition = definition
+                changed += 1
+        return changed
 
     # ── abilities: the default and what is left of it ────────────────────────
     #
@@ -2659,6 +3693,12 @@ class GameState:
         # Pawns riding on top travel with the one below — the tower rule.
         carried = self.board.carried_pawns(token.id)
         token.held = False
+        # DRAGGING A PAWN BY HAND ENDS ITS FREEZE, on purpose (brief §7).  This
+        # is the testing tool, not a move: it is the one path in the game that
+        # is not a card, an ability or a rule, so it is the one path that is
+        # allowed to overrule one.  Everything else in the game asks
+        # ``effects.pawn_may_move`` and is refused.
+        thaw = self._thaw_dragged(token.id, carried)
 
         if command.tile_index is not None:
             tile = self.board.tile(command.tile_index)
@@ -2669,7 +3709,7 @@ class GameState:
                 self.board.place_pawn(rider, tile.index)
             self._sync_token_positions()
             token.tile_index = tile.index
-            return [
+            return thaw + [
                 ev.TokenMoved(
                     token.id, origin, token.position, tile.index, list(carried), snapped=True
                 )
@@ -2680,10 +3720,74 @@ class GameState:
         token.tile_index = None
         token.position = (float(command.x), float(command.y))
         self._sync_token_positions()
-        return [ev.TokenMoved(token.id, origin, token.position, None, [], snapped=False)]
+        return thaw + [
+            ev.TokenMoved(token.id, origin, token.position, None, [], snapped=False)
+        ]
+
+    def _thaw_dragged(self, pawn_id: str,
+                      carried: Sequence[str] = ()) -> List[ev.GameEvent]:
+        """Drop the temporary effects on a pawn that is being moved by hand.
+
+        The testing tool is not a move, and it is the one path in the game that
+        is allowed to overrule a rule.  Granny Costume's freeze goes, and so
+        does an Ondrej link — a pair whose halves have just been put on
+        different fields by hand is not a pair any of the movement rules could
+        honour, and leaving the status behind would mean the next card dragged
+        one of them back to the other.
+
+        The riders matter for the freeze: the tower rule carries them, so they
+        are being moved too, and a pawn that has just been physically moved
+        while still marked frozen is a board whose blue highlight is a lie.
+        """
+        events: List[ev.GameEvent] = []
+        for moved in [pawn_id, *carried]:
+            status = self.statuses.find(StatusKind.FROZEN, Subject.PAWN, moved)
+            if status is None:
+                continue
+            self.statuses.discard(status)
+            events.append(ev.StatusEnded(
+                status.kind.value, status.subject.value, status.subject_id,
+                STATUS_LABELS.get(status.kind, status.kind.value)))
+        # The link is a status about a PAIR, not about one pawn, so it is
+        # looked up by membership rather than by subject id.  Dług u Tomasza's
+        # separation ban is the same shape and goes the same way: both are
+        # promises about where two pawns stand relative to each other, and
+        # hand-placing one of them is exactly the move that can make the
+        # promise impossible to keep.
+        for moved in [pawn_id, *carried]:
+            for status in [effects.link_status(self, moved),
+                           self._adjacency_ban(moved)]:
+                if status is None or status not in self.statuses.all():
+                    continue
+                self.statuses.discard(status)
+                events.append(ev.StatusEnded(
+                    status.kind.value, status.subject.value, status.subject_id,
+                    STATUS_LABELS.get(status.kind, status.kind.value)))
+        return events
+
+    def _adjacency_ban(self, pawn_id: str) -> Optional[Status]:
+        """The Dług u Tomasza status covering this pawn, or ``None``."""
+        for status in self.statuses.of_kind(StatusKind.FORBIDDEN_ADJACENCY):
+            if pawn_id in [str(m) for m in status.data.get("members", [])]:
+                return status
+        return None
+
+    def _release_check_lock(self) -> None:
+        """Drop the post-refusal lock once the pawns are no longer gathered.
+
+        Read from the board rather than remembered: any effect at all that
+        breaks the tower — a card, an ability, a manual drag — separates the
+        pawns, and none of them should have to know Ice Block exists.
+        """
+        if not self.check_needs_separation:
+            return
+        from . import victory as _victory
+        if _victory.gathering_tile(self) is None:
+            self.check_needs_separation = False
 
     def _sync_token_positions(self) -> None:
         """Re-read every stacked pawn's position from the board."""
+        self._release_check_lock()
         for token in self.tokens.values():
             placed = self.board.pawn_position(token.id)
             if placed is not None:
@@ -2766,6 +3870,39 @@ class GameState:
             return None
         return "Najpierw wybierzcie Mody Patusa"
 
+    #: The only commands that mean anything while a movement is waiting to be
+    #: answered.  Everything else is refused — the table is genuinely stopped,
+    #: and a card played into the pause would resolve against a board that is
+    #: about to change (or about to not change).
+    _DECISION_COMMANDS = (cmd.AcceptMovement, cmd.BlockMovement,
+                          cmd.ExpireMovementDecision)
+
+    def _movement_decision_refusal(self, command: cmd.Command) -> Optional[str]:
+        """Why nothing else may happen while a movement is being answered."""
+        if self.pending_movement is None:
+            return None
+        if isinstance(command, self._DECISION_COMMANDS):
+            return None
+        if isinstance(command, (self._TURN_BOUND, cmd.PlayCard, cmd.PlaceMod)):
+            return "Trwa decyzja o zablokowaniu ruchu"
+        return None
+
+    #: What an eliminated player MAY still do.  They are an observer, not a
+    #: ghost: they keep their name, and a movement decision put to the table is
+    #: put to them as well.  Everything else is acting, and they are out.
+    _ALLOWED_WHEN_ELIMINATED = (cmd.RenamePlayer, cmd.AcceptMovement,
+                                cmd.BlockMovement, cmd.ToggleMark)
+
+    def _reject_eliminated(self, command: cmd.Command) -> Optional[ev.GameEvent]:
+        """Why a player who is out of the game may not do this."""
+        if isinstance(command, self._ALLOWED_WHEN_ELIMINATED):
+            return None
+        player = self.player(int(getattr(command, "player_index", -1)))
+        if player is None or not player.eliminated:
+            return None
+        return ev.ActionRejected("Odpadłeś z gry — możesz tylko obserwować",
+                                 command.kind)
+
     def _authorise(self, command: cmd.Command) -> Optional[ev.GameEvent]:
         """Is this machine allowed to issue this command right now?"""
         if not isinstance(command, cmd.AUTHORITY_ONLY):
@@ -2775,12 +3912,25 @@ class GameState:
             paused = self._mod_selection_refusal(command)
             if paused is not None:
                 return ev.ActionRejected(paused, command.kind)
+        held = self._movement_decision_refusal(command)
+        if held is not None:
+            return ev.ActionRejected(held, command.kind)
         if isinstance(command, self._OWNED_BY_PLAYER):
             refusal = self._reject_foreign(
                 getattr(command, "player_index", 0), command.kind
             )
             if refusal is not None:
                 return refusal
+            # AN ELIMINATED SEAT MAY NOT ACT AT ALL.  In the authorisation
+            # layer rather than in ``_use_ability`` alone, because the brief
+            # says they cannot move EITHER — and because their turns are
+            # skipped, the only way such a command arrives is stale or
+            # malicious, which is exactly what this layer is for.  Renaming
+            # yourself and answering a movement are left alone: they are not
+            # acting, and an observer keeps their name and their vote.
+            out = self._reject_eliminated(command)
+            if out is not None:
+                return out
         if isinstance(command, self._TURN_BOUND):
             return self._reject_out_of_turn(command)
         if isinstance(command, cmd.SetActivePlayer):
@@ -2874,6 +4024,13 @@ class GameState:
         self.turn_counter += 1
         events: List[ev.GameEvent] = [ev.ActivePlayerChanged(self.active_player_index)]
         events.extend(self._expire_statuses())
+        # A seat handed the turn directly in edit mode has still had the turn
+        # come round to it, so an effect that was to last until it played again
+        # is over.  Called here as well as in ``_end_turn`` because these are
+        # the only two ways the active seat ever changes, and a rule added to
+        # one and not the other drifts.
+        events.extend(
+            self._expire_full_round_statuses(self.active_player_index))
         # A turn handed over directly is still a turn beginning.  Without this
         # a seat holding a Troll could be given the turn in edit mode and keep
         # it: the interrupt would wait for an end-of-turn that had already been
@@ -3005,12 +4162,287 @@ class GameState:
         # happened.
         if self.pending_lead_check == command.pawn_id:
             self.pending_lead_check = None
+        if (self.pending_pawn_check is not None
+                and self.pending_pawn_check[0] == command.pawn_id):
+            self.pending_pawn_check = None
+        self._arm_tower_breakup(command.pawn_id)
         if command.pawn_id in self.eliminated_pawns:
             # Not an error worth showing anybody: a colour is checked once, and
             # arriving here twice means a duplicate delivery, not a rules bug.
             return []
         self.eliminated_pawns.append(command.pawn_id)
         return [ev.PawnEliminated(command.pawn_id)]
+
+    def _eliminate_player(self, command: cmd.EliminatePlayer) -> List[ev.GameEvent]:
+        """A seat is out.  Clears the check that knocked them out, if any.
+
+        THE GAME DOES NOT END HERE.  A hunter dropping out is not a hunter
+        defeat and not a Piotrek victory: the remaining players carry on and
+        the ordinary victory conditions decide the match, exactly as they would
+        have. ``victory.review`` is not consulted about it and has nothing to
+        say about it.
+        """
+        player = self.player(command.player_index)
+        if player is None:
+            return [ev.ActionRejected("Nieznany gracz", command.kind)]
+        if (self.pending_pawn_check is not None
+                and self.pending_pawn_check[1] == command.player_index):
+            self.pending_pawn_check = None
+        events = self._eliminate_seat(int(command.player_index), command.reason)
+        if not events:
+            return []
+        # An eliminated player may be the one whose turn it is — the wrong
+        # guess is made on their own turn — so the turn has to move on, or the
+        # table waits for somebody who can no longer act.
+        if self.active_player_index == command.player_index:
+            events.extend(self._end_turn())
+        return events
+
+    def _arm_tower_breakup(self, checked: str) -> None:
+        """A check was ATTEMPTED on a tower — under variant 2 it comes apart.
+
+        THE TRIGGER IS THE ATTEMPT, NOT THE ANSWER.  Called from two places,
+        and the difference between them is the whole of this feature's trickiest
+        rule: from ``_eliminate_pawn`` when a check resolved and the colour was
+        crossed off, and from ``_refuse_check`` when Ice Block cancelled it.
+        Ice Block stops the CHECK — no identity is compared and no colour is
+        ruled out — but it does not stop the tower being pulled apart by the
+        attempt.
+
+        It used to be armed only from the elimination, so a refusal produced no
+        elimination and therefore no breakup.  That read "no check, no breakup",
+        which is one reading of the rule and not the one the game wants.
+
+        A successful check is not routed here at all: finding Piotrek ends the
+        match, and there is nothing left to scatter.
+        """
+        if self.check_variant != "break_tower":
+            return
+        from . import victory as _victory
+
+        tile = _victory.gathering_tile(self)
+        if tile is None or (checked and checked not in tile.stack):
+            # Not a tower check — Squid Game's automatic one can cross a colour
+            # off while the pawns are scattered, and there is nothing to break.
+            return
+        groups = effects.tower_breakup_plan(self, tile)
+        if not groups:
+            return
+        # A doubled row among the destinations is Piotrek's to choose a field
+        # on.  Only a group that actually MOVES gets the question: the bottom
+        # group stays on the exact tile it was already standing on, so there is
+        # nothing to decide about it even when its row happens to be doubled.
+        choice_position = next(
+            (position for position, _ in groups[1:]
+             if position != tile.slot
+             and len(self.board.tiles_at_position(position)) > 1),
+            None,
+        )
+        self.pending_breakup = PendingTowerBreakup(
+            tile_index=tile.index, groups=groups,
+            seat=self.piotrek_seat if self.piotrek_seat is not None else -1,
+            choice_position=choice_position,
+            seconds=float(RULES.tower_breakup_seconds),
+        )
+
+    def _choose_breakup_tile(
+        self, command: cmd.ChooseBreakupTile
+    ) -> List[ev.GameEvent]:
+        """Piotrek picks 2a or 2b.  ONLY Piotrek."""
+        pending = self.pending_breakup
+        if pending is None or pending.choice_position is None:
+            return [ev.ActionRejected("Nie ma czego wybierać", command.kind)]
+        if int(command.player_index) != pending.seat:
+            # NOT the player whose card built the tower.  The brief is explicit
+            # and so is this: the scattering belongs to Piotrek.
+            return [ev.ActionRejected("Tylko Piotrek wybiera pole",
+                                      command.kind)]
+        allowed = [tile.index for tile
+                   in self.board.tiles_at_position(pending.choice_position)]
+        if int(command.tile_index) not in allowed:
+            return [ev.ActionRejected("To pole nie należy do tego rzędu",
+                                      command.kind)]
+        pending.chosen_tile = int(command.tile_index)
+        return [ev.BreakupTileChosen(tile_index=int(command.tile_index),
+                                     seat=pending.seat)]
+
+    def _resolve_tower_breakup(
+        self, command: cmd.ResolveTowerBreakup
+    ) -> List[ev.GameEvent]:
+        """Scatter the tower.  Each group keeps its internal order."""
+        pending = self.pending_breakup
+        self.pending_breakup = None
+        if pending is None:
+            return []
+        events: List[ev.GameEvent] = []
+        for index, (position, pawns) in enumerate(pending.groups):
+            tiles = self.board.tiles_at_position(position)
+            if not tiles:
+                continue
+            target = tiles[0]
+            if index == 0:
+                # The bottom group has not moved, so it keeps the EXACT tile it
+                # was standing on — a tower on 4b must not shuffle across to 4a
+                # just because the group was re-placed.
+                target = next((t for t in tiles
+                               if t.index == pending.tile_index), tiles[0])
+            elif position == pending.choice_position:
+                chosen = next((t for t in tiles
+                               if t.index == pending.chosen_tile), None)
+                # No answer before the deadline: the first field, chosen the
+                # same way on every machine, rather than a hung table.
+                target = chosen if chosen is not None else tiles[0]
+            for pawn_id in pawns:          # bottom first, so the order survives
+                self.board.place_pawn(pawn_id, target.index)
+            events.append(ev.TowerGroupPlaced(
+                tile_index=target.index, position=position, pawns=list(pawns)))
+        self._sync_token_positions()
+        events.append(ev.TowerBrokeUp(tile_index=pending.tile_index))
+        return events
+
+    def _open_check_decision(
+        self, command: cmd.OpenCheckDecision
+    ) -> List[ev.GameEvent]:
+        """Pause a check and ask Piotrek.  Nothing about it is resolved yet."""
+        if self.pending_check is not None:
+            return []
+        self.pending_check = PendingCheckDecision(
+            source=str(command.source), pawn_id=str(command.pawn_id),
+            seat=int(command.seat), seconds=self.check_decision_seconds,
+        )
+        return [ev.CheckDecisionOpened(
+            pawn_id=str(command.pawn_id), seat=int(command.seat),
+            source=str(command.source), seconds=self.check_decision_seconds,
+        )]
+
+    def _allow_check(self, command: cmd.AllowCheck) -> List[ev.GameEvent]:
+        decision = self.pending_check
+        if decision is None:
+            return [ev.ActionRejected("Nie ma sprawdzenia do rozpatrzenia",
+                                      command.kind)]
+        if int(command.player_index) != decision.seat:
+            return [ev.ActionRejected("Tylko Piotrek może o tym zdecydować",
+                                      command.kind)]
+        return self._close_check_decision(timed_out=False)
+
+    def _expire_check_decision(
+        self, command: cmd.ExpireCheckDecision
+    ) -> List[ev.GameEvent]:
+        if self.pending_check is None:
+            return []
+        return self._close_check_decision(timed_out=True)
+
+    def _close_check_decision(self, timed_out: bool) -> List[ev.GameEvent]:
+        """Let the check happen.  ICE BLOCK IS NOT SPENT either way.
+
+        Saying yes and saying nothing have the same cost — none — which is the
+        brief's rule and also the only one that makes a timeout safe: a player
+        who loses their connection must not lose a charge for it.
+        """
+        decision = self.pending_check
+        if decision is None:
+            return []
+        self.pending_check = None
+        # Remembered so ``review`` resolves the check instead of asking again
+        # the moment it looks at the same unchanged tower.
+        self.check_allowed = decision.pawn_id
+        return [ev.CheckAllowed(pawn_id=decision.pawn_id, seat=decision.seat,
+                                timed_out=timed_out)]
+
+    def _refuse_check(self, command: cmd.RefuseCheck) -> List[ev.GameEvent]:
+        """Cancel the check and spend one Ice Block use.
+
+        THE CHECK IS NOT ANSWERED, so there is nothing to reveal: no colour is
+        crossed off, no identity is compared, and under checking variant 2 no
+        tower breaks — the breakup is a consequence of a FAILED check, and this
+        check never happened.
+        """
+        decision = self.pending_check
+        if decision is None:
+            return [ev.ActionRejected("Nie ma sprawdzenia do rozpatrzenia",
+                                      command.kind)]
+        if int(command.player_index) != decision.seat:
+            return [ev.ActionRejected("Tylko Piotrek może odmówić sprawdzenia",
+                                      command.kind)]
+        from . import victory as _victory
+        card = _victory.ice_block_card(self)
+        if card is None:
+            return [ev.ActionRejected("Ice Block został już zużyty",
+                                      command.kind)]
+
+        card.spend_use()
+        self.pending_check = None
+        self.check_allowed = None
+        # The card's own text: the pawns have to be separated before another
+        # check.  Without this the identical tower would be re-checked on the
+        # next command and the refusal would have bought nothing.
+        self.check_needs_separation = True
+        # ICE BLOCK STOPS THE CHECK, NOT THE CONSEQUENCE OF ATTEMPTING ONE.
+        # Under variant 2 the tower still comes apart, on the same delay: what
+        # Piotrek bought is that nobody learned anything, not that the tower
+        # stayed standing.  Armed here rather than inside the elimination
+        # handler because a refusal deliberately eliminates nothing.
+        self._arm_tower_breakup(decision.pawn_id)
+        return [ev.CheckRefused(pawn_id=decision.pawn_id, seat=decision.seat,
+                                uses_left=int(card.uses_left))]
+
+    # ── the turn window: undo, and Liskowy Konkurs ───────────────────────────
+    def _open_turn_window(self, seat: int, card_uid: int) -> None:
+        """Photograph the table, and close the previous player's window.
+
+        ONE WINDOW EXISTS AT A TIME and it belongs to the player who last
+        played a card.  The next card played is what closes it — which is
+        exactly the rule both features are written against, so they cannot
+        drift apart: the undo button and Liskowy Konkurs are offered and
+        withdrawn by the same fact.
+
+        Piotrek's own extra play under Liskowy Konkurs does NOT open a second
+        window; the checkpoint from the first card is kept, because the whole
+        turn is his and rewinding half of it would be a state nobody played.
+        """
+        if self.turn_window is not None and self.turn_window.seat == seat \
+                and self.extra_plays.get(seat, 0) > 0:
+            return
+        self.turn_window = undo.capture(self, seat, card_uid)
+
+    def _close_turn_window(self) -> None:
+        self.turn_window = None
+
+    def can_undo(self, seat: int) -> bool:
+        """Whether this seat may rewind its last turn right now."""
+        window = self.turn_window
+        return (window is not None and not window.spent
+                and window.seat == int(seat)
+                and self.phase.playable)
+
+    def _undo_move(self, command: cmd.UndoMove) -> List[ev.GameEvent]:
+        """Rewind the last played card as though it had never been played.
+
+        Everything the card touched goes back: pawns, towers, the card itself,
+        the hand, both piles, the statuses it granted, the turn it ended and
+        the charges it spent.  The card DRAWN at the end of that turn goes back
+        to the top of the draw pile as a consequence of restoring the pile's
+        order, not as a separate step — which is also why the corrective turn
+        draws that same card again.
+        """
+        seat = int(command.player_index)
+        if not self.can_undo(seat):
+            # Stale or forged: the window has closed, or it was never this
+            # player's.  The engine refuses; the button being hidden is a
+            # convenience, not the rule.
+            return [ev.ActionRejected("Nie można już cofnąć ruchu", command.kind)]
+        window = self.turn_window
+        undo.restore(self, window)
+        self.turn_window = None
+        self.extra_plays.pop(seat, None)
+        return [ev.MoveUndone(player_index=seat, card_uid=window.card_uid)]
+
+    def extra_play_pending(self, seat: int) -> bool:
+        """Whether this seat still owes a second card play this turn."""
+        return int(self.extra_plays.get(int(seat), 0)) > 0
+
+    def _grant_extra_play(self, seat: int) -> None:
+        self.extra_plays[int(seat)] = int(self.extra_plays.get(int(seat), 0)) + 1
 
     def _reveal_identity(self, command: cmd.RevealIdentity) -> List[ev.GameEvent]:
         """Alter Ego: publish the old colour and wipe the notepad down to it.
@@ -3039,6 +4471,7 @@ class GameState:
         player = self.player(seat) if seat is not None else None
         if player is not None:
             player.secret_pawn = None
+        self.pending_pawn_check = None
         self.identity_swap = self.SWAP_CHOOSING
         return [ev.IdentityRevealed(command.pawn_id, cleared)]
 
@@ -3070,6 +4503,7 @@ class GameState:
         self.victory = verdict
         self.phase = MatchPhase.ENDED
         self.pending_lead_check = None
+        self.pending_pawn_check = None
         # The reveal is now public, so the state may hold it: every client
         # learns the colour here and nowhere else.
         seat = self.player(verdict.piotrek_seat)
@@ -3138,6 +4572,14 @@ class GameState:
             # a title, and the checked colour is public the moment it is named.
             "armed_mods": sorted(self.armed_mods.items()),
             "pending_lead_check": self.pending_lead_check,
+            # The check a player ASKED for, and the seat staking itself on it.
+            # In the fingerprint for the same reason the automatic one is: two
+            # machines that disagree about whether a check is outstanding
+            # disagree about whether somebody is about to be knocked out, and
+            # nothing else here would notice.  A colour and a seat number —
+            # both public the moment the ability resolved.
+            "pending_pawn_check": (None if self.pending_pawn_check is None
+                                   else list(self.pending_pawn_check)),
             "ability_uses": {
                 p.index: [
                     card.uses_left
@@ -3156,6 +4598,29 @@ class GameState:
                 deck_id: sorted(self.deck_composition(deck_id).items())
                 for deck_id in settings.TABLE_DECKS
             },
+            # THE CHOSEN VARIANTS.  In the fingerprint because a table playing
+            # Sesja na PG's second variant and one playing its first are
+            # playing different rules, and nothing else in this dictionary
+            # would notice: the card counts, the pile sizes and the uids are
+            # identical either way.  Titles and ids only.
+            # The paused movement.  Two machines that disagree about whether
+            # the table is waiting for an answer disagree about whose turn it
+            # is; the CLOCK is not here, only the length of the window (see
+            # PendingMovementDecision).
+            "pending_movement": (None if self.pending_movement is None
+                                 else self.pending_movement.to_dict()),
+            # Ice Block.  Two machines that disagree about whether the table is
+            # waiting on Piotrek disagree about whether a check has happened.
+            "pending_check": (None if self.pending_check is None
+                              else self.pending_check.to_dict()),
+            "check_allowed": self.check_allowed,
+            "check_needs_separation": self.check_needs_separation,
+            "pending_breakup": (None if self.pending_breakup is None
+                                else self.pending_breakup.to_dict()),
+            "card_variants": sorted(
+                (deck_id, title, variant)
+                for (deck_id, title), variant in self.card_variants.items()
+            ),
             "ability_charges": sorted(
                 (card.title, card.uses_left)
                 for deck_id in (settings.DECK_CHARACTERS, settings.DECK_SKILLS)
@@ -3176,6 +4641,12 @@ class GameState:
         effects.HighlightHeldCard: _op_highlight_card,
         effects.ForcedPlay: _op_forced_play,
         effects.TurnLost: _op_turn_lost,
+        effects.SpendAbilityUse: _op_spend_ability_use,
+        effects.GrantExtraPlay: _op_grant_extra_play,
+        effects.GrantExtraTurn: _op_grant_extra_turn,
+        effects.RestackTile: _op_restack_tile,
+        effects.RequestPawnCheck: _op_request_pawn_check,
+        effects.EliminatePlayer: _op_eliminate_player,
         effects.GrantStatus: _op_grant_status,
         effects.ClearStatus: _op_clear_status,
         effects.SpendStatus: _op_spend_status,
@@ -3203,6 +4674,10 @@ class GameState:
         cmd.AdjustDeckCount: _adjust_deck_count,
         cmd.AdjustAbilityUses: _adjust_ability_uses,
         cmd.RestoreAbilityUses: _restore_ability_uses,
+        cmd.SetCardVariant: _set_card_variant,
+        cmd.AcceptMovement: _accept_movement,
+        cmd.BlockMovement: _block_movement,
+        cmd.ExpireMovementDecision: _expire_movement_decision,
         cmd.PickUpToken: _pick_up_token,
         cmd.MoveToken: _move_token,
         cmd.SetRound: _set_round,
@@ -3211,6 +4686,14 @@ class GameState:
         cmd.ToggleMark: _toggle_mark,
         cmd.BeginMatch: _begin_match,
         cmd.EliminatePawn: _eliminate_pawn,
+        cmd.EliminatePlayer: _eliminate_player,
+        cmd.UndoMove: _undo_move,
+        cmd.ChooseBreakupTile: _choose_breakup_tile,
+        cmd.ResolveTowerBreakup: _resolve_tower_breakup,
+        cmd.OpenCheckDecision: _open_check_decision,
+        cmd.AllowCheck: _allow_check,
+        cmd.RefuseCheck: _refuse_check,
+        cmd.ExpireCheckDecision: _expire_check_decision,
         cmd.RevealIdentity: _reveal_identity,
         cmd.FinishIdentitySwap: _finish_identity_swap,
         cmd.DeclareVictory: _declare_victory,

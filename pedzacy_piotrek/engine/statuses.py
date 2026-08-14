@@ -42,6 +42,7 @@ class StatusKind(str, Enum):
     TURN_INTERRUPT = "turn_interrupt"    # a card takes the player's next turn over
     HIDDEN = "hidden"                    # a pawn is off the map entirely (Shady)
     MOVEMENT_REVERSED = "movement_reversed"   # movement cards run the other way
+    MOVEMENT_VETO = "movement_veto"      # one opponent movement may be blocked
 
 
 class Subject(str, Enum):
@@ -69,6 +70,16 @@ class Status:
     charges: Optional[int] = None
     #: Human-readable origin, shown in the interface ("Granny Costume").
     source: str = ""
+    #: WHAT KIND OF THING granted this — ``"ability"``, ``"card"`` or
+    #: ``"on_draw"``, the same vocabulary ``EffectContext.origin`` already
+    #: speaks.  ``source`` is a NAME and is for humans; this is the machine's
+    #: answer to "is this an ability effect?", which is a question no amount of
+    #: string-matching on the name could answer without a table of every
+    #: ability in the game.  Stamped once, in ``effects.resolve_spec``, so a
+    #: future effect gets it without knowing it exists.  Empty means the engine
+    #: attached it directly (a hidden pawn, a queued interrupt) and it is
+    #: therefore nobody's ability.
+    origin: str = ""
 
     def is_expired(self, turn: int) -> bool:
         if self.charges is not None and self.charges <= 0:
@@ -87,6 +98,7 @@ class Status:
             "expires_after_turn": self.expires_after_turn,
             "charges": self.charges,
             "source": self.source,
+            "origin": self.origin,
         }
 
     @classmethod
@@ -99,6 +111,7 @@ class Status:
             expires_after_turn=raw.get("expires_after_turn"),
             charges=raw.get("charges"),
             source=raw.get("source", ""),
+            origin=str(raw.get("origin", "")),
         )
 
     # ── constructors for the common shapes ──────────────────────────────────
@@ -156,6 +169,24 @@ class StatusTracker:
                 del self._statuses[index]
                 return True
         return False
+
+    def of_origin(self, origin: str) -> List[Status]:
+        """Every live status granted by that kind of thing."""
+        return [s for s in self._statuses if s.origin == origin]
+
+    def cancel_origin(self, origin: str) -> List[Status]:
+        """Drop every status that came from that kind of thing, and say which.
+
+        Written as "cancel the effects of X" rather than "clear everything"
+        deliberately: Sesja na PG's second variant cancels ABILITY effects and
+        must leave a Mod's rule, a Chest card's promise and an ordinary
+        movement status exactly where they are.  Selecting by
+        :attr:`Status.origin` is what makes that a question with an answer.
+        """
+        gone = self.of_origin(origin)
+        for status in gone:
+            self.discard(status)
+        return gone
 
     def clear_kind(self, kind: StatusKind) -> int:
         before = len(self._statuses)
@@ -312,4 +343,5 @@ STATUS_LABELS: Dict[StatusKind, str] = {
     StatusKind.TURN_INTERRUPT: "Tura przejęta",
     StatusKind.HIDDEN: "Poza mapą",
     StatusKind.MOVEMENT_REVERSED: "Odwrócony ruch",
+    StatusKind.MOVEMENT_VETO: "Nie masz Rosji",
 }
