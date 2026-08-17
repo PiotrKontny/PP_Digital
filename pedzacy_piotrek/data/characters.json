@@ -97,7 +97,7 @@
         },
         {
           "title": "Glockboy",
-          "skill": "Where are you Marcus?",
+          "skill": "Hunt for Marcus",
           "text": "Sprawdza dowolnego pionka. Jeżeli nie trafi, odpada z gry. Co najmniej 3 pionki muszą być sprawdzone",
           "uses": 1,
           "ability": {
