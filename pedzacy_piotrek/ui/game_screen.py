@@ -37,6 +37,7 @@ from ..engine import events as ev
 from ..render.card_renderer import CardRenderer
 from .app import App, Screen
 from .board_view import BoardView
+from .ability_cards import AbilityCards
 from .card_library import CardLibrary, draw_library_button
 from .check_decision import BreakupChoice, CheckDecision
 from .movement_decision import MovementDecision
@@ -156,6 +157,10 @@ class GameScreen(Screen):
         #: change how many of them there are.  Built with the SESSION's state
         #: and the screen's own ``submit``, so everything it does travels the
         #: road a played card travels.
+        #: One character -> ability-card lookup for the whole screen (stage
+        #: 50): the portrait, the turn-order map and the ability button all
+        #: ask it, so they cannot disagree and cannot churn card uids.
+        self.ability_cards = AbilityCards()
         self.card_library = CardLibrary(
             self.state.library, self.state, self.submit, app.renderer,
             seat=lambda: self.view_seat,
@@ -1944,6 +1949,7 @@ class GameScreen(Screen):
             view_index=self.view_seat,
             can_act=self.controls_view,
             preview=self.card_preview,
+            abilities=self.ability_cards,
         )
 
     def update(self, dt: float, mouse: Tuple[int, int]) -> None:

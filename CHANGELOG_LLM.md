@@ -6945,3 +6945,296 @@ of eight would otherwise put a preview beside every card in it.
   reveal, which at 74×107 is no more readable than it ever was. That is the
   brief's line, not an oversight — but it is the obvious next thing to ask
   about, and moving it is one condition in `ModPanel.draw`.
+
+---
+
+## Stage 49 — The character has a face, and the ability has its own name
+**Date:** 2026-08-17
+
+### Goal
+Give every character a PORTRAIT at the top of the right-hand panel, as an
+asset system a non-programmer can fill in one file at a time — and fix the Card
+Library, which had been titling every ability after its owner.
+
+### What was there before
+The character panel opened with a section heading, `Twoja Postać`, and a large
+name. Nothing represented the character except the word.
+
+The Card Library's ability tab built each cell's display card from the
+**character** definition, so `Card.title` was `"Big D Randy"` and — because
+`CardArtLibrary.keys_for` slugifies exactly that title — the artwork lookup
+asked for `big_d_randy`. `assets/card_art/Granny Costume.png` had existed since
+the artwork was drawn and was never once found. The tab compensated by printing
+the ability's name in small type under the owner, which is the shape of a
+workaround for a bug nobody had located.
+
+The HUD was accidentally right: `CharacterPanel._ability_card` hand-assembled a
+`CardDef` out of `skill` and `text`, so its title was the ability's — and its
+artwork resolved for that reason alone, while silently dropping `art`, `badge`,
+`uses` and the variants.
+
+### Implemented
+**`CardDef.ability_face`.** One derivation, shared. It renames a definition to
+its `skill` and touches nothing else, and pins `base` to the printed card so
+`printed` always leads back to the CHARACTER whether or not a variant was
+applied first. A character card read under its other name — not a second card,
+not a duplicated definition.
+
+    Big D Randy  --ability_face-->  Granny Costume  --printed-->  Big D Randy
+
+Both the Card Library and the HUD now go through it, so the two cannot disagree
+about what an ability is called again.
+
+**Order matters in the library.** The variant is resolved FIRST, under the
+character's own title, because that is the key the match's variant settings use;
+taking the ability face first would ask the state about a card called "Granny
+Costume", which no deck contains.
+
+**`LibraryEntry.title` stays the CHARACTER's.** `AdjustAbilityUses`,
+`RestoreAbilityUses` and `GameState.ability_card` all address a card by its own
+title. What the player reads is the ability; what the engine is told is the
+card. `_draw_owner` therefore drops the small ability line — the face carries it
+now, and printing it twice in two sizes is not a design.
+
+**`render/portrait.py`.** `PortraitLibrary`: the portrait folder, scanned once
+and cached, addressed by the CHARACTER's name through the same `slugify` and the
+same `load_image` `card_art.py` uses. Flat — no deck scopes, because a character
+name is unique. `placeholder.png` is excluded from the scan, so it cannot be
+shadowed and nobody called "Placeholder" can adopt it.
+
+**The fallback is an ASSET, not a drawing.** This is the difference from
+`card_art`: a card without artwork has a parchment face to fall back on, and a
+character without a portrait has nothing. `surface()` answers with the
+placeholder, so the panel never branches and `tools/make_portrait_placeholder.py`
+generates the shipped PNG rather than the renderer drawing it every frame.
+
+**`CardRenderer.draw_portrait`.** The frame is DRAWN and the picture is an
+ASSET — the well, the brass edge and the rounded clip are the game's, the image
+is the file's. That split is what lets the placeholder be replaced by a
+photograph without it needing a border baked in. Cover-scaled through the same
+`_cover` a Signature face uses. `ui/` reaches portraits only through
+`portrait()`, `has_portrait()` and `draw_portrait()`, and a test greps `ui/` for
+`PortraitLibrary` — stage 30's one-opinion rule, extended to a third library.
+
+**Portrait hover is stage 48's rule applied to a picture.** The portrait under
+the cursor is untouched and a larger copy appears beside it, through the SAME
+`CardPreview` collector. `PreviewRequest` grew a second payload rather than a
+second class, because everything except the last line — one request per frame,
+the placement, the shadow, consumption on draw — is identical. One cursor, one
+request, last caller wins: the portrait hover and the ability hover cannot both
+be open, and there is no state to unwind. `hover_preview_size` took an `aspect`
+argument so an enlarged face is a face and not a face letterboxed into a card.
+
+### Layout: what the portrait cost, and who paid
+The right column was full. At 1280x760 a Piotrek panel had about 3px of slack
+against stage 29's floor of 120px for a panel card, so a portrait of any useful
+size could not simply be inserted.
+
+**The `Twoja Postać` heading was retired.** A portrait with the character's name
+under it says what the heading said, both of the owner's design references omit
+it, and the band it occupied is most of what pays for the portrait on a small
+window.
+
+**Draw/discard piles are no longer the same size as the ability card.**
+`Layout.right_piles` split from `Layout.right_cards`. A pile shows a card BACK
+and a count — there is nothing on it to read — while the ability card carries a
+Polish rules sentence and is what the readability floor is really about. So the
+piles give ground first, via `PILE_SHARE = (1.0, 0.70)`: unchanged at the
+reference display, 30% smaller at the tight end. This is why stage 29's floor
+did NOT have to be weakened to fit the feature.
+
+**The portrait's share itself moves.** `PORTRAIT_ROWS = (1.35, 0.72)`, in card
+heights, divided among the same rows the cards are divided among — so the
+portrait and the cards shrink together and neither can push the other off the
+panel. A portrait worth 1.35 cards is handsome at 2560x1440 and would leave a
+1280x760 ability card smaller than the mod slot stage 48 called unreadable, so
+it decays faster than the cards do, exactly as `panel_scale` does for the side
+columns. Where a card's height is capped by the column's WIDTH the leftover used
+to go entirely to centring; `PORTRAIT_SLACK_SHARE` gives most of it to the
+portrait instead.
+
+Resulting ability-card heights (was → is): 1280x760 hunter 142→130, Piotrek
+123→122; 1600x900 142→142 both; 1920x1080 155→155 both; 2560x1440 225→197 and
+199→172, where the portrait is 251x267 and 219x233.
+
+**Piotrek's identity badge stayed ON TOP**, above the portrait. §7 of the brief
+lists the portrait first; `Portret_Piotrek.png` shows the badge first, and §17
+makes the screenshots the layout reference. The badge has been the column's
+first line since it existed and is the one thing on that screen that must never
+be lost, so it kept its place and the portrait joined the column under it.
+
+### Bug fixes
+- The Card Library titled every character ability after its owner and looked its
+  artwork up under the owner's name. `Granny Costume` now shows its own name,
+  its own description and the artwork that was in the folder all along.
+- `CharacterPanel._ability_card` dropped `art`, `badge`, `uses` and variants from
+  the ability it displayed, and cached without regard to the selected variant.
+
+### Tests
+`tests/test_stage49_portraits.py`, 65 tests: the portrait library (own picture,
+placeholder fallback, per-character pictures, adding and replacing a file with no
+code change, name folding, the placeholder not being a character); missing
+folder, corrupt file and non-image file, none of which may raise; the Hunter
+panel and the Piotrek panel (portrait painted, name visible under it, identity
+badge intact and not duplicated, ability card and decks still inside the panel);
+hover (the portrait preview opens, the ORIGINAL is byte-for-byte unchanged
+inside its frame, the preview never covers it at any of five resolutions, the
+ability preview still works, and the two branches are told apart by the
+proportions they paint); the Card Library across four characters whose ability
+name differs from theirs; and regression — card art still resolves, the two
+folders cannot reach each other, the portrait has no click handler, the ability
+slot still discards, and the column fits at every resolution.
+
+Pixel-measured wherever the claim is about pixels: solid-colour portrait files
+are written to a tmp folder and the panel is sampled, because a test that only
+checked a rect would pass with the portrait drawn blank — which is exactly what
+a placeholder feature is most likely to ship.
+
+### Notes
+Four tests were ALREADY failing before this stage and still are; none of them is
+touched by it. Three in `test_stage43_herold_card.py`, because
+`settings.copy_consumes_use` still names `"Where are you Marcus?"` while
+`characters.json` now gives Glockboy the skill `"Hunt for Marcus"` — a content
+rename that was never propagated, and the same class of bug as the one fixed
+here. One in `test_visual_style.py`, which samples a hand card and now finds a
+Signature face because the six `Wejściówka` movement cards have artwork. Both
+want a decision from the owner rather than a guess from a model.
+
+---
+
+## Stage 50 — One preview, four hover targets
+**Date:** 2026-08-18
+
+### What was wrong
+Stage 49 gave the character portrait a hover that enlarged THE PORTRAIT, and
+left the ability card sitting underneath it with a hover of its own.  Between
+them they answered the question the player does not have — "what does this
+character look like", which is visible at a glance — twice, and answered the
+one they do have — "what does my ability do" — in a card 142 px tall.
+
+The owner's own mock-ups had shown the answer all along: a large portrait and
+NO ability card in the column.  Stage 49 read the brief's "[ability card]" line
+as a requirement to keep the card and shrank the portrait to fit around it.
+
+### 1. The portrait is a hover TARGET that resolves to a CARD
+Hovering it now shows the ability card, full description and all, through the
+same ``CardPreview`` every other slot uses.  The portrait itself is untouched
+under the cursor (stage 48's rule) and keeps only its hover rim.
+
+The permanently drawn ability card is GONE from the right-hand column.  It was
+there to be hovered; the portrait is a better target for that, and showing the
+same ability twice was the whole of the confusion.  The card still exists as
+data, still fills the Card Library, still drives the ability button — it is
+summoned rather than parked.
+
+**The discard gesture moved with it.**  Left-clicking the ability card used to
+issue ``DiscardTopCharacterCard``; that slot is gone, so the click went to the
+portrait rather than being deleted.  The portrait is the character's
+representation in this column now, and hovering still only previews.
+
+### 2. ``ui/ability_cards.py`` — the lookup, in one place
+``AbilityCards``, owned by ``GameScreen``, reached through
+``HudContext.ability_of`` / ``preview_ability``:
+
+    character name -> GameState.ability_card -> CardDef.ability_face -> Card
+
+THREE things now ask this question (the portrait, the turn-order map, the
+ability button), which is exactly the number at which a private copy inside
+``CharacterPanel`` stops being acceptable.
+
+VARIANTS COME FREE by starting from the LIVE card.  ``GameState`` pushes a
+variant onto every live copy when it changes (``_reread_copies``), so a dealt
+card's definition is already the reading this match is playing, and
+``ability_face`` is taken last — the same order the Card Library uses, which
+has to call ``variant_definition`` explicitly only because it builds its cells
+from the printed content library.
+
+Cached, keyed by title AND variant: a ``Card`` carries a uid, and building one
+per frame under the cursor would churn the identity the drag and animation code
+key on.
+
+### 3. Every active Mod Patusa previews
+Stage 48 deliberately excluded Signature mods, reasoning that their card-art
+reveal already showed the description.  That was true of the mechanism and
+false of the reading: the reveal happens inside a rack slot ~107 px tall on a
+small window, which is the exact complaint the preview exists to answer.  A mod
+in the rack is active on every player at once and is the card a table most
+often needs to re-read mid-game.  No visibility question — the rack is face-up
+and shared, so the preview shows what is already on screen, larger.
+
+### 4. Turn-order circles preview their character's ability
+Hit-tested INSIDE THE CIRCLE, not its bounding rect: these are drawn circles
+sitting close together with arrows between them, and a square target would let
+one steal the cursor from its neighbour.
+
+NOTHING PRIVATE CAN COME BACK.  A hunter's fixed ability is printed on a card
+the whole table sees and is listed in the Card Library.  Piotrek's character
+card carries no fixed ability at all, so his circles resolve to ``None`` and
+show nothing — his hand of skills stays exactly as private as it was.
+
+### 5. Descriptions are FITTED, not clipped
+The parchment face drew its body at a fixed fraction and let
+``Renderer.draw_wrapped`` cut whatever ran past the bottom — invisible in a
+thumbnail and glaring in the enlarged preview, where an ability with no artwork
+lost the end of its own rules text.  It now goes through the SAME
+``_description_font`` fitter the Signature face uses, parametrised by
+``BODY_FRACTION`` so every card that already fit renders at exactly the size it
+always did and only the truncated ones change.
+
+### 6. Long titles wrap instead of being eaten
+``_title_font`` shrank only until the longest WORD fit, and callers then kept
+``wrap_lines(...)[:2]`` — so a long title was silently truncated mid-thought
+with nothing on screen saying so.  A second shrink pass now chases LENGTH down
+to ``TITLE_LENGTH_MIN_STEP``, and the line budget is ``TITLE_MAX_LINES`` (3).
+Titles that already fit are untouched: both loops exit on the first iteration.
+
+### Layout
+Removing the ability card gave a whole card row back, and the portrait took it.
+It is now 0.77–0.93 of the column's width (was ~0.55), which is finally what
+the mock-ups showed.  ``character_panel`` no longer returns a ``"card"`` key —
+a rectangle nothing paints is a target waiting to be mis-hit —
+``ability_button_rect`` anchors to the name row, and ``right_cards`` survives as
+the size an ability is PREVIEWED against and the unit the piles are quoted in.
+
+Verified at 1280x760, 1600x900, 1920x1080, 1920x1200 and 2560x1440: everything
+inside the panel, preview never covering its own target, never leaving the
+content area.
+
+### Removed
+``PreviewRequest``'s second payload and ``CardPreview.request_portrait``.
+Nothing requests a portrait preview any more, and dead code with passing tests
+around it is worse than no code.  ``CardPreview`` gained ``previewed`` — WHICH
+card was drawn — because with four targets feeding one preview, "a preview
+appeared" is no longer the interesting question.
+
+### Tests
+``tests/test_stage50_hover_targets.py``, 45 tests, mostly NON-VISUAL by design:
+resolution is where the bugs are, and a test that only checks a rectangle would
+pass with the wrong card in it.  Covers the resolver (ability_face preserved,
+variants resolved first, uid caching, unknown/ability-less characters), the
+portrait previewing the ability rather than itself, every mod previewing and
+following the slot as it changes, order circles resolving generically with
+Piotrek revealing nothing, hovering mutating no state and emitting no Command,
+and the text fitting for artwork-less descriptions and long titles.
+
+UPDATED, not deleted, with the reversal documented in each docstring:
+- ``test_a_slot_card_with_artwork_keeps_the_hover_it_already_had`` asserted an
+  illustrated mod must NOT preview.  Reversed by requirement 2.
+- stage 49's portrait-enlargement test now asserts the preview is card-shaped
+  and NOT the picture.
+- stage 49's "clicking the portrait does nothing" now asserts it discards,
+  because the gesture moved there.
+- ``ability_slot()`` in ``test_card_preview.py`` points at the portrait; every
+  claim in that file is unchanged, only the rectangle moved.
+- the preview's size and type-ink comparisons are made against ``right_cards``
+  and an off-screen face at slot size, because the target is now a picture with
+  no type on it — and the placeholder's brass bust sits within tolerance of the
+  description colour, so the old on-screen comparison would have counted it.
+
+### Notes
+The same four tests were already failing before this stage and still are:
+three in ``test_stage43_herold_card.py`` (``settings.copy_consumes_use`` names
+``"Where are you Marcus?"``, ``characters.json`` says ``"Hunt for Marcus"`` — a
+content rename never propagated) and one in ``test_visual_style.py`` (a hand
+card is now a Signature face because the ``Wejściówka`` cards have artwork).
+Both still want an owner's decision rather than a guess.

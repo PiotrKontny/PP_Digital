@@ -11,8 +11,9 @@ drawn placeholder steps aside.
 |---|---|---|
 | `card_art/` | **full-card artwork** (Signature Cards) | named after the card — `Troll.png`. See `card_art/README.md` |
 | `card_backs/` | **the back of a card**, one per deck | listed in `settings.CARD_BACKS`. See `card_backs/README.md` |
+| `portraits/` | **character portraits** (and the placeholder) | named after the character — `Glockboy.png`. See `portraits/README.md` |
 | `images/cards/` | small in-card illustrations | set `"image": "cards/kolos.png"` on the card in `data/cards.json` |
-| `images/characters/` | character portraits | same, in `data/characters.json` |
+| `images/characters/` | small in-card character illustrations | same, in `data/characters.json` |
 | `images/board/` | tiles, trees, rocks, huts, bridges | referenced from a board theme in `data/board.json` |
 | `images/ui/` | button and panel skins | referenced from the theme |
 | `fonts/` | `.ttf` / `.otf` | see below |
@@ -31,6 +32,18 @@ drawn placeholder steps aside.
 A card may use either, neither, or both; if both, the Signature face wins and
 `image` is simply unused. Everything about the first column is in
 `card_art/README.md`; the rest of this file is about the second.
+
+**Neither of them is `portraits/`.** A file in `card_art/` is the FACE of a
+card and is named after the CARD; a file in `portraits/` is a CHARACTER's face
+and is named after the CHARACTER. For a character card these are two different
+names for two different pictures:
+
+| | Folder | File |
+|---|---|---|
+| Big D Randy, the character | `portraits/` | `Big D Randy.png` |
+| Granny Costume, his ability | `card_art/` | `Granny Costume.png` |
+
+Neither lookup can reach the other's folder. See `portraits/README.md`.
 
 **Neither of them is `card_backs/`.** Those two are the FRONT of a card and
 belong to one card each; a file in `card_backs/` is the BACK and belongs to a

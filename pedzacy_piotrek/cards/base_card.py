@@ -351,6 +351,48 @@ class CardDef:
         """What cards.json says, whatever variant is currently applied."""
         return self.base or self
 
+    # ── character identity vs ability identity ───────────────────────────────
+    @property
+    def ability_face(self) -> "CardDef":
+        """This definition as its ABILITY presents itself.
+
+        A character card carries TWO names and they are not interchangeable:
+
+            title  "Big D Randy"      the CHARACTER — who is playing
+            skill  "Granny Costume"   the ABILITY — what the card does
+
+        Anything showing the ability as a card wants the second one, because
+        the ability is what the card is about: it is the title printed on the
+        face, the name the engine announces uses under, and — the part that
+        actually broke — the name its ARTWORK is filed under.
+        ``assets/card_art/Granny Costume.png`` has existed since the artwork
+        was drawn, and the Card Library never found it because it asked for
+        "Big D Randy".
+
+        Only the TITLE moves.  ``deck_id``, ``art``, ``uses``, ``variants``,
+        ``badge`` and the rest are untouched, so this is the same card read
+        under its other name rather than a second card — which is why the
+        library can draw it without duplicating a definition and why
+        ``printed`` still leads back to the character.
+
+        SELF when there is no separate skill, which is the whole of the
+        piotrek_skills deck: "Ice Block" is its own card and its ability has
+        no other name.  That makes this safe to apply to any ability card
+        without asking which deck it came from.
+
+        ``base`` is pinned to the PRINTED card, so :attr:`printed` always leads
+        back to the character whether or not a variant has been applied on top
+        first.  Without it the invariant held only for a card with variants —
+        the one path that happens to set ``base`` — and "ask an ability face
+        which card it is" would have answered "Granny Costume" for Big D Randy
+        and "Ondrej" for Ondrej.  Anything rebuilding an entry from a face
+        (the Card Library, when a match switches variant) needs the character
+        back, and it must not have to know which kind of card it is holding.
+        """
+        if not self.skill or self.skill == self.title:
+            return self
+        return replace(self, title=self.skill, base=self.printed)
+
     @property
     def opens_a_hand(self) -> bool:
         """Whether this card may be part of an opening hand.

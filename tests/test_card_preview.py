@@ -97,16 +97,22 @@ def click(screen: GameScreen, position, button: int = 1) -> None:
 
 
 def ability_slot(screen: GameScreen) -> pygame.Rect:
+    """Where you hover to see this seat's ability.
+
+    THE PORTRAIT since stage 50.  The character panel no longer keeps a
+    permanently drawn ability card — it sat there only to be hovered, and the
+    portrait is a better target for the same question.  Every claim in this
+    file about "hovering the ability" is still exactly the claim being made;
+    only the rectangle it is made against has moved.
+    """
     player = screen.state.player(screen.view_seat)
-    return screen.app.layout.character_panel(player.is_piotrek)["card"]
+    return screen.app.layout.character_panel(player.is_piotrek)["portrait"]
 
 
 def ability_card(screen: GameScreen) -> Card:
-    """The very card the character panel is showing, not a copy of it."""
-    player = screen.state.player(screen.view_seat)
-    if player.is_piotrek:
-        return player.skill
-    return screen.character_panel._ability_card(player)
+    """The very card the character panel previews, not a copy of it."""
+    return screen.ability_cards.for_player(
+        screen.state, screen.state.player(screen.view_seat))
 
 
 def view_hunter(screen: GameScreen) -> None:
@@ -204,14 +210,16 @@ def identical(one: pygame.Surface, other: pygame.Surface) -> bool:
 
 
 # ── the ability keeps its own face ───────────────────────────────────────────
-def test_hovering_an_illustrated_ability_does_not_disturb_the_artwork(screen):
-    """The card under the cursor is the whole point; it must not change.
+def test_hovering_an_illustrated_ability_does_not_disturb_its_target(screen):
+    """The thing under the cursor is the whole point; it must not change.
 
-    Byte-for-byte across the whole face, which is what catches the old
-    behaviour exactly: the reveal laid a veil over the artwork, deepened the
-    scrim and lifted the title, and every one of those is a differing pixel
-    here.  What is allowed to change is the card's RIM — that is the game's one
-    hover language (N45) and it is how the player knows the cursor landed.
+    STAGE 50 MOVED WHAT IS UNDER THE CURSOR.  This used to assert that the
+    ability CARD in the panel was not repainted by its own hover — the card the
+    reveal used to veil, deepen and lift a title inside.  That card is not
+    drawn in the column any more, so the claim now lands on what replaced it:
+    hovering the PORTRAIT must not repaint the portrait either.  Same rule
+    (N45: the rim is the one thing allowed to move), same measurement, new
+    subject.
     """
     player = screen.state.player(screen.view_seat)
     assert player.is_piotrek and screen.cards.has_art(player.skill), \
@@ -224,34 +232,40 @@ def test_hovering_an_illustrated_ability_does_not_disturb_the_artwork(screen):
     hovered = region(screen, interior(slot))
 
     assert identical(resting, hovered), \
-        "hovering an ability must not repaint the ability card"
+        "hovering the portrait must not repaint the portrait"
 
 
 @pytest.mark.parametrize("piotrek", [True, False])
-def test_hovering_an_ability_never_lifts_its_title(library, piotrek):
+def test_the_ability_is_no_longer_drawn_in_the_column(library, piotrek):
     """The complaint this stage answers, measured where it was made.
 
     The ability card used to take the Signature reveal from ``highlighted``:
     hover it and the title climbed to make room for the description, inside a
-    card 142 px tall.  The title must now sit in exactly the same rows hovered
-    as at rest, for an illustrated ability and a plain one alike.
+    card 142 px tall.  Stage 48 pinned the reveal; stage 50 removed the card
+    from the column altogether, so the title cannot move because there is no
+    longer a title there to move.
+
+    What is asserted instead is the thing that made it safe to remove: the
+    ability is STILL REACHABLE, as a real card, from the portrait that replaced
+    it — the data did not go anywhere, only the permanent slot did.
     """
     screen = build(library)
     if not piotrek:
         view_hunter(screen)
+
+    layout = screen.app.layout
+    rects = layout.character_panel(screen.state.player(screen.view_seat).is_piotrek)
+    assert "card" not in rects, \
+        "the character column still hands out an ability-card rectangle"
+
     card = ability_card(screen)
-    theme = screen.app.renderer.theme
-    colour = (theme.card_art_title if screen.cards.has_art(card)
-              else theme.card_title)
+    assert card is not None and card.text, \
+        "the ability card stopped being reachable when its slot was removed"
 
     slot = ability_slot(screen)
-    frame(screen, mouse=(0, 0))
-    resting = painted_rows(region(screen, slot), colour)
     frame(screen, mouse=slot.center)
-    hovered = painted_rows(region(screen, slot), colour)
-
-    assert resting, "the ability card should have a title on it at rest"
-    assert resting == hovered, "the title moved when the cursor arrived"
+    assert screen.card_preview.rect is not None, \
+        "the portrait did not take over the ability hover"
 
 
 def test_hovering_an_ability_creates_the_enlarged_preview(screen):
@@ -287,11 +301,24 @@ def test_the_preview_disappears_when_the_cursor_leaves(screen):
 
 
 def test_the_preview_is_noticeably_larger_than_the_card_it_previews(screen):
+    """Measured against a CARD, not against the hover target.
+
+    Until stage 50 those were the same rectangle — the target WAS the ability
+    card, drawn at ``right_cards`` — so the ratio could be taken straight off
+    the slot.  The target is now the portrait, which is a picture and much
+    larger, so comparing against it would be asking the preview to be twice
+    the size of something that was never the problem.  ``right_cards`` is
+    still the size an ability card gets in this column, and beating it by a
+    wide margin is still exactly the claim.
+    """
+    player = screen.state.player(screen.view_seat)
+    card_w, card_h = screen.app.layout.right_cards(player.is_piotrek)
+
     slot = ability_slot(screen)
     frame(screen, mouse=slot.center)
     preview = screen.card_preview.rect
-    assert preview.height >= slot.height * 1.8
-    assert preview.width >= slot.width * 1.8
+    assert preview.height >= card_h * 1.8
+    assert preview.width >= card_w * 1.8
 
 
 def test_the_preview_keeps_the_proportions_of_a_card(screen):
@@ -342,13 +369,22 @@ def test_the_preview_type_is_far_bigger_than_the_slot_card_type(screen):
     *materially* more type on screen or it has not helped anybody.
     """
     view_hunter(screen)
+    player = screen.state.player(screen.view_seat)
     slot = ability_slot(screen)
     frame(screen, mouse=slot.center)
     preview = screen.card_preview.rect
     text_colour = screen.app.renderer.theme.card_text
 
+    # Against the card AT SLOT SIZE, painted off-screen.  The hover target is
+    # a portrait now and has no type on it at all, so the old on-screen
+    # comparison would be measuring the preview against a photograph — and
+    # would have quietly counted the placeholder's brass bust as ink, because
+    # it sits within tolerance of the description colour.
+    card = ability_card(screen)
+    small = screen.cards.face(card, screen.app.layout.right_cards(player.is_piotrek))
+
     assert ink(region(screen, preview), text_colour) > \
-        ink(region(screen, slot), text_colour) * 2.0
+        ink(small, text_colour) * 2.0
 
 
 def test_the_preview_is_the_same_card_and_not_a_copy_of_it(screen):
@@ -405,14 +441,28 @@ def test_the_preview_of_a_slot_card_is_beside_it_and_on_screen(screen):
     assert screen.app.layout.hover_preview_bounds.contains(preview)
 
 
-def test_a_slot_card_with_artwork_keeps_the_hover_it_already_had(screen):
-    """Stage 30's card-art hover works; the brief said not to disturb it."""
+def test_an_illustrated_mod_now_previews_too(screen):
+    """Reversed deliberately in stage 50, and worth saying why.
+
+    Stage 48 left Signature mods out on the grounds that their card-art reveal
+    already showed the description, so the hover "already worked".  That was
+    true of the mechanism and false of the reading: the reveal happens inside a
+    rack slot ~107 px tall on a small window, which is the exact size complaint
+    the preview exists to answer.  A mod in the rack is active on every player
+    at once and is the card a table most often needs to re-read mid-game, so it
+    must not be the one card that cannot be enlarged.
+    """
     card = fill_mod_slot(screen, 0, art=True)
     assert screen.cards.has_art(card)
     slot = screen.app.layout.mod_slot_rect(0)
 
-    frame(screen, mouse=slot.center)
+    frame(screen, mouse=(0, 0))
     assert screen.card_preview.rect is None
+
+    frame(screen, mouse=slot.center)
+    assert screen.card_preview.rect is not None, \
+        "an illustrated mod in the rack should preview like any other"
+    assert not screen.card_preview.rect.colliderect(slot)
 
 
 # ── it stays on screen, at every size ────────────────────────────────────────

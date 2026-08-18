@@ -148,7 +148,9 @@ def test_panel_contents_stay_inside_their_panel():
             assert layout.left_panel.contains(layout.deck_discard_rect(column))
         for show_skill in (False, True):
             rects = layout.character_panel(show_skill)
-            assert layout.right_panel.contains(rects["card"])
+            # "card" was retired in stage 50 — the ability is previewed from
+            # the portrait rather than drawn in the column.
+            assert layout.right_panel.contains(rects["portrait"])
             assert layout.right_panel.contains(rects["char_disc"])
         grid = layout.pawn_grid_panel(layout.pawn_grid_top(False))
         assert layout.right_panel.contains(grid)
@@ -1119,7 +1121,7 @@ def test_the_right_column_uses_the_space_it_has(size):
     panel = layout.right_panel
     for show_skill in (False, True):
         rects = layout.character_panel(show_skill)
-        for key in ("card", "char_draw", "char_disc"):
+        for key in ("portrait", "char_draw", "char_disc"):
             assert panel.contains(rects[key]), (size, show_skill, key)
         if show_skill:
             assert panel.contains(rects["skill_disc"])
@@ -1622,7 +1624,7 @@ def test_frozen_and_linked_pawns_are_drawn_differently(screen):
 
 @pytest.mark.parametrize("size", [(1280, 760), (1920, 1080), (2560, 1440)])
 def test_the_ability_button_never_covers_the_deck_below_it(size):
-    """It sits under the ability card, so the column must budget for it."""
+    """It sits under the character's name, so the column must budget for it."""
     layout = Layout(*size)
     for show_skill in (False, True):
         rects = layout.character_panel(show_skill)

@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pygame
 
-from ..cards.base_card import Card, CardDef
+from ..cards.base_card import Card
 from ..config import settings
 from ..config.theme import darken, lighten, mix
 from ..engine import commands as cmd
@@ -38,6 +38,7 @@ from ..engine.game_state import GameState
 from ..players.player import Player
 from ..render.card_renderer import CardRenderer
 from ..render.renderer import Renderer
+from .ability_cards import AbilityCards
 from .card_preview import CardPreview
 from .layout import Layout
 from .widgets import TextField
@@ -70,6 +71,11 @@ class HudContext:
     #: every panel.  ``None`` in the tests and screens that build a context
     #: without one, which is why every call site goes through ``preview_card``.
     preview: Optional[CardPreview] = None
+    #: The shared character -> ability-card resolver (stage 50).  Owned by the
+    #: screen because THREE panels now ask the same question — the portrait,
+    #: the turn-order map and the ability button — and a per-panel copy is how
+    #: they would drift apart.
+    abilities: Optional[AbilityCards] = None
 
     def preview_card(self, card: Optional[Card], anchor: pygame.Rect,
                      border_color: Optional[Color] = None) -> None:
@@ -80,6 +86,32 @@ class HudContext:
         """
         if self.preview is not None:
             self.preview.request(card, anchor, border_color)
+
+    def ability_of(self, name: Optional[str]) -> Optional[Card]:
+        """The ability card belonging to the character called ``name``.
+
+        The ONE lookup, shared by every hover target that means "what does this
+        character do".  ``None`` without a resolver, so a panel drawn into a
+        context built without one simply shows no preview.
+        """
+        if self.abilities is None:
+            return None
+        return self.abilities.for_character(self.state, name)
+
+    def preview_ability(self, name: Optional[str], anchor: pygame.Rect,
+                        border_color: Optional[Color] = None) -> Optional[Card]:
+        """Resolve a character's ability card and ask for it beside ``anchor``.
+
+        The whole of a character hover, in one call: the portrait and the
+        turn-order circle differ in WHERE they are, not in what they mean.
+        Returns the card it asked for, or ``None`` if the character has no
+        public ability — which is how a caller can tell a hover apart from a
+        hover that had nothing to say.
+        """
+        card = self.ability_of(name)
+        if card is not None:
+            self.preview_card(card, anchor, border_color)
+        return card
 
     @property
     def player(self) -> Player:
@@ -219,6 +251,27 @@ class RoundPanel(Panel):
                 r.arrow((rect.right + 3, y), (nxt.left - 5, y), arrow_color, 2, 7, surface)
 
             is_now = i == state.turn_slot
+            # HOVER A CIRCLE, READ THAT CHARACTER'S ABILITY (stage 50).  The
+            # order map is where a player looks to ask "who is coming up", and
+            # the next question is always "what can they do".  It resolves
+            # through the SAME shared lookup the portrait uses, so a character
+            # cannot read one way here and another way there.
+            #
+            # WITHIN A CIRCLE, not within its bounding rect: these are drawn
+            # circles, they sit close together with arrows between them, and a
+            # square target would let the corners of one steal the cursor from
+            # its neighbour.
+            radius = diameter // 2
+            hovered = ((ctx.mouse[0] - rect.centerx) ** 2
+                       + (ctx.mouse[1] - rect.centery) ** 2) <= radius * radius
+            if hovered:
+                # Nothing PRIVATE can come back: a hunter's fixed ability is
+                # printed on a card the whole table sees and is listed in the
+                # Card Library, and Piotrek's character card carries no fixed
+                # ability at all — so his circle resolves to ``None`` and shows
+                # nothing, leaving his hand of skills as private as it was.
+                ctx.preview_ability(slot.name, rect,
+                                    theme.deck_colors[settings.DECK_CHARACTERS])
             face = mix(theme.panel_bg_light, theme.card_bg_shade, 0.22)
             if is_now:
                 r.ring_glow(rect.center, diameter // 2, theme.accent, surface,
@@ -226,6 +279,9 @@ class RoundPanel(Panel):
             r.aa_circle(rect.center, diameter // 2, face,
                         theme.accent if is_now else theme.panel_edge,
                         3 if is_now else 2, surface)
+            if hovered and not is_now:
+                # The same rim every other hover target lights up with.
+                r.aa_ring(rect.center, diameter // 2, theme.brass_light, 2, surface)
             r.aa_ring(rect.center, diameter // 2 - 3,
                       mix(face, theme.panel_highlight, 0.5), 1, surface)
 
@@ -402,12 +458,20 @@ class ModPanel(Panel):
                 colour = theme.deck_colors.get(card.deck_id)
                 ctx.cards.draw_in(card, rect, surface,
                                   highlighted=(hovered and placing), border_color=colour)
-                # A mod in a slot is as small as the ability card and has the
-                # same problem, so it takes the same answer (stage 48).  A
-                # Signature mod is left alone: it already has a hover that
-                # works and the brief for this change was explicit that a
-                # working card-art hover is not to be disturbed.
-                if hovered and not ctx.cards.has_art(card):
+                # EVERY active mod previews, illustrated or not (stage 50).
+                # Stage 48 deliberately left Signature mods alone, on the
+                # grounds that their card-art reveal already showed the text —
+                # but that reveal happens INSIDE a slot 107px tall on a
+                # 1280x760 window, so "already works" was true of the
+                # mechanism and false of the reading.  A mod in the rack is
+                # active on every player at once and is the thing a table most
+                # often needs to re-read mid-game; it should never be the one
+                # card you cannot enlarge.
+                #
+                # No visibility question here: the rack is face-up, shared, and
+                # already drawn to every seat. The preview shows what is
+                # on screen anyway, larger.
+                if hovered:
                     ctx.preview_card(card, rect, colour)
                 if hovered and not placing:
                     r.text("P-click: odrzuć", r.fonts.label(), theme.mod_instr, surface,
@@ -437,30 +501,28 @@ class ModPanel(Panel):
 
 # ── right column ─────────────────────────────────────────────────────────────
 class CharacterPanel(Panel):
-    """'Twoja Postać' — character, ability, its decks, and the hunter notepad."""
+    """The character column — portrait, name, ability, its decks, the notepad."""
 
     def __init__(self) -> None:
-        self._ability_cache: Dict[Tuple[int, str], Card] = {}
+        self._ability_cache: Dict[Tuple[int, str, str], Card] = {}
         self.hover: Dict[str, float] = {}
 
-    def _ability_card(self, player: Player) -> Optional[Card]:
-        """A synthetic card showing a character's fixed ability.
+    def _ability_card(self, ctx: HudContext) -> Optional[Card]:
+        """The ability this seat can use — the card the portrait previews.
 
-        Cached, because building it fresh every frame would churn card uids.
+        Delegates to the SHARED resolver (stage 50).  It used to be worked out
+        privately here, which was fine while the character panel was the only
+        thing that asked; the turn-order map now asks the same question, and
+        two copies of "which card is this character's ability" is precisely
+        what stage 49 spent its time removing.
+
+        ``AbilityCards.for_player`` keeps the one real distinction: a hunter's
+        ability is printed on the character card everyone can see, and
+        Piotrek's is the skill card in his hand.
         """
-        if player.character is None:
+        if ctx.abilities is None:  # a context built without a resolver
             return None
-        key = (player.index, player.character.title)
-        cached = self._ability_cache.get(key)
-        if cached is None:
-            definition = CardDef(
-                deck_id=settings.DECK_CHARACTERS,
-                title=player.character.skill or "",
-                text=player.character.text,
-            )
-            cached = Card(definition)
-            self._ability_cache[key] = cached
-        return cached
+        return ctx.abilities.for_player(ctx.state, ctx.player)
 
     def draw(self, ctx: HudContext) -> None:
         r, layout, state, theme = ctx.r, ctx.layout, ctx.state, ctx.theme
@@ -476,40 +538,27 @@ class CharacterPanel(Panel):
         if show_skill:
             self._draw_identity_badge(ctx, rects["identity"])
 
-        r.section_heading("Twoja Postać",
-                          r.fonts.get(int(12 * layout.ui_scale), bold=True),
-                          panel.centerx, rects["title_y"],
-                          panel.width - 2 * layout.right_inner, surface)
+        self._draw_portrait(ctx, rects["portrait"])  # type: ignore[arg-type]
+
+        # The 'Twoja Postać' section heading was retired in stage 49.  A
+        # portrait with the character's name beneath it says what the heading
+        # said, both design references omit it, and the band it occupied is
+        # what pays for the portrait on a small window.
         r.text(player.display_character,
                r.fonts.get(int(21 * layout.ui_scale), bold=True), theme.text_light,
                surface, midtop=(panel.centerx, rects["name_y"]), shadow=True)
 
-        ability_color = theme.deck_colors[
-            settings.DECK_SKILLS if show_skill else settings.DECK_CHARACTERS
-        ]
-        ability = player.skill if show_skill else self._ability_card(player)
-        card_rect: pygame.Rect = rects["card"]  # type: ignore[assignment]
-
-        r.inset_well(card_rect.inflate(8, 8), surface,
-                     radius=max(6, card_rect.height // 14))
-        if ability is not None:
-            hovered = card_rect.collidepoint(ctx.mouse)
-            # ``reveal=0.0`` PINS the ability card to its resting face (stage
-            # 48).  It used to derive the reveal from ``highlighted``, so
-            # hovering an illustrated ability darkened its artwork, lifted the
-            # title and squeezed the description into a card 142 px tall on a
-            # 1280x760 window — which is where the readability complaint came
-            # from.  The card the player is looking at now stays exactly as it
-            # is, hover rim and all, and the words move to the enlarged preview
-            # beside it.  This is the ONE slot that pins the reveal regardless
-            # of artwork: an ability is the thing the panel is about.
-            ctx.cards.draw_in(ability, card_rect, surface, highlighted=hovered,
-                              border_color=ability_color, reveal=0.0)
-            if hovered:
-                ctx.preview_card(ability, card_rect, ability_color)
-        else:
-            ctx.cards.draw_empty(card_rect.x, card_rect.y, surface, label="brak",
-                                 size=(card_rect.w, card_rect.h))
+        # THE ABILITY CARD IS NO LONGER PAINTED HERE (stage 50).  It sat under
+        # the portrait purely to be hovered, and the portrait is a better
+        # target for that: it is bigger, it is what the player already looks
+        # at, and showing the same ability twice — once as a 142px card nobody
+        # could read and once as the preview beside it — was the whole of the
+        # confusion.  The card still EXISTS as data, is still resolved by
+        # ``ctx.abilities``, still fills the Card Library, and still drives the
+        # button below; it is simply summoned by the portrait instead of
+        # occupying a permanent slot.  The room it gave back went to the
+        # portrait, which is why the panel finally looks like the mock-ups.
+        ability = self._ability_card(ctx)
 
         self._draw_ability_button(ctx, show_skill, ability)
 
@@ -531,6 +580,50 @@ class CharacterPanel(Panel):
 
         if player.character is not None and not show_skill:
             self._draw_pawn_grid(ctx, layout.pawn_grid_top(show_skill))
+
+    def _draw_portrait(self, ctx: HudContext, rect: pygame.Rect) -> None:
+        """The character's face, above its name.
+
+        WHICH NAME IS LOOKED UP.  ``player.display_character`` — the
+        CHARACTER's own title, which is what the portrait folder is keyed by.
+        Not the ability's: "Big D Randy" has a face, "Granny Costume" has card
+        art, and they are different pictures in different folders.  A seat with
+        no character yet reads "brak" and simply gets the placeholder, which is
+        the correct picture for "nobody in particular".
+
+        The panel does not decide between a real portrait and the placeholder
+        and does not know which it got — ``CardRenderer.draw_portrait`` resolves
+        that, so adding ``Glockboy.png`` changes what this paints without
+        changing this code.
+
+        HOVERING IT SHOWS THE ABILITY CARD, not a bigger portrait (stage 50).
+        Enlarging the picture was the stage-49 mistake: it answered "what does
+        this character look like", which the player can already see, while the
+        question they actually have — "what does my ability do" — was left to a
+        second card underneath.  The portrait is now the target for that card,
+        the picture itself is untouched under the cursor, and the enlarged
+        ability appears beside it through the same one-request-per-frame
+        ``CardPreview`` every other slot uses.
+
+        The portrait keeps its hover rim so the target still reads as live.
+        """
+        player = ctx.player
+        name = player.display_character if player.character is not None else None
+        hovered = rect.collidepoint(ctx.mouse)
+        ctx.cards.draw_portrait(name, rect, ctx.surface, highlighted=hovered,
+                                border_color=ctx.theme.brass_light if hovered
+                                else None)
+        if not hovered:
+            return
+        # The SEAT's ability, not the character's by name: for Piotrek that is
+        # the skill card in his hand, which no name lookup could reach.
+        ability = self._ability_card(ctx)
+        if ability is not None:
+            colour = ctx.theme.deck_colors[
+                settings.DECK_SKILLS if player.is_piotrek
+                else settings.DECK_CHARACTERS
+            ]
+            ctx.preview_card(ability, rect, colour)
 
     def _draw_identity_badge(self, ctx: HudContext, rect: pygame.Rect) -> None:
         """Piotrek's own colour, kept in front of him for the whole match.
@@ -689,8 +782,13 @@ class CharacterPanel(Panel):
         show_skill = player.is_piotrek
         rects = ctx.layout.character_panel(show_skill)
 
-        card_rect: pygame.Rect = rects["card"]  # type: ignore[assignment]
-        if card_rect.collidepoint(ctx.mouse) and player.character is not None:
+        # The discard gesture MOVED WITH THE CARD (stage 50).  It used to live
+        # on the ability card slot; that slot is gone, and the portrait is now
+        # the character's representation in this column, so it inherits the
+        # click.  Same gesture, same command, new target — hovering still only
+        # previews, and only a real click discards.
+        portrait_rect: pygame.Rect = rects["portrait"]  # type: ignore[assignment]
+        if portrait_rect.collidepoint(ctx.mouse) and player.character is not None:
             return [cmd.DiscardTopCharacterCard(player_index=player.index)]
         if show_skill and rects["skill_draw"].collidepoint(ctx.mouse):  # type: ignore[union-attr]
             return [cmd.DrawSkill(player_index=player.index)]

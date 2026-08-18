@@ -32,6 +32,7 @@ from ..config import settings
 from ..config.theme import darken, lighten, mix
 from .card_art import CardArtLibrary
 from .card_back import CardBackLibrary
+from .portrait import PortraitLibrary
 from .renderer import Renderer
 
 Color = Tuple[int, int, int]
@@ -56,6 +57,17 @@ CARD_TYPE_ANCHOR = 1.44
 #: long word whole.  Named because ``_title_font`` and ``face`` must agree.
 TITLE_FRACTION = 0.068
 TITLE_MIN_STEP = 0.75
+#: How far a title may shrink when the problem is its LENGTH rather than one
+#: long word, and how many lines it may then occupy.  Separate from
+#: ``TITLE_MIN_STEP`` because they answer different questions: that one stops
+#: where a whole word stops being worth keeping, this one stops where a name
+#: stops being a heading.  Three lines is the ceiling — a title that needs four
+#: is a description.
+TITLE_LENGTH_MIN_STEP = 0.58
+TITLE_MAX_LINES = 3
+#: Body text on a PARCHMENT card.  Quoted here so ``face`` and
+#: ``_description_font`` agree, the way ``_title_font`` and ``face`` do.
+BODY_FRACTION = 0.054
 
 # ── Signature Cards ──────────────────────────────────────────────────────────
 #: Every number below is a fraction of the CARD, never of the interface scale,
@@ -107,7 +119,8 @@ def _lerp(low: float, high: float, t: float) -> float:
 class CardRenderer:
     def __init__(self, renderer: Renderer, library: ContentLibrary,
                  art: Optional[CardArtLibrary] = None,
-                 backs: Optional[CardBackLibrary] = None) -> None:
+                 backs: Optional[CardBackLibrary] = None,
+                 portraits: Optional[PortraitLibrary] = None) -> None:
         self.r = renderer
         self.library = library
         self.theme = renderer.theme
@@ -121,6 +134,14 @@ class CardRenderer:
         #: reason ``art`` is, and SEPARATE from it: a card back is not card
         #: art, and neither may ever resolve through the other's folder.
         self.backs = backs if backs is not None else CardBackLibrary()
+        #: Which picture is the face of which CHARACTER.  A third asset library
+        #: beside ``art`` and ``backs``, injectable for the same reason and as
+        #: strictly separate: a portrait is not card art and neither may ever
+        #: resolve through the other's folder.  ``ui/`` reaches it only through
+        #: :meth:`portrait` and :meth:`draw_portrait`, so there is one opinion
+        #: about what a character looks like, exactly as ``has_art`` keeps one
+        #: opinion about what counts as artwork.
+        self.portraits = portraits if portraits is not None else PortraitLibrary()
 
     def clear_cache(self) -> None:
         """Drop cached faces — called when the window resizes."""
@@ -180,7 +201,8 @@ class CardRenderer:
                                 display=display)
 
     def _title_font(self, size: Size, text: str, max_width: int,
-                    fraction: float = TITLE_FRACTION, display: bool = False):
+                    fraction: float = TITLE_FRACTION, display: bool = False,
+                    max_lines: int = TITLE_MAX_LINES):
         """The title font, shrunk until the longest WORD fits on a line.
 
         ``Renderer.wrap_lines`` breaks mid-word when a word cannot fit, which
@@ -192,17 +214,44 @@ class CardRenderer:
         The type gives way instead, down to three quarters of its size — past
         that the cure is worse than the disease and the mid-word break is
         allowed to happen, because an unreadable whole word is not a win.
+
+        A SECOND, LONGER SHRINK handles the other way a title can fail (stage
+        50): not one impossible word, but too many ordinary ones.  Callers used
+        to wrap the result and keep ``[:2]``, which silently ATE the rest —
+        "Przerwanie Systemowe Poziomu Drugiego" arrived on screen as a title
+        that stops mid-thought, and nothing about the card said so.  So the
+        type keeps giving way, down to ``TITLE_LENGTH_MIN_STEP``, until the
+        whole title fits in ``max_lines``; only if even that fails does the
+        clip happen, and by then the title is genuinely a paragraph.
+
+        Titles that already fit are untouched: both loops exit on the first
+        iteration at full size, so nothing that renders correctly today moves.
         """
         words = text.split()
         if not words:
             return self._font(size, fraction, bold=True, display=display)
+
+        def fits_words(font) -> bool:
+            return all(font.size(word)[0] <= max_width for word in words)
+
+        def fits_lines(font) -> bool:
+            return len(self.r.wrap_lines(text, font, max_width)) <= max_lines
+
         step = 1.0
         while step >= TITLE_MIN_STEP:
             font = self._font(size, fraction * step, bold=True, display=display)
-            if all(font.size(word)[0] <= max_width for word in words):
+            if fits_words(font) and fits_lines(font):
                 return font
             step -= 0.04
-        return self._font(size, fraction * TITLE_MIN_STEP, bold=True,
+        # The whole word could not be kept at a readable size, or the title is
+        # simply long.  Keep shrinking for LENGTH alone — a mid-word break is
+        # now permitted, so only the line count is still worth chasing.
+        while step >= TITLE_LENGTH_MIN_STEP:
+            font = self._font(size, fraction * step, bold=True, display=display)
+            if fits_lines(font):
+                return font
+            step -= 0.04
+        return self._font(size, fraction * TITLE_LENGTH_MIN_STEP, bold=True,
                           display=display)
 
     # ── faces ────────────────────────────────────────────────────────────────
@@ -304,11 +353,11 @@ class CardRenderer:
 
         pawn_color = self._pawn_color(card.badge)
         title_color = darken(pawn_color, 0.55) if pawn_color else theme.card_title
-        body_font = self._font(size, 0.054)
 
         pad = inset + max(4, int(w * 0.05))
         title_font = self._title_font(size, card.title, w - 2 * pad)
-        title_lines = self.r.wrap_lines(card.title, title_font, w - 2 * pad)[:2]
+        title_lines = self.r.wrap_lines(card.title, title_font,
+                                        w - 2 * pad)[:TITLE_MAX_LINES]
         row_h = title_font.get_height() + 1
         title_top = inset + max(4, int(h * 0.030))
         for i, line in enumerate(title_lines):
@@ -334,11 +383,22 @@ class CardRenderer:
                 surface.blit(scaled, (pad, body_top))
                 body_top += art_h + 4
 
-        self.r.draw_wrapped(
-            card.text, body_font, theme.card_text,
-            pygame.Rect(pad, body_top, w - 2 * pad, h - body_top - badge_h - 4),
-            surface,
+        # THE BODY IS FITTED, NOT CLIPPED (stage 50).  This used to draw at a
+        # fixed fraction and let ``draw_wrapped`` cut whatever ran past the
+        # bottom, which is invisible in a thumbnail and glaring in the enlarged
+        # preview: an ability with no artwork lost the end of its own rules
+        # text, and the longer the text the more of it went missing.  The type
+        # now gives way instead, through the SAME fitter the Signature face
+        # uses — so a card without artwork is no longer the one place a
+        # description can be silently truncated.
+        body_room = pygame.Rect(pad, body_top, w - 2 * pad,
+                                h - body_top - badge_h - 4)
+        body_font, _ = self._description_font(
+            size, card.text, (body_room.width, body_room.height),
+            fraction=BODY_FRACTION,
         )
+        self.r.draw_wrapped(card.text, body_font, theme.card_text, body_room,
+                            surface)
 
         if card.badge is not None:
             self._draw_badge(surface, size, card.badge)
@@ -405,8 +465,16 @@ class CardRenderer:
                     surface.blit(ring, (rect.x + dx, rect.y + dy))
         self.r.text(text, font, theme.card_art_title, surface, midtop=midtop)
 
-    def _description_font(self, size: Size, text: str, room: Tuple[int, int]):
+    def _description_font(self, size: Size, text: str, room: Tuple[int, int],
+                          fraction: float = SIGNATURE_TEXT_FRACTION):
         """The largest description type whose wrapped lines fit ``room``.
+
+        Shared by the Signature face and — since stage 50 — the PARCHMENT face,
+        which used a fixed size and let ``draw_wrapped`` clip whatever did not
+        fit.  ``fraction`` is what keeps that reuse honest: a parchment body
+        starts from its own ``BODY_FRACTION``, so every card that already fit
+        renders at exactly the size it always did and only the ones that were
+        being cut off change.
 
         Quoted as a fraction of the CARD and shrunk from there, so it obeys the
         stage-29 invariant (a card of a given pixel size renders identically on
@@ -415,13 +483,13 @@ class CardRenderer:
         """
         room_w, room_h = room
         step = 1.0
-        font = self._font(size, SIGNATURE_TEXT_FRACTION)
+        font = self._font(size, fraction)
         lines = self.r.wrap_lines(text, font, room_w) if text else []
         while step > SIGNATURE_TEXT_MIN:
             if not lines or len(lines) * (font.get_height() + 2) <= room_h:
                 break
             step -= 0.05
-            font = self._font(size, SIGNATURE_TEXT_FRACTION * step)
+            font = self._font(size, fraction * step)
             lines = self.r.wrap_lines(text, font, room_w)
         # Below ``SIGNATURE_TEXT_MIN`` — and on a card so small that the font
         # floor in ``_font`` has taken over — shrinking has stopped helping, so
@@ -511,7 +579,8 @@ class CardRenderer:
 
         title_font = self._title_font(size, card.title, room_w,
                                       SIGNATURE_TITLE_FRACTION, display=True)
-        title_lines = self.r.wrap_lines(card.title, title_font, room_w)[:2]
+        title_lines = self.r.wrap_lines(card.title, title_font,
+                                        room_w)[:TITLE_MAX_LINES]
         title_row = title_font.get_height() + 1
         title_h = len(title_lines) * title_row
 
@@ -736,6 +805,81 @@ class CardRenderer:
     ) -> pygame.Rect:
         """Draw a card filling a rect — the form every panel uses."""
         return self.draw(card, rect.x, rect.y, surface, size=(rect.w, rect.h), **kwargs)
+
+    # ── character portraits ──────────────────────────────────────────────────
+    def portrait(self, name: Optional[str]) -> Optional[pygame.Surface]:
+        """What to paint for a character — its own portrait or the placeholder.
+
+        The whole of the fallback lives in ``PortraitLibrary.surface``, so a
+        caller never has to ask which of the two it got.  ``None`` only when
+        even the placeholder is missing, which is the "draw the empty well"
+        case and the one thing the panel still branches on.
+        """
+        return self.portraits.surface(name)
+
+    def has_portrait(self, name: Optional[str]) -> bool:
+        """Whether this character has a portrait OF ITS OWN.
+
+        Not "is there something to draw" — :meth:`portrait` answers that, and
+        almost always yes.  This is the question a test and a future "portrait
+        missing" indicator would ask, and it goes through the renderer for the
+        reason ``has_art`` does: one opinion, in one place.
+        """
+        return self.portraits.has_portrait(name)
+
+    @staticmethod
+    def _round_mask(layer: pygame.Surface, radius: int) -> None:
+        """Clip ``layer`` in place to a rounded rectangle.
+
+        ``BLEND_RGBA_MIN`` against an opaque rounded rect takes the minimum of
+        every channel: the colours are untouched (nothing is brighter than the
+        mask's 255) and the alpha outside the corners drops to zero.  A picture
+        blitted square into a rounded well would poke its corners through the
+        frame, which is the one way this can look cheap.
+        """
+        mask = pygame.Surface(layer.get_size(), pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(),
+                         border_radius=radius)
+        layer.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+
+    def draw_portrait(
+        self, name: Optional[str], rect: pygame.Rect,
+        surface: Optional[pygame.Surface] = None, *,
+        highlighted: bool = False, border_color: Optional[Color] = None,
+    ) -> pygame.Rect:
+        """A character's portrait, framed the way every other slot is framed.
+
+        The FRAME IS DRAWN, the PICTURE IS AN ASSET.  That split is what lets
+        the placeholder be replaced with a photograph without it suddenly
+        needing a border baked into it, and it is the same bargain
+        ``card_art`` strikes: the game paints the furniture, the file supplies
+        the image and nothing else.
+
+        Cover-scaled through the same :meth:`_cover` a Signature card face uses,
+        so a portrait fills its well, keeps its proportions exactly, and spends
+        the difference on a crop rather than on letterboxing against the panel.
+        """
+        target = self.r.target(surface)
+        theme = self.theme
+        radius = max(6, int(min(rect.width, rect.height) * 0.10))
+
+        # The well is drawn FIRST and unconditionally, so a character with no
+        # picture at all still leaves a hole of the right shape rather than a
+        # gap in the column.
+        self.r.inset_well(rect, target, radius=radius)
+
+        picture = self.portrait(name)
+        if picture is not None and rect.width > 0 and rect.height > 0:
+            layer = self._cover(picture, (rect.width, rect.height))
+            self._round_mask(layer, radius)
+            target.blit(layer, rect.topleft)
+
+        border = border_color if border_color is not None else theme.panel_edge
+        if highlighted:
+            border = lighten(border, 0.4)
+        width = max(2, int(rect.height * 0.014))
+        pygame.draw.rect(target, border, rect, width, border_radius=radius)
+        return rect
 
     def _silhouette(self, surface: pygame.Surface, key: tuple) -> pygame.Surface:
         """A black copy of a card surface, used as its shadow.

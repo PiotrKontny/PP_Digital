@@ -147,13 +147,21 @@ class CardLibrary:
                                    radius=9, primary=True)
 
     # ── what is in it ────────────────────────────────────────────────────────
-    def _display_card(self, definition: CardDef) -> Card:
+    def _display_card(self, definition: CardDef,
+                      as_ability: bool = False) -> Card:
         """One throwaway card to draw, read the way THIS MATCH reads it.
 
         A card with variants is shown under the variant the match is playing —
         the description on its face is the one the rules are actually using —
         and that comes from the game state, exactly as every number in this
         file does.  The library still invents nothing: it asks.
+
+        ``as_ability`` swaps the card onto its :attr:`CardDef.ability_face`,
+        which is how the ability tab shows "Granny Costume" rather than "Big D
+        Randy".  ORDER MATTERS: the variant is resolved FIRST, under the
+        character's own title, because that is the title the match's variant
+        settings are keyed by — taking the ability face first would ask the
+        state about a card called "Granny Costume", which no deck contains.
         """
         variant = ""
         if definition.has_variants:
@@ -162,11 +170,23 @@ class CardLibrary:
             if chosen is not None:
                 definition = chosen
                 variant = chosen.selected_variant
+        if as_ability:
+            definition = definition.ability_face
         card = Card(definition)
         return card
 
-    def _entry_for(self, definition: CardDef, **kwargs) -> LibraryEntry:
-        card = self._display_card(definition)
+    def _entry_for(self, definition: CardDef, as_ability: bool = False,
+                   **kwargs) -> LibraryEntry:
+        """One cell.  ``title`` is the CARD's, never the ability face's.
+
+        The entry's ``title`` is the identity every COMMAND uses —
+        ``AdjustAbilityUses``, ``RestoreAbilityUses`` and
+        ``GameState.ability_card`` all find a character card by its own title —
+        so it stays "Big D Randy" even when the face drawn above it says
+        "Granny Costume".  That split is the whole of this fix: what the
+        player reads is the ability, what the engine is told is the card.
+        """
+        card = self._display_card(definition, as_ability=as_ability)
         return LibraryEntry(card=card, title=definition.title,
                             variant=card.variant, **kwargs)
 
@@ -202,10 +222,15 @@ class CardLibrary:
         ability and a number of uses — for the same reason: a charge counter on
         a card that can never spend one is a control that does nothing.
 
-        A CHARACTER CARD *IS* ITS ABILITY CARD.  ``Lubin`` is the card and
-        ``Jazdy`` is the ability printed on it, which is why the owner's name
-        goes ABOVE the card rather than being looked up in a table.  One of
-        Piotrek's skills is its own card, so its owner is Piotrek himself.
+        A CHARACTER CARD *IS* ITS ABILITY CARD, but it is not called the same
+        thing.  ``Lubin`` is the character and ``Jazdy`` is the ability printed
+        on it, and this tab is the ABILITIES tab — so the card is drawn under
+        its :attr:`CardDef.ability_face` and the character's name goes above it
+        as the owner.  Until stage 49 the face carried the CHARACTER's name,
+        which meant the tab titled every ability after its owner and looked its
+        artwork up under the owner's name too, so an ability whose picture
+        existed showed a parchment card.  One of Piotrek's skills is its own
+        card with no separate skill name, so its ability face is itself.
         """
         entries: List[LibraryEntry] = []
         piotrek = self._piotrek_name()
@@ -216,8 +241,8 @@ class CardLibrary:
                 owner = (definition.title if deck_id == settings.DECK_CHARACTERS
                          else piotrek)
                 entries.append(self._entry_for(
-                    definition, owner=owner,
-                    ability=definition.skill or definition.title,
+                    definition, as_ability=True, owner=owner,
+                    ability=definition.ability_face.title,
                 ))
         return LibraryTab(id="abilities", label="Umiejętności",
                           heading="UMIEJĘTNOŚCI", entries=entries,
@@ -582,9 +607,15 @@ class CardLibrary:
                 current = self.state.card_variant(entry.card.deck_id,
                                                   entry.title)
                 if current and current != entry.variant:
+                    # ``printed`` leads back to the CHARACTER definition even
+                    # when the face on screen is the ability's, because
+                    # ``ability_face`` renames without disturbing ``base`` —
+                    # so the rebuild starts from the same place the first build
+                    # did, and has to ask for the ability face again.
                     definition = entry.card.definition.printed
                     tab.entries[index] = self._entry_for(
-                        definition, owner=entry.owner, ability=entry.ability)
+                        definition, as_ability=tab.abilities,
+                        owner=entry.owner, ability=entry.ability)
 
     def update(self, dt: float, layout: Layout, mouse: Tuple[int, int]) -> None:
         if not self.active:
@@ -731,25 +762,19 @@ class CardLibrary:
     def _draw_owner(self, r: Renderer, surface: pygame.Surface,
                     box: pygame.Rect, entry: LibraryEntry,
                     scale: float) -> None:
-        """WHO owns this ability, and what it is called.
+        """WHO owns this ability.
 
-        The owner is what the brief asks for and what the player looks for.
-        The ability's own name is under it because a character card's face
-        carries the character's name and its rules text but NOT the name of the
-        skill printed on it — "Granny Costume" appears nowhere else in the
-        interface, and the engine announces uses by exactly that name.
-        Suppressed when the two are the same word, which is the case for every
-        one of Piotrek's skills.
+        Just the character, because since stage 49 the CARD carries the
+        ability's own name on its face.  This used to print the ability
+        underneath the owner as well, and it had to: the face said "Big D
+        Randy", so "Granny Costume" appeared nowhere in the interface unless
+        this line drew it.  Now that the face is right, repeating it here would
+        be the same word twice in two sizes.
+
+        The split it stands for has not changed and is the point of the tab —
+        above the card is WHO, on the card is WHAT.
         """
         theme = r.theme
-        if entry.ability and entry.ability != entry.owner:
-            r.text(entry.owner, r.fonts.get(int(16 * scale), bold=True),
-                   theme.brass_bright, surface,
-                   midbottom=(box.centerx, box.centery + int(2 * scale)))
-            r.text(entry.ability, r.fonts.get(int(12 * scale)),
-                   theme.text_dim, surface,
-                   midtop=(box.centerx, box.centery + int(3 * scale)))
-            return
         r.text(entry.owner, r.fonts.get(int(16 * scale), bold=True),
                theme.brass_bright, surface,
                center=(box.centerx, box.centery))

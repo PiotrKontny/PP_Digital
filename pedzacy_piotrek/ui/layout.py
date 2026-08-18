@@ -54,6 +54,43 @@ from ..config.settings import RULES
 #: Cards keep this aspect ratio wherever they are drawn.
 CARD_ASPECT = 200 / 140
 
+#: The character portrait's WIDTH as a share of its height.  Slightly under 1
+#: — a portrait is a face, and a face is taller than it is wide — but close to
+#: square, because the right-hand column is narrow and a tall portrait would
+#: buy its height from the ability card underneath it.
+PORTRAIT_ASPECT = 0.94
+
+#: The portrait's weight in the right column's vertical budget, in CARD HEIGHTS,
+#: as the ``(roomy, tight)`` pair every adaptive number in this class is written
+#: as.  It is divided among the same rows the ability card and the deck piles
+#: are divided among, so the portrait and the cards shrink TOGETHER and neither
+#: can push the other off the panel.
+#:
+#: THE SHARE ITSELF MOVES, which is the module's whole thesis about responsive
+#: layout: a portrait worth 1.35 cards is a handsome thing on a 2560x1440 panel
+#: and would leave a 1280x760 ability card smaller than the mod slot stage 48
+#: called unreadable.  So the portrait gives ground faster than the cards do,
+#: exactly as ``panel_scale`` does for the side columns.
+PORTRAIT_ROWS = (1.35, 0.72)
+
+#: The DRAW/DISCARD PILES' height as a share of the ability card's, written as
+#: the ``(roomy, tight)`` pair.  1.0 at the reference display, so nothing moves
+#: on the owner's desktop; below it the piles give ground FIRST.
+#:
+#: They are the right thing to shrink.  A pile shows a card BACK and a count —
+#: there is nothing on it to read — while the ability card carries a Polish
+#: rules sentence and is the one thing in this column stage 29's readability
+#: floor is really about.  Shrinking the piles is how a 1280x760 Piotrek panel
+#: affords a portrait without taking a pixel from the ability.
+PILE_SHARE = (1.0, 0.70)
+
+#: On most windows a card's height is capped by the column's WIDTH, not by the
+#: height available, so the column has room left over that used to go entirely
+#: to centring.  The portrait takes this share of it and the rest still centres
+#: the content, which is what lets the portrait be generous at 2560x1440
+#: without costing the ability card a single pixel there.
+PORTRAIT_SLACK_SHARE = 0.82
+
 #: The display the game is DESIGNED on.  Everything below is expressed as "how
 #: far short of this are we", and at exactly this size every responsive rule
 #: collapses to the stage-28 behaviour — the owner's desktop must not move
@@ -494,13 +531,29 @@ class Layout:
         """
         return max(6, int(10 * self.ui_scale))
 
-    def hover_preview_size(self, anchor: pygame.Rect) -> Tuple[int, int]:
-        """How big the preview of a card drawn in ``anchor`` should be.
+    @property
+    def portrait_aspect(self) -> float:
+        """A portrait's HEIGHT as a share of its width.
+
+        The same form ``CARD_ASPECT`` takes, so the two can be passed to the
+        same geometry without either call site having to remember which way up
+        the ratio is.
+        """
+        return 1.0 / PORTRAIT_ASPECT
+
+    def hover_preview_size(self, anchor: pygame.Rect,
+                           aspect: float = CARD_ASPECT) -> Tuple[int, int]:
+        """How big the preview of the thing drawn in ``anchor`` should be.
 
         Quoted against the ANCHOR first, so the preview is always a real
         enlargement of the thing under the cursor, then clamped by what the
-        window can actually show.  Card proportions are kept exactly — the
-        preview is the same card, larger, not a differently shaped panel.
+        window can actually show.  Proportions are kept exactly — the preview
+        is the same thing, larger, not a differently shaped panel.
+
+        ``aspect`` is height-over-width and defaults to a CARD's, which is what
+        every caller wanted until character portraits arrived.  A portrait
+        passes its own, so an enlarged face is a face and not a face letterboxed
+        into a card.
         """
         bounds = self.hover_preview_bounds
         gap = self.hover_preview_gap
@@ -513,9 +566,9 @@ class Layout:
         room = max(bounds.right - (anchor.right + gap),
                    (anchor.left - gap) - bounds.left)
         height = min(height, bounds.height * HOVER_PREVIEW_HEIGHT_SHARE,
-                     max(1, room) * CARD_ASPECT)
+                     max(1, room) * aspect)
         height = max(48, int(height))
-        return (max(34, int(height / CARD_ASPECT)), height)
+        return (max(34, int(height / aspect)), height)
 
     def hover_preview_rect(self, anchor: pygame.Rect,
                            size: Tuple[int, int]) -> pygame.Rect:
@@ -714,7 +767,7 @@ class Layout:
         # geometry.  Mixing the two is what makes a heading touch a card.
         self.r_title_h = int(20 * self.type_scale)
         self.r_name_h = int(26 * self.type_scale)
-        #: Piotrek's own colour badge, above 'Twoja Postać'.  Reserved whenever
+        #: Piotrek's own colour badge, at the top of the column.  Reserved whenever
         #: the panel is Piotrek's, chosen colour or not, so the geometry depends
         #: on ONE thing (show_skill) that both the drawing and the click
         #: handling already have.  Making it depend on whether a colour is known
@@ -740,22 +793,69 @@ class Layout:
         # left a hunter's panel with a hand's width of unused space.
         self._right_sizes: Dict[bool, Tuple[int, int]] = {}
         self._right_pair_x: Dict[bool, int] = {}
+        #: The character portrait, per case.  Sized HERE rather than in
+        #: ``character_panel`` because it competes with the cards for the same
+        #: vertical budget, and a size worked out somewhere else would be a
+        #: second opinion about how much room is left.
+        self._right_portraits: Dict[bool, Tuple[int, int]] = {}
+        #: The draw/discard piles, which are smaller than the ability card on
+        #: anything short of the reference display.  See ``PILE_SHARE``.
+        self._right_piles: Dict[bool, Tuple[int, int]] = {}
         by_width = (inner_w - self.left_card_gap) / 2 * CARD_ASPECT
+        portrait_rows = self._lerp(*PORTRAIT_ROWS)
+        pile_share = self._lerp(*PILE_SHARE)
         for show_skill in (False, True):
             rows = 3.0 if show_skill else 2.0
             labels = 2 if show_skill else 1
             grid = 0 if show_skill else grid_h
+            # ``r_title_h`` is gone from this sum: the 'Twoja Postać' section
+            # heading was retired in stage 49.  A portrait with the character's
+            # name under it labels itself, and the band it used to occupy is
+            # most of what pays for the portrait on a small window — without it
+            # a 1280x760 Piotrek panel cannot host a picture and keep its cards
+            # at the readable floor stage 29 set.
             fixed = (
-                2 * self.right_inner + self.r_title_h + self.r_name_h
+                2 * self.right_inner + self.r_name_h
                 + labels * self.r_label_h + self.r_button_h + grid
                 + (self.r_identity_h if show_skill else 0)
-                + (6 if show_skill else 5) * self.r_gap
+                # One gap more than before stage 49: the portrait band needs
+                # air under it, between the picture and the name.
+                + (7 if show_skill else 6) * self.r_gap
             )
-            card_h = min(max(70.0, (panel.height - fixed) / rows), by_width)
+            available = panel.height - fixed
+            # STAGE 50: the permanently-drawn ability card is gone from this
+            # column — the portrait previews it on hover instead — so the only
+            # cards left standing here are the draw/discard PILES.  That is a
+            # whole card row given back, and the portrait takes it, which is
+            # why it can finally be the size the mock-ups showed.
+            #
+            # ``right_cards`` survives as the size an ability card is PREVIEWED
+            # against and as the unit the piles are quoted in, so the readable
+            # floor stage 29 set still means something and the pile geometry
+            # did not have to be rewritten.
+            pile_rows = rows - 1.0
+            weight = 1.0 + pile_rows * pile_share + portrait_rows
+            card_h = min(max(70.0, available / weight), by_width)
             size = (int(card_h / CARD_ASPECT), int(card_h))
             self._right_sizes[show_skill] = size
-            pair_w = 2 * size[0] + self.left_card_gap
+            pile_h = max(48.0, card_h * pile_share)
+            pile_size = (int(pile_h / CARD_ASPECT), int(pile_h))
+            self._right_piles[show_skill] = pile_size
+            pair_w = 2 * pile_size[0] + self.left_card_gap
             self._right_pair_x[show_skill] = panel.left + (panel.width - pair_w) // 2
+
+            # Whatever the cards did not take, because their height was capped
+            # by the column's width.  Most of it goes to the portrait; the rest
+            # still centres the column.
+            # The ability card's row is now slack, and the portrait is what
+            # spends it.
+            slack = max(0.0, available - pile_rows * pile_h)
+            portrait_h = max(portrait_rows * card_h, slack * PORTRAIT_SLACK_SHARE)
+            # Never wider than the column, whatever the arithmetic above says.
+            portrait_h = min(portrait_h, inner_w / PORTRAIT_ASPECT)
+            portrait_h = max(48.0, portrait_h)
+            portrait_w = min(float(inner_w), portrait_h * PORTRAIT_ASPECT)
+            self._right_portraits[show_skill] = (int(portrait_w), int(portrait_h))
 
         # Kept for callers that do not care which case they are in.
         self.right_card_size = self._right_sizes[True]
@@ -763,6 +863,19 @@ class Layout:
 
     def right_cards(self, show_skill: bool) -> Tuple[int, int]:
         return self._right_sizes[bool(show_skill)]
+
+    def right_piles(self, show_skill: bool) -> Tuple[int, int]:
+        """The draw/discard pile size in the right column.
+
+        SEPARATE from :meth:`right_cards` since stage 49.  They were one size
+        because they happened to look alike; they answer different questions,
+        and only one of them has words on it.
+        """
+        return self._right_piles[bool(show_skill)]
+
+    def portrait_size(self, show_skill: bool) -> Tuple[int, int]:
+        """How big the character portrait is in this case."""
+        return self._right_portraits[bool(show_skill)]
 
     def right_pair_left(self, show_skill: bool) -> int:
         return self._right_pair_x[bool(show_skill)]
@@ -779,16 +892,19 @@ class Layout:
         Used to centre it: whatever is left over after the cards have taken
         what they can is split evenly above and below.
         """
-        card_h = self.right_cards(show_skill)[1]
+        pile_h = self.right_piles(show_skill)[1]
         gap = self.r_gap
         grid_h = (
             self.pk_title_h + 2 * self.pk_circle_d + self.pk_row_gap + self.pk_pad
         )
-        total = (self.r_title_h + self.r_name_h + gap // 2 + card_h
+        # No ability-card row since stage 50 — the portrait is the only card-
+        # shaped thing above the deck sections now.
+        total = (self.portrait_size(show_skill)[1] + gap
+                 + self.r_name_h + gap // 2
                  + self.r_button_h + gap)
         if show_skill:
-            total += self.r_identity_h + self.r_label_h + card_h + gap
-        total += self.r_label_h + card_h + gap
+            total += self.r_identity_h + self.r_label_h + pile_h + gap
+        total += self.r_label_h + pile_h + gap
         if not show_skill:
             total += grid_h
         return total
@@ -803,10 +919,11 @@ class Layout:
         """Rects for the right-hand panel.
 
         When the active player is Piotrek an extra 'Umiejętności Piotrka' deck
-        section is inserted between the ability card and 'Karty Postaci'.
+        section is inserted above 'Karty Postaci'.
         """
         panel = self.right_panel
         card_w, card_h = self.right_cards(show_skill)
+        pile_w, pile_h = self.right_piles(show_skill)
         pair_x = self.right_pair_left(show_skill)
         gap = self.r_gap
 
@@ -814,33 +931,46 @@ class Layout:
         identity = pygame.Rect(panel.left + self.right_inner, top,
                                panel.width - 2 * self.right_inner,
                                self.r_identity_h)
-        title_y = top + (self.r_identity_h if show_skill else 0)
-        name_y = title_y + self.r_title_h
-        card_y = name_y + self.r_name_h + gap // 2
-        card_rect = pygame.Rect(panel.centerx - card_w // 2, card_y, card_w, card_h)
+        # PIOTREK'S IDENTITY STAYS ON TOP.  The portrait goes under it, not over
+        # it: the badge is the one thing on this screen Piotrek has to be able
+        # to find without looking, it has been the first line of the column
+        # since it existed, and the owner's mock-up shows that order.  The
+        # portrait is an additional representation of the character, so it
+        # joins the column rather than reordering it.
+        portrait_w, portrait_h = self.portrait_size(show_skill)
+        portrait_y = top + (self.r_identity_h if show_skill else 0)
+        portrait = pygame.Rect(panel.centerx - portrait_w // 2, portrait_y,
+                               portrait_w, portrait_h)
+
+        name_y = portrait.bottom + gap
 
         rects: Dict[str, object] = {
             "identity": identity,
-            "title_y": title_y, "name_y": name_y, "card": card_rect,
+            "portrait": portrait,
+            "name_y": name_y,
         }
-        # The ability button lives directly under the card, so everything below
-        # it has to make room — otherwise the next deck label sits on top of it.
-        y = card_rect.bottom + self.r_button_h + gap
+        # NO "card" KEY SINCE STAGE 50.  The ability card is not drawn in this
+        # column any more — the portrait previews it — so there is no rectangle
+        # to hand out, and a stale one would be a target nothing paints.
+        #
+        # The ability button now follows the NAME.  Everything below it still
+        # has to make room, otherwise the next deck label sits on top of it.
+        y = name_y + self.r_name_h + gap // 2 + self.r_button_h + gap
 
         if show_skill:
             rects["skill_label_y"] = y
             row_y = y + self.r_label_h
-            rects["skill_draw"] = pygame.Rect(pair_x, row_y, card_w, card_h)
+            rects["skill_draw"] = pygame.Rect(pair_x, row_y, pile_w, pile_h)
             rects["skill_disc"] = pygame.Rect(
-                pair_x + card_w + self.left_card_gap, row_y, card_w, card_h
+                pair_x + pile_w + self.left_card_gap, row_y, pile_w, pile_h
             )
-            y = row_y + card_h + gap
+            y = row_y + pile_h + gap
 
         rects["char_label_y"] = y
         row_y = y + self.r_label_h
-        rects["char_draw"] = pygame.Rect(pair_x, row_y, card_w, card_h)
+        rects["char_draw"] = pygame.Rect(pair_x, row_y, pile_w, pile_h)
         rects["char_disc"] = pygame.Rect(
-            pair_x + card_w + self.left_card_gap, row_y, card_w, card_h
+            pair_x + pile_w + self.left_card_gap, row_y, pile_w, pile_h
         )
         return rects
 
@@ -870,18 +1000,22 @@ class Layout:
         return pygame.Rect(board.left + inset, board.top + inset, width, height)
 
     def ability_button_rect(self, show_skill: bool) -> pygame.Rect:
-        """The 'use ability' button, tucked under the ability card.
+        """The 'use ability' button, tucked under the character's name.
+
+        Under the NAME since stage 50 — it used to hang off the bottom of the
+        ability card, and that card is no longer drawn in this column.
 
         Full inner width of the column: the caption is a long Polish phrase
         plus a use counter, and sizing the box to the card above it left the
         text with nowhere to go.  Every pixel here is already paid for by the
         panel, so there is nothing to save by making it narrower.
         """
-        card = self.character_panel(show_skill)["card"]
+        rects = self.character_panel(show_skill)
+        name_y = int(rects["name_y"])  # type: ignore[arg-type]
+        top = name_y + self.r_name_h + self.r_gap // 2
         width = self.right_panel.width - 2 * self.right_inner
-        width = max(width, min(int(card.width * 1.3), width))
         return pygame.Rect(
-            self.right_panel.centerx - width // 2, card.bottom + 4,
+            self.right_panel.centerx - width // 2, top + 4,
             width, self.r_button_h - 6,
         )
 

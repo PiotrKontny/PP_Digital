@@ -57,20 +57,39 @@ class PreviewRequest:
     """One slot's claim on this frame's preview."""
 
     card: Card
-    #: The rect the ORIGINAL card is drawn in.  The preview is placed relative
-    #: to it and never overlaps it; see ``Layout.hover_preview_gap``.
+    #: The rect the ORIGINAL element is drawn in.  The preview is placed
+    #: relative to it and never overlaps it; see ``Layout.hover_preview_gap``.
     anchor: pygame.Rect
     border_color: Optional[Color] = None
 
 
 class CardPreview:
-    """Collects at most one preview request per frame and draws it last."""
+    """Collects at most one preview request per frame and draws it last.
+
+    ONE request, whatever asked for it.  Five different hover targets now feed
+    this — a hand card, a mod in the rack, an ability button's card, a
+    character portrait and a circle in the turn-order map — and they stay
+    conflict-free for free: there is one cursor, so at most one of them can be
+    asking, and if two ever overlapped the last caller would simply win.  There
+    is no hover state to unwind and no way to end up with two expanded cards.
+
+    A PORTRAIT IS NEVER PREVIEWED.  Stage 49 briefly gave this a second payload
+    so a portrait could enlarge itself; stage 50 removed it, because enlarging
+    the picture answered a question the player did not have.  The portrait is a
+    hover TARGET that resolves to a CARD — which is why this only ever needs to
+    know how to draw one thing.
+    """
 
     def __init__(self) -> None:
         self._pending: Optional[PreviewRequest] = None
         #: Where the preview landed last time it was drawn.  Read by tests and
         #: by nothing in the game — no gesture consults it, on purpose.
         self.rect: Optional[pygame.Rect] = None
+        #: WHICH card was drawn there, for the same audience and the same
+        #: reason.  A rectangle proves a preview appeared; with four hover
+        #: targets feeding one preview, the question worth asking is whether
+        #: the RIGHT card appeared, and nothing else on screen can answer it.
+        self.previewed: Optional[Card] = None
 
     # ── the panel side ───────────────────────────────────────────────────────
     def request(self, card: Optional[Card], anchor: pygame.Rect,
@@ -83,6 +102,7 @@ class CardPreview:
     def clear(self) -> None:
         self._pending = None
         self.rect = None
+        self.previewed = None
 
     @property
     def pending(self) -> Optional[PreviewRequest]:
@@ -99,6 +119,7 @@ class CardPreview:
         request, self._pending = self._pending, None
         if request is None:
             self.rect = None
+            self.previewed = None
             return None
 
         layout, cards = ctx.layout, ctx.cards
@@ -137,4 +158,5 @@ class CardPreview:
                       border_color=request.border_color, reveal=1.0)
 
         self.rect = rect
+        self.previewed = request.card
         return rect

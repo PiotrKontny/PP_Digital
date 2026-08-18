@@ -32,6 +32,19 @@ CARD_ART_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 #: card-art file is found by the CARD's name, a file here belongs to a DECK and
 #: is named in ``CARD_BACKS`` below.  See ``render/card_back.py``.
 CARD_BACK_DIR = ASSETS_DIR / "card_backs"
+#: CHARACTER PORTRAITS, one picture per character, addressed by the CHARACTER's
+#: name exactly as ``card_art`` is addressed by the CARD's.  A fourth folder
+#: rather than a subfolder of ``card_art`` because a portrait is not a card
+#: face: it is never drawn as a card, it has no title or rules text painted
+#: over it, and a character's portrait and its ability's artwork are two
+#: different pictures that must not be able to resolve through each other —
+#: "Big D Randy" is a face, "Granny Costume" is a card.  See
+#: ``render/portrait.py``.
+PORTRAIT_DIR = ASSETS_DIR / "portraits"
+#: The file every character without a portrait of its own falls back to.  A
+#: NAME, not a path: replacing the placeholder is dropping a new file here
+#: under this name, and nothing in the code names any other portrait file.
+PORTRAIT_PLACEHOLDER = "placeholder.png"
 
 CARDS_FILE = DATA_DIR / "cards.json"
 CHARACTERS_FILE = DATA_DIR / "characters.json"

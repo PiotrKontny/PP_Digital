@@ -273,7 +273,7 @@ def test_a_text_band_really_holds_the_type_it_is_given(size):
 
 
 @pytest.mark.parametrize("size", SIZES)
-def test_the_character_name_does_not_run_into_its_ability_card(size):
+def test_the_character_name_does_not_run_into_what_follows_it(size):
     """KNOWN DEFECT above the laptop band — pinned here so it cannot grow.
 
     The name is drawn with ``fonts.get(int(21 * ui_scale))``, and FontBook
@@ -297,7 +297,10 @@ def test_the_character_name_does_not_run_into_its_ability_card(size):
 
     for show_skill in (False, True):
         rects = layout.character_panel(show_skill)
-        clearance = rects["card"].top - rects["name_y"]
+        # Against the ABILITY BUTTON since stage 50: the ability card that used
+        # to sit under the name is no longer drawn in this column, and the
+        # button is what the name can now collide with.
+        clearance = layout.ability_button_rect(show_skill).top - int(rects["name_y"])
         overhang = name.get_height() - clearance
         if size[1] <= 1200:
             assert overhang <= 0, f"{size}: the name overhangs by {overhang}"
@@ -375,7 +378,7 @@ def test_the_columns_still_hold_their_contents(size):
     right = layout.right_panel
     for show_skill in (False, True):
         rects = layout.character_panel(show_skill)
-        for key in ("card", "char_draw", "char_disc"):
+        for key in ("portrait", "char_draw", "char_disc"):
             assert right.contains(rects[key]), (size, show_skill, key)
 
 
