@@ -1859,6 +1859,12 @@ class GameScreen(Screen):
             self._leave_match()
         elif choice == "quit":
             self._leave_match(quit_app=True)
+        elif choice == "close_room":
+            # The room ends for everybody; this client learns about it the same
+            # way the others do, through MATCH_ENDED, so there is nothing to do
+            # here but ask and close the menu.
+            self.pause_menu.close()
+            self.service.close_room()
         elif choice == "reset_board":
             # Closed first, so the board the reset lands on is the board the
             # player is looking at.
@@ -1874,6 +1880,11 @@ class GameScreen(Screen):
         else:
             entries.append(("leave", "Wróć do menu głównego"))
         entries.append(("quit", "Wyjdź z gry"))
+        if self.service is not None and self.service.is_host:
+            # Host only, matching the server's rule rather than guessing at it.
+            # Offered next to the other endings and not among them: leaving is
+            # about this seat, closing is about everybody's.
+            entries.append(("close_room", "Zamknij pokój"))
         if self.may_reset_board:
             # LAST, deliberately, and behind Esc rather than on the board.  It
             # used to be a button directly under COFNIJ RUCH, which put the one

@@ -1220,6 +1220,82 @@ MODIFIED
 
 
 ================================================================================
+ROOM LIFECYCLE  (stage 55 — read before touching join/leave/disconnect)
+================================================================================
+
+WHY THIS LOOKED LIKE A DEPLOYMENT PROBLEM
+-----------------------------------------
+`ServerConfig.max_rooms` is 1, so a room that outlives the people in it is not
+wasted memory — it IS the server. Every attempt to open a new one is answered
+"Serwer jest zajęty — wszystkie pokoje są w użyciu" until
+`room_idle_timeout` (900s) expires. Nobody waits fifteen minutes; they restart
+the Railway deployment and conclude the hosting is broken. NOTHING WAS WRONG
+WITH RAILWAY. The process was up and serving the whole time; it was holding a
+room with zero members in it.
+
+THE ACTUAL DEFECT: THREE PATHS, ONE CHECK
+------------------------------------------
+A room can empty three ways, and only one of them looked:
+
+    deliberate exit (BYE / LEAVE_LOBBY)  ->  `_leave` checked        OK
+    a lobby socket dropping              ->  nothing checked         BUG
+    a grace period running out on tick   ->  nothing checked         BUG
+
+The two that were missed are the two that happen in real life: people close the
+window, laptops sleep, a match nobody comes back to. `mark_absent` frees a
+LOBBY seat immediately (nobody has anything invested before the match starts),
+so the last socket dropping really does leave a room with no members at all.
+
+THE FIX: ONE PLACE
+------------------
+`Room.abandoned` (`not self.members`) and `ServerHub._close_if_abandoned`,
+called from all three paths. Not three copies of a condition — the bug WAS
+three copies of a condition, one of which existed.
+
+ABANDONED IS ABOUT MEMBERSHIP, NOT CONNECTION, and that distinction is
+load-bearing. A player whose socket dropped mid-match still HAS a seat; their
+member entry is what `expire_absentees` is holding open for them. Reaping on
+"nobody is connected" would end matches out from under people whose train went
+into a tunnel. `is_stale` and the fifteen-minute timeout still own the slow
+path for rooms whose seats are held.
+
+WHAT WAS ALREADY THERE, and was reused rather than rebuilt: `Room.close`,
+`RoomRegistry.close`, `prune`, `is_stale`, the reconnect grace period, and
+`hub.close_room`. Almost all of the lifecycle existed; it was the calling that
+was missing.
+
+THE EXPLICIT CLOSE
+------------------
+`MessageType.CLOSE_ROOM`, client to server, HOST ONLY — checked in `_route`
+against the lobby the SERVER holds, the same ownership rule `set_settings` and
+`start` already use, never against anything the message claims. Everyone in the
+room, the host included, learns about it through the ordinary `MATCH_ENDED`
+they would get from any other closure: a room ending is the same event whoever
+caused it, so there is no special reply for the person who asked.
+
+In the interface it is an Esc-menu entry, "Zamknij pokój", offered only when
+`service.is_host`. Beside the other endings and not among them: leaving is
+about this seat, closing is about everybody's.
+
+A ROOM IS NOT THE PROCESS
+-------------------------
+Closing a room leaves the hub serving, the sockets open and the identities
+known, and the next room opens immediately. There is a test that says so,
+because the report this stage came from described restarting the deployment to
+get a new room and the fix must not quietly agree with that model. `app.py`
+ticks once a second, so the timed paths need nobody to send anything.
+
+MODIFIED
+--------
+  net/protocol.py     MessageType.CLOSE_ROOM.
+  server/hub.py       _close_if_abandoned, _forget_room, CLOSE_ROOM routing.
+  server/room.py      the `abandoned` property.
+  net/client.py       close_room().
+  net/service.py      close_room() passthrough.
+  ui/game_screen.py   the host's Esc entry.
+
+
+================================================================================
 HOW THE CARD SYSTEM WORKS
 ================================================================================
 
@@ -4514,6 +4590,14 @@ D8. HIDDEN INFORMATION SPLIT EXISTS ALREADY (to_public_dict / to_private_dict)
 ================================================================================
 KNOWN LIMITATIONS
 ================================================================================
+
+- ONE ROOM AT A TIME.  `max_rooms` is 1, so anything that keeps a room alive
+  keeps the whole server occupied.  Raising it is a one-line configuration
+  change and the registry is already written for many (see its docstring), but
+  until somebody does, every room-lifecycle bug presents as "the server is
+  broken" rather than as "that room is stuck".  Stage 55 fixed the empty-room
+  case; the remaining slow path is a room whose seats are still HELD by absent
+  players, which waits out `room_idle_timeout` (900s) by design.
 
 - AN EVENT NOTHING SUBSCRIBES TO CHANGES NOTHING ON SCREEN.  `BoardView.visual`
   is the board's own copy of where each pawn is drawn, written by the view's

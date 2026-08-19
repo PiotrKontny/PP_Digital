@@ -125,6 +125,9 @@ class NetworkService:
     def set_settings(self, **settings: Any) -> None:
         self.client.set_settings(**settings)
 
+    def close_room(self, reason: str = "") -> None:
+        self.client.close_room(reason)
+
     def start_game(self, library: Optional[ContentLibrary] = None
                    ) -> Optional[NetworkSession]:
         """Ask the server to begin.

@@ -123,6 +123,19 @@ class Room:
         return self._library
 
     @property
+    def abandoned(self) -> bool:
+        """Nobody is here and nobody is expected back.
+
+        NOT the same as "nobody is connected": a player whose socket dropped
+        mid-match still HAS a seat, and their member entry is what
+        ``expire_absentees`` is holding open for them.  Membership is what
+        empties — through a deliberate exit, through a lobby disconnection, or
+        through a grace period running out — and when it does there is nothing
+        left in this room for anybody to come back to.
+        """
+        return not self.members
+
+    @property
     def present(self) -> List[str]:
         return [m.peer_id for m in self.members.values() if m.connected]
 

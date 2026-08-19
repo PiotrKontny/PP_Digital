@@ -874,7 +874,7 @@ class PauseMenu:
         for index, ((key, label), rect) in enumerate(zip(self.entries, self.rects)):
             hovered = index == self.hover
             accent = (r.theme.warning_bg
-                      if key in ("leave", "quit", "reset_board")
+                      if key in ("leave", "quit", "close_room", "reset_board")
                       else r.theme.btn_active_bg)
             style = r.emphasis(fill=accent, border=lighten(accent, 0.45),
                                text=r.theme.btn_active_text,

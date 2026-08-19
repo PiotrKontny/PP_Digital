@@ -7616,3 +7616,82 @@ the middle of an animation. A reset deliberately does not glide.
 ### Notes
 The same four tests were already failing before this stage and still are: three
 in `test_stage43_herold_card.py` and one in `test_visual_style.py`.
+
+
+## Stage 55 — Room lifecycle
+
+The report was that a new multiplayer room could not be opened without
+restarting the Railway deployment. NOTHING WAS WRONG WITH RAILWAY. The process
+was up and serving the whole time — it was holding a room with zero members in
+it, and `max_rooms` is 1, so every attempt to open another was answered
+"Serwer jest zajęty" until the fifteen-minute idle timeout expired. Nobody
+waits fifteen minutes.
+
+Measured before the fix, with a clock a test can move:
+
+    two players in a lobby, both sockets drop
+    -> rooms: 1   members: 0
+    -> new lobby attempt: "Serwer jest zajęty — wszystkie pokoje są w użyciu"
+    -> at t=899s: rooms: 1
+    -> at t=901s: rooms: 0
+
+### The defect: three paths, one check
+A room can empty three ways and only one of them looked:
+
+- deliberate exit (BYE / LEAVE_LOBBY) — `_leave` checked;
+- a lobby socket dropping — nothing checked;
+- a grace period running out on the tick — nothing checked.
+
+The two that were missed are the two that happen in real life: people close the
+window, laptops sleep, a match nobody comes back to. `mark_absent` frees a
+LOBBY seat immediately, so the last socket dropping really does leave a room
+with no members at all.
+
+Almost the entire lifecycle already existed — `Room.close`,
+`RoomRegistry.close`, `prune`, `is_stale`, the grace period, `hub.close_room`.
+It was the CALLING that was missing, and the bug was three copies of a
+condition of which only one had been written.
+
+### The fix
+`Room.abandoned` (`not self.members`) and `ServerHub._close_if_abandoned`,
+called from all three paths — one place, not three.
+
+`abandoned` is about MEMBERSHIP, not connection, and the distinction is
+load-bearing: a player whose socket dropped mid-match still has a seat, and
+that entry is what `expire_absentees` is holding for them. Reaping on "nobody
+is connected" would end matches out from under people whose train went into a
+tunnel. The reconnect model is unchanged, and `is_stale` still owns the slow
+path for rooms whose seats are held.
+
+### Explicit close
+`MessageType.CLOSE_ROOM`, host only, checked against the lobby the SERVER holds
+— the same ownership rule `set_settings` and `start` already use. Everyone
+including the host learns about it through the ordinary `MATCH_ENDED`; a room
+ending is the same event whoever caused it. In the interface it is an Esc entry,
+"Zamknij pokój", shown only to the host.
+
+A room is not the process: closing one leaves the hub serving, the sockets open
+and the identities known, and the next room opens at once. There is a test that
+says so, because the original report described restarting the deployment and
+the fix must not quietly agree with that model.
+
+### Tests
+`tests/test_stage55_room_lifecycle.py`, 12 tests, three of which fail with the
+two new calls removed. They cover both empty-room paths, the room surviving a
+disconnection inside the grace period, the seats-held room still waiting out
+the idle timeout, host-only closure, the guest being refused, no stale
+identities, commands refused afterwards, a new room opening, the process
+surviving, and the menu entry appearing only for the host.
+
+The tests start a REAL match rather than stubbing `room.state`: the same tick
+that expires absentees also expires decision windows, and that asks the state
+real questions.
+
+### Notes
+`max_rooms` is still 1. Raising it is a one-line configuration change and the
+registry has been written for many since it was created, but until somebody
+does, every room-lifecycle bug will present as "the server is broken" rather
+than "that room is stuck".
+
+The same four tests were already failing before this stage and still are: three
+in `test_stage43_herold_card.py` and one in `test_visual_style.py`.

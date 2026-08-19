@@ -60,6 +60,7 @@ class MessageType(str, Enum):
     CREATE_LOBBY = "create_lobby"      # client → server: open a room, I am host
     JOIN_LOBBY = "join_lobby"          # client → server: let me into room CODE
     LEAVE_LOBBY = "leave_lobby"        # client → server
+    CLOSE_ROOM = "close_room"          # client → server: host shuts the room
     LOBBY_STATE = "lobby_state"        # server → room: who is here, what they chose
     SET_NICKNAME = "set_nickname"      # client → server: ask for a name
     SET_CHARACTER = "set_character"    # client → server: ask for a character

@@ -102,7 +102,15 @@ class ServerHub:
         room = self.rooms.get(identity.room_code)
         if room is None:
             return []
-        return self._address(room.mark_absent(identity.peer_id))
+        out = room.mark_absent(identity.peer_id)
+        # A LOBBY disconnection frees the seat immediately (``mark_absent``
+        # says why), so the last person's socket dropping can empty the room
+        # here — and before stage 55 nothing noticed.  The room then sat in the
+        # registry with no members at all, and since ``max_rooms`` is 1 every
+        # attempt to open a new one was answered "Serwer jest zajęty" for the
+        # full ``room_idle_timeout``.  Fifteen minutes of a server that looks
+        # broken, which is why this looked like a deployment problem.
+        return self._address(out + self._close_if_abandoned(room))
 
     # ── the main entry point ─────────────────────────────────────────────────
     def receive(self, cid: str, raw: str | bytes | Message) -> List[Outbound]:
@@ -234,6 +242,16 @@ class ServerHub:
         if kind is MessageType.IDENTITY_CHOSEN:
             return room.set_identity(identity.peer_id,
                                      str(message.payload.get("pawn_id", "")))
+        if kind is MessageType.CLOSE_ROOM:
+            # THE HOST'S ROOM, THE HOST'S DECISION — the same ownership rule
+            # ``set_settings`` and ``start`` already use, checked here against
+            # the lobby the SERVER holds rather than anything the message says.
+            if not room.lobby.is_host(identity.peer_id):
+                return [(connection.cid, Message.error(
+                    "Tylko host może zamknąć pokój"))]
+            return self.close_room(
+                room.code, str(message.payload.get("reason", ""))
+                or "Host zamknął pokój")
         if kind is MessageType.RETURN_TO_LOBBY:
             return room.return_to_lobby(identity.peer_id)
         return [(connection.cid, Message.error(
@@ -282,10 +300,28 @@ class ServerHub:
         identity.room_code = ""
         if room is None:
             return []
-        out = room.leave(identity.peer_id)
-        if not room.members:
-            self.rooms.close(room.code)
+        return room.leave(identity.peer_id) + self._close_if_abandoned(room)
+
+    def _close_if_abandoned(self, room) -> List[Tuple[str, Message]]:
+        """THE ONE PLACE an empty room is reaped.
+
+        Every path that can remove the last member routes through here — a
+        deliberate exit, a lobby socket dropping, a grace period running out on
+        the tick — rather than each of them remembering to check.  That is the
+        whole of the bug this fixes: ``_leave`` remembered and the other two
+        did not.
+        """
+        if not room.abandoned or room.closed:
+            return []
+        out = self.rooms.close(room.code, "Pokój został zamknięty — nikogo w nim nie ma")
+        self._forget_room(room.code)
         return out
+
+    def _forget_room(self, code: str) -> None:
+        """Nobody is in that room any more, whatever they still believe."""
+        for identity in self.identities.values():
+            if identity.room_code == code:
+                identity.room_code = ""
 
     def close_room(self, code: str,
                    reason: str = "Pokój został zamknięty") -> List[Outbound]:
@@ -297,9 +333,7 @@ class ServerHub:
         forgotten them.
         """
         outbound = self.rooms.close(code, reason)
-        for identity in self.identities.values():
-            if identity.room_code == code:
-                identity.room_code = ""
+        self._forget_room(code)
         return self._out(outbound)
 
     # ── periodic work ────────────────────────────────────────────────────────
@@ -313,14 +347,15 @@ class ServerHub:
         out: List[Tuple[str, Message]] = []
         for room in list(self.rooms):
             out.extend(room.expire_absentees())
+            # A grace period running out can take the last seat with it, so the
+            # check belongs here as well as on the two membership paths.
+            out.extend(self._close_if_abandoned(room))
             # Nie masz Rosji's decision window, on the same tick and for the
             # same reason: a window times out precisely when nobody is sending
             # anything.
             out.extend(room.expire_decisions())
         for code in self.rooms.prune():
-            for identity in self.identities.values():
-                if identity.room_code == code:
-                    identity.room_code = ""
+            self._forget_room(code)
         return self._out(out)
 
     # ── plumbing ─────────────────────────────────────────────────────────────

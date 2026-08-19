@@ -209,6 +209,16 @@ class GameClient:
             return
         self._send(self._intent)
 
+    def close_room(self, reason: str = "") -> None:
+        """Host only, and the SERVER is what enforces that.
+
+        The answer comes back as the ordinary ``MATCH_ENDED`` every client in
+        the room receives, including this one — there is no special reply for
+        the person who asked, because a room closing is the same event whoever
+        caused it.
+        """
+        self._send(Message(MessageType.CLOSE_ROOM, {"reason": reason}))
+
     def leave_lobby(self) -> None:
         self._intent = None
         self._send(Message(MessageType.LEAVE_LOBBY))
