@@ -620,9 +620,14 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
 #: Commands only the authority may issue.  A client sending one is not making a
 #: mistake, it is cheating: these are how a match starts, how a colour is ruled
 #: out and how a winner is declared.
+#:
+#: ``UndoMove`` IS NOT ONE OF THEM and was listed here by mistake until stage
+#: 52 — see its own docstring.  Rewinding your own last card is a player's
+#: action; what stops abuse is ``can_undo`` in the engine plus the seat map in
+#: ``authorise_remote``, not membership of this tuple.  Anything added here is
+#: unreachable from a client for ever, so add deliberately.
 AUTHORITY_ONLY = (BeginMatch, EliminatePawn, EliminatePlayer, DeclareVictory,
                   RevealIdentity, FinishIdentitySwap, ExpireMovementDecision,
-                  UndoMove,
         ChooseBreakupTile,
         ResolveTowerBreakup,
         OpenCheckDecision, ExpireCheckDecision)

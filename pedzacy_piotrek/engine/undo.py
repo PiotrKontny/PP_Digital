@@ -58,6 +58,13 @@ class TurnCheckpoint:
     statuses: List[Any] = field(default_factory=list)
     scalars: Dict[str, Any] = field(default_factory=dict)
     rng_state: Any = None
+    #: Where the pawns that are NOT on the board were standing.  Membership is
+    #: enough for a pawn on a field — ``_sync_token_positions`` recomputes the
+    #: rest from the tile and the tower — but a pawn in the camp has a position
+    #: and no tile, so nothing can recompute it and the rewind would leave it
+    #: stranded wherever the undone card put it: in the camp by the rules, and
+    #: drawn on field 1.  Stage 52.
+    token_positions: Dict[str, Tuple[float, float]] = field(default_factory=dict)
 
 
 #: State that is a plain value and can simply be put back.  Listed rather than
@@ -128,6 +135,11 @@ def capture(state, seat: int, card_uid: int = -1) -> TurnCheckpoint:
     # would otherwise roll differently after a rewind, so the generator goes
     # back too and a replayed turn is genuinely the same turn.
     point.rng_state = state.rng.getstate()
+    point.token_positions = {
+        token_id: tuple(token.position)
+        for token_id, token in state.tokens.items()
+        if token_id not in state.board.pawn_tiles
+    }
     return point
 
 
@@ -201,3 +213,12 @@ def restore(state, point: TurnCheckpoint) -> None:
         state.rng.setstate(point.rng_state)
 
     state._sync_token_positions()
+
+    # A pawn back in the camp has no tile to be recomputed from, so its
+    # position is put back by hand — AFTER the sync, which only speaks for the
+    # pawns that are on the board.
+    for token_id, position in point.token_positions.items():
+        token = state.tokens.get(token_id)
+        if token is not None and token_id not in state.board.pawn_tiles:
+            token.position = tuple(position)
+            token.tile_index = None

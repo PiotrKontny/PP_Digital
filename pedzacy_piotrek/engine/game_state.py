@@ -3806,11 +3806,59 @@ class GameState:
         token.held = True
         return [ev.TokenPickedUp(token.id)]
 
+    @staticmethod
+    def _requested_tile_index(value: Any) -> Optional[int]:
+        """A field index out of a message, or ``None`` if it is not one.
+
+        A command arrives as JSON from a machine this one does not control, so
+        ``tile_index`` may be anything at all.  ``board.tile`` compares it with
+        ``0 <=`` and raises on a string — which ``apply`` turns into a refusal,
+        but only after the handler has already run.  Asked here instead, where
+        the answer can still be acted on cheaply.
+        """
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _requested_point(x: Any, y: Any) -> Optional[Point]:
+        """A world position out of a message, or ``None`` if it is not one."""
+        try:
+            return (float(x), float(y))
+        except (TypeError, ValueError):
+            return None
+
     def _move_token(self, command: cmd.MoveToken) -> List[ev.GameEvent]:
+        """Put a pawn on a field, or anywhere at all.  The hand-editing tool.
+
+        EVERY REFUSAL IS DECIDED BEFORE ANYTHING MOVES, and that ordering is
+        the rule rather than a tidiness preference.  A refused command is
+        neither logged nor broadcast (``Room.submit``), so a handler that
+        changes the table and only then refuses puts the authority into a state
+        its own command log cannot reproduce — every client replays the log,
+        lands somewhere else, and is told so permanently.  See "A REFUSED
+        COMMAND CHANGES NOTHING" in LLM_Instructions.txt.
+        """
         token = self.tokens.get(command.pawn_id)
         if token is None:
             return [ev.ActionRejected("Nieznany pionek", command.kind)]
 
+        # ── everything that can say no, asked first ──────────────────────────
+        tile: Optional[Tile] = None
+        free: Optional[Point] = None
+        if command.tile_index is not None:
+            index = self._requested_tile_index(command.tile_index)
+            tile = self.board.tile(index) if index is not None else None
+            if tile is None:
+                return [ev.ActionRejected("Nieznane pole", command.kind)]
+        else:
+            # Free placement — the prototype's drag-anywhere behaviour.
+            free = self._requested_point(command.x, command.y)
+            if free is None:
+                return [ev.ActionRejected("Nieznane miejsce", command.kind)]
+
+        # ── from here on nothing can refuse, so the table may change ─────────
         origin = token.position
         # Pawns riding on top travel with the one below — the tower rule.
         carried = self.board.carried_pawns(token.id)
@@ -3822,10 +3870,7 @@ class GameState:
         # ``effects.pawn_may_move`` and is refused.
         thaw = self._thaw_dragged(token.id, carried)
 
-        if command.tile_index is not None:
-            tile = self.board.tile(command.tile_index)
-            if tile is None:
-                return [ev.ActionRejected("Nieznane pole", command.kind)]
+        if tile is not None:
             self.board.place_pawn(token.id, tile.index)
             for rider in carried:
                 self.board.place_pawn(rider, tile.index)
@@ -3837,10 +3882,9 @@ class GameState:
                 )
             ]
 
-        # Free placement — the prototype's drag-anywhere behaviour.
         self.board.remove_pawn(token.id)
         token.tile_index = None
-        token.position = (float(command.x), float(command.y))
+        token.position = free                      # type: ignore[assignment]
         self._sync_token_positions()
         return thaw + [
             ev.TokenMoved(token.id, origin, token.position, None, [], snapped=False)

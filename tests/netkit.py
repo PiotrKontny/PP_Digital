@@ -12,7 +12,7 @@ is the only thing left that a test cannot reach.  One test in
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -23,7 +23,10 @@ if str(ROOT) not in sys.path:
 from pedzacy_piotrek.cards.loader import ContentLibrary
 from pedzacy_piotrek.config import settings
 from pedzacy_piotrek.engine import commands as cmd
+from pedzacy_piotrek.engine import events as ev
+from pedzacy_piotrek.engine.setup import create_game
 from pedzacy_piotrek.net.config import NetworkConfig
+from pedzacy_piotrek.net.protocol import fingerprint_of
 from pedzacy_piotrek.net.service import ClientService, HostService
 from pedzacy_piotrek.server.embedded import InProcessServer
 
@@ -176,3 +179,73 @@ def snapshots(*services) -> List[dict]:
 def all_agree(*services) -> bool:
     shots = snapshots(*services)
     return bool(shots) and all(shot == shots[0] for shot in shots)
+
+
+# ── the rejection invariant (stage 51) ───────────────────────────────────────
+# A rejected command is never logged and never broadcast, so a handler that
+# changes the table and only then refuses puts the authority into a state its
+# own command log cannot reproduce.  These two helpers are how a test says so
+# without rebuilding a room by hand each time.
+@dataclass
+class Outcome:
+    """What applying one command did — and, crucially, what it changed."""
+
+    events: List[object]
+    before: str
+    after: str
+
+    @property
+    def refused(self) -> bool:
+        return any(isinstance(e, ev.ActionRejected) for e in self.events)
+
+    @property
+    def reason(self) -> str:
+        for event in self.events:
+            if isinstance(event, ev.ActionRejected):
+                return event.reason
+        return ""
+
+    @property
+    def touched_state(self) -> bool:
+        return self.before != self.after
+
+    @property
+    def clean_refusal(self) -> bool:
+        """Refused AND changed nothing.  The property stage 51 is about."""
+        return self.refused and not self.touched_state
+
+
+def apply_to(state, command) -> Outcome:
+    """Apply a command the way the AUTHORITY does, and report what moved.
+
+    ``local=False`` on purpose: this is the server's path, where ownership and
+    turn order have already been judged by ``authorise_remote``.
+    """
+    before = fingerprint_of(state.snapshot())
+    events = state.apply(command, local=False)
+    return Outcome(events=list(events), before=before,
+                   after=fingerprint_of(state.snapshot()))
+
+
+def replay_fingerprint(room, library: ContentLibrary) -> str:
+    """Rebuild a room's match from its own configuration and command log.
+
+    This is exactly what a client does on ``STATE_SYNC``: build from the seed,
+    apply every accepted command in order, hash the result.  If it disagrees
+    with the room's own fingerprint, the server is standing somewhere it can
+    never send anybody.
+    """
+    state = create_game(room.session_config, library)
+    # The nicknames are written onto the players AFTER the game is built, both
+    # in ``Room.start`` and in the client's ``_build_match``, and a name is in
+    # ``to_public_dict`` and therefore in the fingerprint.  A replay that
+    # skipped this would disagree with the server about nothing but the names
+    # and look exactly like a desync.
+    for seat in room.lobby.seats:
+        player = state.player(seat.seat)
+        if player is not None:
+            player.name = seat.nickname
+            player.owner_id = seat.peer_id
+    for raw in room.command_log:
+        state.apply(cmd.Command.from_dict(dict(raw)), local=False)
+    return fingerprint_of(state.snapshot())

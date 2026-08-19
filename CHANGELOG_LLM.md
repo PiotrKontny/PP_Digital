@@ -7238,3 +7238,205 @@ three in ``test_stage43_herold_card.py`` (``settings.copy_consumes_use`` names
 content rename never propagated) and one in ``test_visual_style.py`` (a hand
 card is now a Signature face because the ``Wejściówka`` cards have artwork).
 Both still want an owner's decision rather than a guess.
+
+## Stage 51 — A refused command changes nothing
+
+A three-player online match ended with all three clients showing, permanently:
+
+    "Uwaga: stan gry różni się od serwera — zgłoś to"
+
+after which nobody could play: the table waits for a turn the affected player
+can no longer take. The message is not "a desync happened". It is
+`net/client.py::_on_state_sync` saying that it rebuilt the match FROM THE
+SERVER'S OWN SEED AND COMMAND LOG and still did not arrive where the server is
+standing. That is a much narrower claim, and it points straight at the cause.
+
+### The bug
+`_move_token` thawed before it validated:
+
+    token.held = False
+    thaw = self._thaw_dragged(token.id, carried)      # discards FROZEN/LINKED
+    if command.tile_index is not None:
+        tile = self.board.tile(command.tile_index)
+        if tile is None:
+            return [ev.ActionRejected("Nieznane pole", ...)]
+
+Dragging a pawn by hand ends its freeze ON PURPOSE (brief §7) — the manual path
+is the one path allowed to overrule a rule. That is right when the drag lands.
+It was also happening when the drag was REFUSED.
+
+`Room.submit` does not log or broadcast a refused command, deliberately. That
+is not the bug; it is what makes the bug fatal. Together:
+
+1. the server drops the status;
+2. `command_log` never hears about it and `fingerprint` is not restamped;
+3. the clients still have it;
+4. the next ACCEPTED command carries the server's new fingerprint;
+5. every client sees the mismatch and asks for a resync — correctly;
+6. the resync replays the log, which rebuilds the status;
+7. the fingerprint still disagrees, and `_on_state_sync` reports it and stops.
+
+Reproduced end to end. Big D Randy freezes a pawn through his ordinary logged
+ability; one drag of that pawn that lands on no field; then any command at all:
+
+    before   server 5dc60ddb   clients [5dc60ddb, 5dc60ddb, 5dc60ddb]
+    refused  server 244e7bd7   clients [5dc60ddb, 5dc60ddb, 5dc60ddb]   log unchanged
+    next     server f53fae3d   clients [71128a56, 71128a56, 71128a56]
+
+### Two more doors into the same room
+Found by auditing the handler rather than by moving the one line the report
+named:
+
+- free placement called `board.remove_pawn` and THEN `float(command.x)`, so a
+  coordinate that was not a number took the pawn off the board and refused in
+  the same breath. An absent pawn reads as `CAMP_INDEX`, so the server quietly
+  believed a pawn standing on field 5 had never set out;
+- `board.tile()` compares its argument with `0 <=` and RAISES on a string,
+  which `apply` turns into a refusal — again after the thaw.
+
+A command arrives from a machine this one does not control, so
+`_requested_tile_index()` and `_requested_point()` now answer "is this even a
+number" where the answer can still be acted on cheaply.
+
+### The fix
+Everything that can refuse is asked first; nothing moves until nothing can say
+no. The mutating half of `_move_token` is unchanged apart from reading the
+already-resolved tile or point. No change to `route_between`, `CAMP_INDEX`,
+snapshot scope, hidden-information handling, the authoritative model or the
+no-prediction rule.
+
+### The invariant this is really about
+    ActionRejected  =>  the authoritative snapshot is byte-identical
+
+`tests/test_stage51_rejection_atomicity.py`, 9 tests, six of which fail against
+the stage-50 tree. The load-bearing one is
+`test_no_refusal_anywhere_moves_the_authoritative_state`: it walks EVERY handler
+that can refuse, a fresh room per command so one dirty handler cannot hide
+behind another, and asserts on the FINGERPRINT rather than on the field a
+handler happened to touch — because the next handler will touch a different
+one. `test_the_server_state_replays_from_its_own_command_log` states the
+property directly, and the three-player regression earns its freeze through a
+real ability so that the log genuinely contains it.
+
+`tests/netkit.py` gained `apply_to()` -> `Outcome` (`.refused`,
+`.touched_state`, `.clean_refusal`) and `replay_fingerprint()`. The latter
+writes the nicknames onto the players after `create_game`, exactly as
+`Room.start` and the client's `_build_match` do — a name is in
+`to_public_dict` and therefore in the fingerprint, and a replay that skipped it
+would look like a desync over nothing at all. Worth knowing before writing the
+next replay test.
+
+### Deliberately NOT fixed
+`MoveToken` is still the editing tool and still overrules what a card could
+not: it does not ask `route_between`, it puts a pawn on the meta in one hop
+from the camp (which ENDS THE MATCH through the ordinary victory path), and
+`tile_index=None` still removes the pawn from the board and therefore reads as
+`CAMP_INDEX`. All three are recorded under KNOWN LIMITATIONS and pinned by
+tests so that changing them is a decision rather than an accident. `UndoMove`
+was not touched.
+
+### Notes
+`ChooseBreakupTile` is in `AUTHORITY_ONLY` and is refused from a client with
+"Tę decyzję podejmuje serwer", while its own docstring says Piotrek picks it.
+Not investigated further here and not changed.
+
+The same four tests were already failing before this stage and still are: three
+in `test_stage43_herold_card.py` and one in `test_visual_style.py`. Verified
+against the pristine tree, unrelated to this change, still wanting an owner's
+decision.
+
+## Stage 52 — Undo over the wire
+
+The Undo button worked flawlessly hot-seat and did nothing at all online. It was
+drawn, it was clickable, it sent its command, and the server answered "Tę
+decyzję podejmuje serwer" — so from the table it looked like a dead button.
+
+### The bug, which was one line
+`UndoMove` has carried this docstring since stage 41:
+
+    NOT authority-only: it is a player's own action, like playing a card.
+
+and was listed in `AUTHORITY_ONLY` anyway. `authorise_remote` tests that tuple
+FIRST, before anything else, so the command never reached the engine that was
+written to judge it. The interface asks `can_undo`, which knows nothing about
+the tuple and was perfectly happy — which is why the button stayed lit.
+
+Worth remembering as a shape: a docstring and a membership list disagreed, and
+the list won silently. `AUTHORITY_ONLY` makes a command unreachable from a
+client FOR EVER and the only symptom is a control that does nothing.
+
+### Why nothing else had to change
+The enforcement the docstring promises was already there, twice, and the fix
+reuses both rather than adding a third:
+
+- `authorise_remote` compares `player_index` with the seat the HOST holds for
+  that connection — its own map, never the message — so a forged seat is
+  refused before the engine looks;
+- `can_undo` then refuses a seat that does not own the window, a window that is
+  spent, a phase that is not PLAYING, and a table waiting for a colour.
+
+`UndoMove` is in neither `_OWNED_BY_PLAYER` nor `_TURN_BOUND`, and that is
+correct: the window belongs to whoever last played a card and survives into the
+NEXT player's turn until they play one. A turn-bound undo would be refused
+exactly when it is most wanted.
+
+One behaviour moved. Outside the tuple, `_authorise` now also runs
+`_phase_refusal` on a local undo, so a finished match answers "Gra została
+zakończona" where it used to answer "Nie można już cofnąć ruchu". Same refusal,
+different words; no test asserted either.
+
+### The victory boundary — decided by the existing code
+`can_undo` requires `phase.playable`, and `MatchPhase.playable` is PLAYING and
+nothing else. A declared victory ALREADY closed the window, before and after
+this change, so an undo can never cross a `DeclareVictory` in the log and the
+awkward question — a rewind disagreeing with a verdict the log still carries —
+does not arise. Preserved and pinned rather than invented. The pending
+decisions (`pending_movement`, `pending_check`, `pending_breakup`,
+`pending_lead_check`, `pending_pawn_check`, `pending_mod_selection`) are all in
+`undo._SCALARS`, so a rewind puts them back instead of leaving one armed
+against a board that no longer exists.
+
+### A pawn rewound into the camp
+Found while enabling this, fixed here, and never a network bug at all. The
+checkpoint stored MEMBERSHIP for every pawn and a POSITION for none. Enough for
+a pawn on a field — `_sync_token_positions` recomputes it from the tile and the
+tower — but a pawn rewound back into the camp has no tile to be recomputed
+from, so it kept the position the undone card gave it: in the camp by the
+rules, drawn on field 1. Pre-existing and purely local; online undo would have
+spread it to everyone at the table. `TurnCheckpoint.token_positions` now records
+where the off-board pawns were and `restore` puts them back after the sync,
+which only speaks for the pawns on the board.
+
+### Tests
+`tests/test_stage52_online_undo.py`, 15 tests. Four fail against the stage-51
+tree — the four that need the undo to actually be accepted. The refusal tests
+pass either way by construction and are guards, not proof of the fix; said
+plainly because a file that goes green on a one-line change invites the
+assumption that all of it was testing that change.
+
+The window fixture opens tables until the seeded deal produces a card that
+RESOLVES: a card that asks a question returns CHOICE_REQUIRED, is not logged and
+opens no window. That is the idiom `test_multiplayer.py` already uses, and it
+exercises the real start path.
+
+The invariant asserted twice over: after an accepted undo every replica has the
+same fingerprint, AND replaying the command log reproduces it. The second half
+is what would catch a server-side rollback that never reached the log.
+
+### Found, NOT fixed — read KNOWN LIMITATIONS
+`Room.submit` does not log a command that returns `ChoiceRequired`, and the
+state may already have moved. Stage 51 removed exactly this shape from the
+`ActionRejected` branch and left this branch alone on the strength of its
+comment ("Nothing changed, so nothing is logged"), which is not true of every
+handler. Independent of undo; stage 52 only found it, because an undo needs a
+card to have been played. Roughly 4% of deals in a 300-table stress run. Next
+stage, and it is worth more than anything left in undo.
+
+### Notes
+`turn_window` is not in the snapshot, so a divergent window is invisible to
+fingerprinting until somebody rewinds. It holds because replay opens windows in
+the same places; recorded so that whoever changes when a window opens knows
+what rests on it.
+
+The same four tests were already failing before this stage and still are: three
+in `test_stage43_herold_card.py` and one in `test_visual_style.py`.
