@@ -144,6 +144,7 @@ class BoardView:
         bus.subscribe(ev.TileRestacked, self._on_tile_restacked)
         bus.subscribe(ev.TowerGroupPlaced, self._on_tower_group_placed)
         bus.subscribe(ev.MoveUndone, self._on_move_undone)
+        bus.subscribe(ev.BoardReset, self._on_board_reset)
 
     def build(self) -> None:
         """Paint the static terrain.  Requires a live display surface."""
@@ -274,6 +275,24 @@ class BoardView:
         has no way to know which.  Asking the engine for every position is the
         only answer that is right for every undoable action rather than for the
         one that happened to be tested.
+        """
+        self.resync()
+
+    def _on_board_reset(self, event: ev.BoardReset) -> None:
+        """The board was swept; redraw it from what is actually there.
+
+        THE SAME ANSWER ``MoveUndone`` GETS, for the same reason: every pawn
+        moved at once and the view has no way to work out which glide would
+        represent that.  ``self.visual`` is the board's own copy of where each
+        pawn is DRAWN and is only ever written by the movement reactions, so
+        without this the engine had the pawns in their camps and the screen
+        went on showing them out on the road — until some later card happened
+        to touch them and dragged the view back into step.  A pawn reset from
+        field 7 and then moved forward by one appeared to jump from 7 to 1.
+
+        This is the missing propagation, not a redraw hack: the authoritative
+        positions are already right and untouched, and ``resync`` hands those
+        same numbers to the layer that draws them.
         """
         self.resync()
 

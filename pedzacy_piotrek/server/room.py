@@ -403,6 +403,8 @@ class Room:
             lobby.double_percent = max(0, min(100, int(payload["double_percent"])))
         if "debug_version" in payload:
             lobby.debug_version = bool(payload["debug_version"])
+        if "edit_mode" in payload:
+            lobby.edit_mode = bool(payload["edit_mode"])
         return self.broadcast_lobby()
 
     # ── starting the match ───────────────────────────────────────────────────

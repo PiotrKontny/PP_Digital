@@ -155,6 +155,12 @@ class LobbyState:
     #: Development option: a two-player table is enough to start.  Set by the
     #: host and broadcast, so every client shows the same requirement.
     debug_version: bool = False
+    #: Editing table: the Card Library may reshape decks, hand out named cards
+    #: and charges, wind the round on, and the board may be reset.  OFF by
+    #: default, set by the host before the match and broadcast, so every client
+    #: agrees about it and nobody can turn it on for themselves.  See
+    #: ``commands.EDITOR_ONLY``.
+    edit_mode: bool = False
     #: Set once the match begins; clients stop showing the lobby.
     started: bool = False
     #: Why the game cannot start yet, computed by the server.
@@ -251,9 +257,11 @@ class LobbyState:
             character_choices=[s.character or None for s in ordered],
             double_frequency=self.double_percent / 100.0,
             debug_version=self.debug_version,
-            # An online match never allows hot-seat editing: one machine plays
-            # one seat, which is the whole point of the mode.
-            edit_mode=False,
+            # Hot-seat editing is off unless the table was SET UP for it: one
+            # machine plays one seat, which is the whole point of the mode.
+            # When the host does turn it on, it is on for everybody, and the
+            # editing commands are gated on this same flag in the engine.
+            edit_mode=self.edit_mode,
             # ...and it is the mode where Piotrek's colour is a secret worth
             # keeping, so he chooses it himself and only the server is told.
             piotrek_picks_pawn=True,
@@ -288,6 +296,7 @@ class LobbyState:
             "copy_consumes_use": list(self.copy_consumes_use),
             "double_percent": self.double_percent,
             "debug_version": self.debug_version,
+            "edit_mode": self.edit_mode,
             "started": self.started,
             "problem": self.validate(),
         }
@@ -326,6 +335,7 @@ class LobbyState:
             double_percent=int(raw.get("double_percent",
                                        RULES.double_frequency_default)),
             debug_version=bool(raw.get("debug_version", False)),
+            edit_mode=bool(raw.get("edit_mode", False)),
             started=bool(raw.get("started", False)),
             problem=str(raw.get("problem", "")),
         )

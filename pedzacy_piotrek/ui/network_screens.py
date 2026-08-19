@@ -332,6 +332,12 @@ class HostSetupScreen(_FormScreen):
     MIN_ROW_GAP = 3
     #: How far the two Mod Patusa steppers sit either side of the centre line.
     MOD_SPLIT = 150
+    #: Named once because ``on_resize`` MEASURES the first one to decide where
+    #: the second checkbox goes; a caption that drifted between the measuring
+    #: and the drawing would put the two switches on top of each other at some
+    #: window size and not at others.
+    DEBUG_LABEL = "Wersja testowa — gra od 2 graczy"
+    EDIT_LABEL = "Edycja — odkryte ręce"
 
     def __init__(self, app: App, library: ContentLibrary) -> None:
         super().__init__(app, library)
@@ -343,6 +349,11 @@ class HostSetupScreen(_FormScreen):
         self.mod_interval = RULES.mod_round_interval_default
         self.double_percent = RULES.double_frequency_default
         self.debug_version = False
+        #: An editing table.  The same switch as ``debug_version`` and laid out
+        #: beside it because it is the same KIND of switch: a decision about
+        #: what this table is for, made once, by the host, before anybody sits
+        #: down.  See commands.EDITOR_ONLY.
+        self.edit_mode = False
         self.run_local_server = False
 
         self.nickname = TextInput(pygame.Rect(0, 0, self.FIELD_W, self.FIELD_H),
@@ -354,6 +365,7 @@ class HostSetupScreen(_FormScreen):
         self.inputs = [self.nickname, self.server]
 
         self.debug_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
+        self.edit_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
         self.local_checkbox = Checkbox(pygame.Rect(0, 0, 20, 20))
         # The same panel the hot-seat menu uses: one deck, one place to say
         # what is in it.  See ui/settings_panel.py.
@@ -446,6 +458,22 @@ class HostSetupScreen(_FormScreen):
         self.debug_checkbox.rect.topleft = (centre - 190, self.debug_row_y)
         y = self.debug_row_y + 20 + hint_h + self.ROW_GAP
 
+        # SHARES THE DEBUG ROW rather than taking one of its own.  The form
+        # already reaches the bottom of the shortest window the layout tests
+        # cover (1280x760): a row of its own pushed the error line off the
+        # screen even stripped to a bare checkbox with no hint and no gap, so
+        # there is no version of "one more row" that fits.  The two belong
+        # together anyway — both say what this table is FOR rather than how it
+        # plays — and the debug hint below still reads as that row's hint.
+        # MEASURED, not a magic offset: the fonts grow with the window, so a
+        # fixed gap that clears the debug label at 1280 is swallowed by it at
+        # 2560.  Asking the font how wide the caption actually is keeps the two
+        # switches apart at every size the layout tests cover.
+        after_debug = (self.debug_checkbox.rect.right + 10
+                       + r.fonts.get(16).size(self.DEBUG_LABEL)[0])
+        self.edit_checkbox.rect.topleft = (
+            after_debug + int(28 * r.fonts.scale), self.debug_row_y)
+
         # Both buttons are sized to their own captions, then given the wider of
         # the two widths so the bottom of the screen reads as one block.
         fit_buttons(r, [self.create, self.back], min_width=280,
@@ -498,6 +526,9 @@ class HostSetupScreen(_FormScreen):
         if self.debug_checkbox.hit(mouse):
             self.debug_version = not self.debug_version
             return
+        if self.edit_checkbox.hit(mouse):
+            self.edit_mode = not self.edit_mode
+            return
         if self.create.hit(mouse):
             self.confirm()
         elif self.back.hit(mouse):
@@ -546,17 +577,20 @@ class HostSetupScreen(_FormScreen):
                              copy_consumes_use=(
                                  self.settings_panel.copy_consumes_use),
                              double_percent=self.double_percent,
-                             debug_version=self.debug_version)
+                             debug_version=self.debug_version,
+                             edit_mode=self.edit_mode)
         self._enter_lobby(service, embedded=embedded)
 
     def update_widgets(self, dt: float, mouse: Tuple[int, int]) -> None:
         self.debug_checkbox.checked = self.debug_version
+        self.edit_checkbox.checked = self.edit_mode
         self.local_checkbox.checked = self.run_local_server
         self.create.update(mouse, dt)
         self.back.update(mouse, dt)
         self.mod_deck_button.update(mouse, dt)
         self.settings_panel.update(dt, mouse)
         self.debug_checkbox.update(mouse, dt)
+        self.edit_checkbox.update(mouse, dt)
         self.local_checkbox.update(mouse, dt)
 
     def draw(self, surface: pygame.Surface) -> None:
@@ -587,9 +621,15 @@ class HostSetupScreen(_FormScreen):
                      "Uruchom serwer na tym komputerze",
                      "tylko dla graczy w tej samej sieci — przez internet "
                      "użyj serwera z konfiguracji")
-        self._option(surface, self.debug_checkbox,
-                     "Wersja testowa — gra od 2 graczy",
+        self._option(surface, self.debug_checkbox, self.DEBUG_LABEL,
                      f"tylko do testów; normalnie potrzeba {RULES.min_players} graczy")
+        # Label only, on the debug row — see ``on_resize``.  "Odkryte ręce"
+        # earns its two words: a switch that turns every hand face up should
+        # say so where it is flipped rather than in a manual.
+        self.edit_checkbox.draw(r, surface)
+        r.text(self.EDIT_LABEL, r.fonts.get(16), r.theme.text_light,
+               surface, midleft=(self.edit_checkbox.rect.right + 10,
+                                 self.edit_checkbox.rect.centery))
 
         self.create.draw(r, surface)
         self.back.draw(r, surface)

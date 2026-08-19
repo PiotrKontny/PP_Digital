@@ -1776,6 +1776,18 @@ class GameScreen(Screen):
         self.submit(cmd.UndoMove(player_index=seat))
         return True
 
+    @property
+    def may_reset_board(self) -> bool:
+        """Only on an editing table, and only while there is a match to edit.
+
+        The engine refuses it anyway — ``EDITOR_ONLY`` plus ``_phase_refusal``
+        — so this is the MENU agreeing with the rule rather than enforcing it.
+        An entry that is offered and then refused teaches people to ignore
+        refusals, which is exactly how the Undo button spent two stages lit up
+        and doing nothing.
+        """
+        return bool(self.state.edit_mode and self.state.phase.playable)
+
     def _draw_undo_button(self, ctx: HudContext) -> None:
         """Drawn ONLY while the offer stands, so its absence is the rule."""
         if not self.can_undo:
@@ -1847,6 +1859,11 @@ class GameScreen(Screen):
             self._leave_match()
         elif choice == "quit":
             self._leave_match(quit_app=True)
+        elif choice == "reset_board":
+            # Closed first, so the board the reset lands on is the board the
+            # player is looking at.
+            self.pause_menu.close()
+            self.submit(cmd.ResetBoard())
 
     def _pause_entries(self):
         entries = [("resume", "Wróć do gry")]
@@ -1857,6 +1874,14 @@ class GameScreen(Screen):
         else:
             entries.append(("leave", "Wróć do menu głównego"))
         entries.append(("quit", "Wyjdź z gry"))
+        if self.may_reset_board:
+            # LAST, deliberately, and behind Esc rather than on the board.  It
+            # used to be a button directly under COFNIJ RUCH, which put the one
+            # irreversible action in the game a few pixels below the one people
+            # press by reflex.  Here it is two steps away and at the far end of
+            # the list from "Wróć do gry", which is the entry somebody who
+            # opened this menu by accident is reaching for.
+            entries.append(("reset_board", "Resetuj Planszę"))
         return entries
 
     def _back_to_lobby_screen(self) -> None:

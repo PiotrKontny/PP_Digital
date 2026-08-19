@@ -366,6 +366,21 @@ class SetRound(Command):
 
 
 @dataclass(frozen=True)
+class ResetBoard(Command):
+    """Put every pawn back in its camp and clear what the board was holding.
+
+    THE BOARD, NOT THE MATCH.  Hands, decks, the round, whose turn it is and a
+    declared verdict are all left exactly where they were — this is the editing
+    tool for "start the pawns again", not a restart.  What goes is what the
+    board itself was carrying: the placements, the towers, the statuses that
+    name a pawn, and any decision that was waiting on a tower which is about to
+    stop existing.
+    """
+
+    kind: ClassVar[str] = "reset_board"
+
+
+@dataclass(frozen=True)
 class SetActivePlayer(Command):
     kind: ClassVar[str] = "set_active_player"
     player_index: int = 0
@@ -598,6 +613,7 @@ COMMAND_REGISTRY: Dict[str, Type[Command]] = {
         MoveToken,
         PickUpToken,
         SetRound,
+        ResetBoard,
         SetActivePlayer,
         RenamePlayer,
         ToggleMark,
@@ -631,3 +647,22 @@ AUTHORITY_ONLY = (BeginMatch, EliminatePawn, EliminatePlayer, DeclareVictory,
         ChooseBreakupTile,
         ResolveTowerBreakup,
         OpenCheckDecision, ExpireCheckDecision)
+
+#: Commands that need an EDITING TABLE, because they hand somebody an advantage
+#: or rewrite where the match has got to.  Refused by ``authorise_remote``
+#: unless ``edit_mode`` is on — a lobby setting the host fixes before the match
+#: and every client can see.
+#:
+#: Until stage 53 nothing gated them, so an idle client in an ordinary match
+#: could deal itself a named card or wind the round counter forward, on
+#: somebody else's turn, and have it accepted, logged and broadcast.  Nothing
+#: desynced; that is why no fingerprint ever complained.
+#:
+#: THE LIBRARY'S OTHER COMMANDS ARE DELIBERATELY NOT HERE.  ``AdjustDeckCount``,
+#: ``AdjustAbilityUses``, ``RestoreAbilityUses`` and ``SetCardVariant`` are
+#: TABLE BOOKKEEPING: they change a shared house rule, everybody sees the
+#: result and nobody gains anything private by it.  That any seat may issue
+#: them, on anybody's turn, is a decision this project already made and tested
+#: (``test_card_library_sync.py``, ``test_card_variants_sync.py``) — do not
+#: quietly move them in here.  The line is ADVANTAGE, not "is it an edit".
+EDITOR_ONLY = (DrawTitledCard, SetRound, ResetBoard)

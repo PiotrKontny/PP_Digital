@@ -1010,6 +1010,216 @@ can open a window on one machine and not another, that is where it will show.
 
 
 ================================================================================
+THE EDITING TABLE, AND RESETTING THE BOARD  (stage 53)
+================================================================================
+
+WHAT WAS ACTUALLY WRONG
+-----------------------
+Not "edit mode is missing online". The Card Library is open DURING a match and
+its button is drawn unconditionally, so most of the editing already worked over
+the wire — ungated. `authorise_remote` gated on `AUTHORITY_ONLY`, on
+`player_index == seat` and on `_TURN_BOUND`, and the library's commands are in
+none of the three. Measured on a real table, an IDLE client on somebody else's
+turn had all of this accepted, logged and broadcast:
+
+    AdjustDeckCount / AdjustAbilityUses / RestoreAbilityUses / SetRound /
+    DrawTitledCard
+
+Nothing desynced. That is the point worth remembering: this was an
+AUTHORISATION hole, not a state bug, so no fingerprint was ever going to
+complain about it and no amount of sync testing would have found it.
+
+THE LINE IS ADVANTAGE, NOT "IS IT AN EDIT"
+------------------------------------------
+`EDITOR_ONLY` holds `DrawTitledCard`, `SetRound` and `ResetBoard`, and refuses
+them unless `edit_mode` is on. Those three hand somebody something: a named
+card in YOUR hand, a round counter wound forward (which DEALS CHEST CARDS on
+the way), a swept board.
+
+THE OTHER FOUR STAY OPEN ON ANY TABLE, deliberately. `AdjustDeckCount`,
+`AdjustAbilityUses`, `RestoreAbilityUses` and `SetCardVariant` are TABLE
+BOOKKEEPING: they change a house rule the whole table plays under, everybody
+sees the result and nobody gains anything private. That any seat may issue them
+on anybody's turn is a decision this project made BEFORE stage 53 and tested —
+`test_card_library_sync.py` and `test_card_variants_sync.py` say so in as many
+words ("Table bookkeeping, exactly as the library's other commands are"). The
+first attempt at this stage gated all seven and broke seventeen of those tests;
+that was the tests being right. Do not quietly move them in.
+
+WHERE THE GATE LIVES, AND WHERE IT DOES NOT
+-------------------------------------------
+`authorise_remote` ONLY. Not `_authorise`: that is the path a machine takes for
+its OWN commands, and a single-machine game has nobody to take an advantage
+from — the tester fetching a card is the whole point of the tool. Putting it in
+both broke `test_a_titled_draw_is_not_bound_to_a_turn`, which builds a game
+with `edit_mode=False` precisely to prove the draw is not turn-bound.
+
+`edit_mode` IS A LOBBY SETTING, host-only, fixed before the match
+----------------------------------------------------------------
+It follows `debug_version` exactly: a field on `LobbyState`, in `to_dict` and
+`from_dict`, set through `Room.set_settings` (which refuses a non-host AND
+refuses once `started`), and passed into `SessionConfig` by `to_config`. So it
+travels with the seed, every machine agrees about it, and no client can turn it
+on for itself or turn it on underneath a match in progress.
+
+HANDS GO FACE UP ON AN EDITING TABLE. `GameScreen.may_view` returns True in
+edit mode, and every client already RECONSTRUCTS every hand — that is what
+replaying the command log means; the interface simply refuses to draw the ones
+that are not yours. Turning the mode on turns them face up. Anybody switching
+it on is switching off the hidden-hand game, which is what the lobby setting is
+for. PIOTREK'S COLOUR IS DIFFERENT AND STAYS HIDDEN: it is never in the log and
+never in the snapshot, so no amount of editing reveals it.
+
+RESET BOARD — WHAT IT RESETS, AND WHAT IT DELIBERATELY DOES NOT
+---------------------------------------------------------------
+`ResetBoard` is an ordinary command: logged, broadcast, replayed. THE BOARD,
+NOT THE MATCH.
+
+    GOES: every placement; every tower (`tile.stack`); every status whose
+          subject is a PAWN (a freeze, an Ondrej link, a forbidden adjacency —
+          each describes a relationship between pawns and fields that has just
+          stopped existing); `held`; and every decision waiting on a tower —
+          `pending_check`, `pending_breakup`, `pending_lead_check`,
+          `pending_pawn_check`, and `pending_movement` with them, because it is
+          an offer to block a movement whose destination has been swept away.
+
+    STAYS: hands, decks and their order, the round, whose turn it is, the
+           verdict, `eliminated_pawns` (the hunters' notepad is deduction, not
+           board state), and statuses whose subject is a PLAYER (a queued turn
+           interrupt or a movement bonus is about the person).
+
+A reset that also dealt new hands would be a RESTART, and the lobby already
+owns restarting. Keep the two apart.
+
+The camp slot comes from the pawn's index in the content library — the same way
+`__init__` and `_restore_hidden_pawn` take it — so a reset lands the pawns
+exactly where the match started them. NOT `_sync_token_positions` afterwards:
+that speaks for the pawns ON the board and there are none left.
+
+A FINISHED MATCH CANNOT BE RESET. `ResetBoard` is not authority-only, so
+`_phase_refusal` runs on it like anything else and ENDED answers "Gra została
+zakończona". A verdict stands; sweeping the board afterwards would leave a
+declared winner beside an empty road.
+
+MODIFIED
+--------
+  engine/commands.py   ResetBoard; EDITOR_ONLY.
+  engine/events.py     BoardReset.
+  engine/game_state.py _reset_board + dispatch; the gate in authorise_remote.
+  net/lobby.py         edit_mode field, serialisation, to_config.
+  server/room.py       edit_mode accepted from the host in set_settings.
+
+WHY IT CANNOT COME BACK
+-----------------------
+`tests/test_stage53_online_edit_mode.py`, 20 tests. The two that matter most
+are the pair that pull in opposite directions:
+`test_an_ordinary_table_refuses_the_commands_that_confer_advantage` and
+`test_an_ordinary_table_still_allows_the_shared_bookkeeping`. Together they pin
+WHERE the line is, so moving it in either direction has to argue with a test
+rather than with a comment.
+
+THE INTERFACE, AND THE ONE THING THE LAYOUT WOULD NOT ALLOW
+-----------------------------------------------------------
+Lobby: an "Edycja — odkryte ręce" checkbox on `HostSetupScreen`, which SHARES
+THE DEBUG ROW rather than taking one of its own. That is not a style choice.
+The host form already reached the bottom of a 1280x760 window, and an extra row
+pushed the error line off the screen even stripped to a bare checkbox with no
+hint and no gap — there is no version of "one more row" that fits. Sharing the
+row means the horizontal gap has to be MEASURED from the debug caption
+(`DEBUG_LABEL`, `r.fonts.get(16).size(...)`) rather than guessed: the captions
+grow with the window, and the fixed offset that cleared at 1280 was swallowed
+by the caption at 2560. The two captions are class constants precisely because
+the measuring and the drawing must not drift apart.
+
+Board: NOTHING. The reset lives in the Esc menu — see below. It spent one stage
+as a "PIONKI OD NOWA" button stacked under COFNIJ RUCH, and that was a mistake
+worth recording: it put the one irreversible action in the game a few pixels
+below the control people press by reflex. `reset_board_button_rect` and its
+draw and click handlers are gone.
+
+
+================================================================================
+A MOVE THE VIEW CANNOT DRAW  (stage 54 — read before adding an Event)
+================================================================================
+
+THE BUG
+-------
+Reset the board and the pawns stayed on the road. The engine had them back in
+their camps — `pawn_tiles` empty, `token.position` at the camp slots, every
+replica agreeing, the fingerprint fine — and the screen went on showing them
+where they had been. Play a card afterwards and the pawn appeared to jump from
+field 7 to field 1, because the FIRST thing that wrote the drawn position was
+the movement, not the reset.
+
+THE ROOT CAUSE, and it is a shape rather than a line
+-----------------------------------------------------
+`BoardView.visual` is the board's OWN COPY of where each pawn is drawn. It is
+not read from the engine each frame; it is written by the view's reactions to
+movement events so that pawns GLIDE instead of teleporting. Which means:
+
+    AN EVENT NOTHING SUBSCRIBES TO CHANGES NOTHING ON SCREEN.
+
+`BoardReset` was emitted, logged, broadcast and applied everywhere — and no
+handler was listening, so `visual` kept its old numbers. The authoritative
+state was never wrong. Only the copy was.
+
+THE FIX, which already existed
+------------------------------
+`BoardView.resync()`, one subscription:
+
+    bus.subscribe(ev.BoardReset, self._on_board_reset)   ->   self.resync()
+
+THE SAME ANSWER `MoveUndone` GETS, for the same reason, and its docstring says
+why better than a new one could: several pawns moved at once and the view has
+no way to know which glide would represent that, so asking the engine for every
+position is the only answer that is right for every case rather than for the
+one that happened to be tested. `TileRestacked` is a third instance of the
+shape.
+
+SO: WHEN YOU ADD AN EVENT THAT MOVES MORE THAN ONE PAWN AT ONCE, subscribe the
+board view to it and call `resync()`. When it moves one pawn along a route,
+`TokenWalked` and `TokenMoved` already glide it. There is no third mechanism
+and there must not be one.
+
+WHY IT WORKS ONLINE FOR FREE. Events reach a client through
+`apply_authoritative` and the same bus, so a reset a stranger triggered redraws
+here exactly as a local one does. Nothing about the fix is per-session.
+
+TESTING A GLIDE. A move does not update `visual` immediately — the tween takes
+up to about a second — so a test that reads `visual` straight after a move is
+reading the middle of an animation. `settle()` in the stage-53 tests runs the
+tweens out first. A RESET is deliberately not a glide: `resync` writes every
+position at once, because there is no journey to draw and the next card must
+start from the camp.
+
+THE ESC MENU
+------------
+`PauseMenu` is entirely data-driven — it lays itself out by MEASURING the
+captions it is handed — so "Resetuj Planszę" is one entry in `_pause_entries`
+and needed no layout work at all. It is LAST, after "Wyjdź z gry", and only on
+an editing table. Last on purpose: "Wróć do gry" is what somebody who opened
+this menu by accident is reaching for, and the destructive entry belongs at the
+far end from it. It is painted with `warning_bg` like the other two exits.
+
+NO CONFIRMATION DIALOG, and the project has no such mechanism to reuse — there
+is not one `Na pewno?` anywhere in the interface. Two deliberate steps (Esc,
+then the last entry of four) is the separation the brief asked for; inventing a
+confirmation framework for one action would have been the bigger change.
+
+UNDO IS UNTOUCHED. `ResetBoard` takes no checkpoint and opens no window, so it
+is not undoable and never was — see KNOWN LIMITATIONS. Moving the control off
+the board removed a click handler that sat in the same early group as the undo
+button; the undo handler is exactly as it was.
+
+MODIFIED
+--------
+  ui/board_view.py    the subscription and `_on_board_reset`.
+  ui/game_screen.py   the standalone button gone; the Esc entry and its branch.
+  ui/overlays.py      `reset_board` painted as an exit.
+  ui/layout.py        `reset_board_button_rect` deleted.
+
+
+================================================================================
 HOW THE CARD SYSTEM WORKS
 ================================================================================
 
@@ -4304,6 +4514,36 @@ D8. HIDDEN INFORMATION SPLIT EXISTS ALREADY (to_public_dict / to_private_dict)
 ================================================================================
 KNOWN LIMITATIONS
 ================================================================================
+
+- AN EVENT NOTHING SUBSCRIBES TO CHANGES NOTHING ON SCREEN.  `BoardView.visual`
+  is the board's own copy of where each pawn is drawn, written by the view's
+  reactions to movement events rather than read from the engine each frame.
+  Stage 54 fixed one instance (`BoardReset`); the shape can recur with the next
+  event that moves several pawns at once.  Subscribe it to `resync()` — see
+  "A MOVE THE VIEW CANNOT DRAW".  Note that no fingerprint will ever catch this
+  class of bug: the authoritative state is correct throughout.
+
+- THE HOST FORM IS FULL.  The edit-mode checkbox shares the debug row because
+  a row of its own would not fit in a 1280x760 window, even stripped to a bare
+  checkbox with no hint and no gap.  The next setting added to
+  `HostSetupScreen` has nowhere to go: it will need the form to scroll, or a
+  second column, or a move into `GameSettingsPanel`.  Do not discover this by
+  adding a row and watching `test_menu_layout` fail — it is full NOW.
+
+- AN EDITING TABLE TURNS THE HANDS FACE UP.  `may_view` returns True in edit
+  mode and every client already reconstructs every hand from the log, so the
+  interface stops hiding them.  That is what the mode IS, and the host chooses
+  it in the lobby where everybody can see the choice — but it means an editing
+  table is not a hidden-hand game.  Piotrek's colour is unaffected: it is never
+  in the log or the snapshot.
+
+- RESET BOARD DOES NOT UNDO ITSELF.  It is not a checkpoint and takes none:
+  `turn_window` is untouched, so a reset cannot be rewound and an undo taken
+  afterwards restores the checkpoint from before the last card, board and all.
+  The two features do not compose and nothing stops a player using them
+  together; if that turns out to matter, the answer is for `_reset_board` to
+  close the window (`_close_turn_window`), which is one line, not for undo to
+  learn about resets.
 
 - OPEN, AND THE MOST IMPORTANT THING ON THIS LIST: `Room.submit` DOES NOT LOG A
   COMMAND THAT RETURNS `ChoiceRequired`, AND THE STATE MAY ALREADY HAVE MOVED.

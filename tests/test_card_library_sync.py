@@ -222,8 +222,13 @@ def hand_titles(service, seat: int) -> list:
 def test_the_card_reaches_the_hand_of_the_player_who_asked(table, library):
     """The seat in the command is the seat that gets the card, on EVERY
     machine — not just on the one that clicked.
+
+    On an EDITING table since stage 53: a titled draw hands a named card to a
+    hand, which is the one library action that confers a private advantage, so
+    it now needs ``edit_mode``.  The claim this test makes is about ROUTING and
+    is unchanged — only the table it is made on.
     """
-    host, clients = table.playing("Kuba", "Ola", "Ala")
+    host, clients = table.editing("Kuba", "Ola", "Ala")
     asker = clients[1]
     seat = asker.session.seat
     title = a_deck_title(host, settings.DECK_MODS)
@@ -258,7 +263,9 @@ def test_nobody_elses_hand_changes(table, library):
 
 
 def test_the_live_deck_shrinks_on_every_machine(table, library):
-    host, clients = table.playing("Kuba", "Ola", "Ala")
+    """On an editing table since stage 53 — see the test above; the claim about
+    the pile shrinking on every machine is untouched."""
+    host, clients = table.editing("Kuba", "Ola", "Ala")
     seat = host.session.seat
     title = a_deck_title(host, settings.DECK_MOVEMENT)
     piles = {s: s.state.decks[settings.DECK_MOVEMENT].draw_count

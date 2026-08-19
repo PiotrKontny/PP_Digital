@@ -761,6 +761,21 @@ class PawnHidden(GameEvent):
 
 
 @dataclass
+class BoardReset(GameEvent):
+    """Every pawn went back to its camp slot.
+
+    Carries what it cleared rather than nothing, so the interface can say what
+    happened instead of the board silently emptying: the view redraws from the
+    engine either way (``BoardView.resync``), which is the same answer undo
+    needed and for the same reason — several pawns moved at once and the view
+    has no way to know which.
+    """
+
+    pawns: int = 0
+    statuses_cleared: int = 0
+
+
+@dataclass
 class PawnRestored(GameEvent):
     """A hidden pawn came back, on top of the pawn furthest to the rear.
 

@@ -627,13 +627,16 @@ def test_every_machine_moves_the_same_two_pawns(library):
 
     A NAMED card is fetched into the actor's hand through ``DrawTitledCard``,
     which is itself a command, so the move under test is a known one rather
-    than whatever the deal happened to give.
+    than whatever the deal happened to give.  That command needs an EDITING
+    table since stage 53 — it is the one library action that hands a player a
+    private advantage — so the lobby says so here.  Nothing else about the test
+    changes: AKO's companion rule is what is under test.
     """
     from netkit import Table, all_agree
 
     table = Table(library)
     host, clients = table.seated("Kuba", "Ola", "Ala")
-    host.set_settings(card_variants={AKO: ALONE})
+    host.set_settings(card_variants={AKO: ALONE}, edit_mode=True)
     table.pump()
     host.start_game(library)
     table.pump()

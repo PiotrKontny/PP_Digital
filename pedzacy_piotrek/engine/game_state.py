@@ -3799,6 +3799,63 @@ class GameState:
                                       default=default, restored=True)]
 
     # ── handlers: board ──────────────────────────────────────────────────────
+    def _reset_board(self, command: cmd.ResetBoard) -> List[ev.GameEvent]:
+        """Put every pawn back in its camp and clear what the board held.
+
+        THE BOARD, NOT THE MATCH.  Hands, decks, the round, the turn and a
+        declared verdict are deliberately untouched — a reset that also dealt
+        new hands would be a restart, and the lobby already owns restarting.
+
+        What goes with the placements:
+
+        * the TOWERS, because a stack is board state and there is nothing left
+          to stack on;
+        * every status that names a PAWN — a freeze, an Ondrej link, a
+          forbidden adjacency — because each of them describes a relationship
+          between pawns and fields that has just stopped existing.  Statuses on
+          a PLAYER stay: a queued turn interrupt or a movement bonus is about
+          the person, not about the board;
+        * every decision waiting on a TOWER (``pending_check``,
+          ``pending_breakup``, ``pending_lead_check``, ``pending_pawn_check``),
+          because answering one afterwards would check a tower that is not
+          there.  ``pending_movement`` goes with them: it is an offer to block
+          a movement whose destination has just been swept away.
+
+        The camp slot is taken from the pawn's index in the content library,
+        the same way ``__init__`` and ``_restore_hidden_pawn`` take it, so a
+        reset lands the pawns exactly where the match started them.
+        """
+        placed = len(self.board.pawn_tiles)
+        for tile in self.board.tiles:
+            tile.stack.clear()
+        self.board.pawn_tiles.clear()
+        for slot, pawn in enumerate(self.library.pawns):
+            token = self.tokens.get(pawn.id)
+            if token is None:
+                continue
+            token.tile_index = None
+            token.held = False
+            token.position = self.board.camp_position(slot)
+
+        cleared = 0
+        for status in self.statuses.all():
+            if status.subject is Subject.PAWN:
+                self.statuses.discard(status)
+                cleared += 1
+
+        self.pending_check = None
+        self.pending_breakup = None
+        self.pending_lead_check = None
+        self.pending_pawn_check = None
+        self.pending_movement = None
+        self._resolved_movement = None
+
+        # NOT ``_sync_token_positions``: it speaks for the pawns that are ON
+        # the board, and there are none left — the camp slots above are the
+        # answer for every one of them.
+        self._release_check_lock()
+        return [ev.BoardReset(pawns=placed, statuses_cleared=cleared)]
+
     def _pick_up_token(self, command: cmd.PickUpToken) -> List[ev.GameEvent]:
         token = self.tokens.get(command.pawn_id)
         if token is None:
@@ -4071,6 +4128,11 @@ class GameState:
 
     def _authorise(self, command: cmd.Command) -> Optional[ev.GameEvent]:
         """Is this machine allowed to issue this command right now?"""
+        # NO ``EDITOR_ONLY`` GATE HERE, deliberately.  This is the path a
+        # machine takes for its OWN commands, and a single-machine game has
+        # nobody to take an advantage from — the tester fetching a card is the
+        # whole point of the tool.  The gate belongs on ``authorise_remote``,
+        # where a command arrives from somebody else's process.
         if not isinstance(command, cmd.AUTHORITY_ONLY):
             problem = self._phase_refusal()
             if problem is not None:
@@ -4121,6 +4183,12 @@ class GameState:
             # are the server's own words.  A client that sends one is claiming
             # to have won.
             return "Tę decyzję podejmuje serwer"
+        if isinstance(command, cmd.EDITOR_ONLY) and not self.edit_mode:
+            # EDITING IS A PROPERTY OF THE TABLE, not of the client asking.
+            # The host fixes it in the lobby before the match and it travels in
+            # SessionConfig with everything else, so every machine agrees about
+            # it and no client can turn it on for itself.
+            return "Tryb edycji jest wyłączony przy tym stole"
         problem = self._phase_refusal()
         if problem is not None:
             return problem
@@ -4870,6 +4938,7 @@ class GameState:
         cmd.AcceptMovement: _accept_movement,
         cmd.BlockMovement: _block_movement,
         cmd.ExpireMovementDecision: _expire_movement_decision,
+        cmd.ResetBoard: _reset_board,
         cmd.PickUpToken: _pick_up_token,
         cmd.MoveToken: _move_token,
         cmd.SetRound: _set_round,

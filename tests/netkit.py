@@ -101,6 +101,22 @@ class Table:
         self.pump()
         return host, clients
 
+    def editing(self, *nicknames: str, colour: str = "", mods: bool = False):
+        """A match on an EDITING table — the host turned edit mode on.
+
+        Set through the real ``set_settings`` path rather than by reaching into
+        the lobby, because host-only-ness and the broadcast are part of what
+        makes the flag trustworthy and a test that bypassed them would not be
+        testing the thing.
+        """
+        host, clients = self.seated(*nicknames, mods=mods)
+        host.set_settings(edit_mode=True)
+        self.pump()
+        host.start_game(self.library)
+        self.pump()
+        self.choose_identity(host, clients, colour)
+        return host, clients
+
     def playing(self, *nicknames: str, colour: str = "", mods: bool = False):
         """A match that has actually begun — identity chosen and all.
 

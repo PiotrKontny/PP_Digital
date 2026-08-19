@@ -802,7 +802,10 @@ def test_the_whole_exchange_replicates(library):
 
     table = Table(library)
     host, clients = table.seated("Kuba", "Ola", "Ala")
-    host.set_settings(block_decision_seconds=5)
+    # ``edit_mode`` because this test fetches a NAMED card through
+    # ``DrawTitledCard``, which needs an editing table since stage 53.  The
+    # exchange being replicated here is unaffected by it.
+    host.set_settings(block_decision_seconds=5, edit_mode=True)
     table.pump()
     assert host.lobby_state.block_decision_seconds == 5
     host.start_game(library)
@@ -877,6 +880,12 @@ def test_the_server_times_the_window_out(library):
     clock = {"now": 1_000.0}
     table = Table(library)
     host, clients = table.seated("Kuba", "Ola", "Ala")
+    # An EDITING table since stage 53: this test fetches a NAMED card through
+    # ``DrawTitledCard`` so that the movement under test is a known one, and
+    # that command now needs edit mode.  The window timing being tested here is
+    # untouched by it.
+    host.set_settings(edit_mode=True)
+    table.pump()
     host.start_game(library)
     table.pump()
     table.choose_identity(host, clients, "")

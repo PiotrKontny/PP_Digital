@@ -1389,9 +1389,15 @@ def test_a_titled_draw_is_not_bound_to_a_turn(library):
 
 
 def test_a_titled_draw_is_still_owned_by_its_seat(library):
-    """You may fetch a card for YOURSELF.  The server checks that."""
+    """You may fetch a card for YOURSELF.  The server checks that.
+
+    ``edit_mode=True`` since stage 53: a titled draw now also needs an editing
+    table, and this test is about the OWNERSHIP check that runs after that one.
+    With editing off, both calls are refused for the earlier reason and the
+    claim being made here would never be reached.
+    """
     game = create_game(
-        SessionConfig(num_players=5, board_cells=24, seed=77, edit_mode=False),
+        SessionConfig(num_players=5, board_cells=24, seed=77, edit_mode=True),
         library,
     )
     title = game.decks[settings.DECK_MODS].draw_pile[-1].title
