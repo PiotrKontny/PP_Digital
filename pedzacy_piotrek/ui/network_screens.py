@@ -313,7 +313,19 @@ class _FormScreen(Screen):
 
     # ── shared: opening a lobby without freezing ─────────────────────────────
     def _enter_lobby(self, service: NetworkService, embedded=None) -> None:
+        """The one place a connection enters the game, so the one place it is
+        handed to the application.
+
+        The lobby passes it to the game screen and the game screen passes it
+        nowhere, but closing the window pops neither of them; the application
+        is the only thing that outlives every screen and can therefore be
+        trusted to close it.  Registered in build order — server first, then
+        the connection to it — because :meth:`App.close_owned` unwinds in
+        reverse.
+        """
         self._focus(None)
+        self.app.own(embedded)
+        self.app.own(service)
         self.app.replace(LobbyScreen(self.app, self.library, service,
                                      embedded=embedded))
 
@@ -759,8 +771,10 @@ class LobbyScreen(Screen):
         self.library = library
         self.service = service
         #: A server started inside this process, when the player asked for one.
-        #: Held here so leaving the lobby shuts it down rather than leaving a
-        #: listener running for the rest of the session.
+        #: Kept for display and for what this screen wants to know about it;
+        #: SHUTTING IT DOWN belongs to the application, which owns it, because
+        #: this screen is replaced by the game screen the moment the match
+        #: begins and a listener whose owner has gone outlives the session.
         self.embedded = embedded
         self.message = ""
         self.error = ""
@@ -946,14 +960,24 @@ class LobbyScreen(Screen):
                                     service=self.service, library=self.library))
 
     def _leave(self) -> None:
-        self.service.close()
-        if self.embedded is not None:
-            self.embedded.stop()
+        """"Opuść pokój": the player chose to go, so the room is told so.
+
+        ``leave_room`` rather than merely closing the socket — the difference
+        is whether the server frees this seat now or holds it open through a
+        grace period for somebody who is already looking at the main menu.
+        """
+        self.service.leave_room()
+        self.app.close_owned()
         self.app.replace(MainMenuScreen(self.app, self.library))
 
     def _go_home(self, reason: str) -> None:
-        if self.embedded is not None:
-            self.embedded.stop()
+        """Sent home by something that happened TO us, not by a choice.
+
+        No ``leave_room`` here: the connection is already gone, and there is
+        nothing to tell a server that has stopped listening.  The resources are
+        still released.
+        """
+        self.app.close_owned()
         menu = MainMenuScreen(self.app, self.library)
         menu.notify(reason)
         self.app.replace(menu)

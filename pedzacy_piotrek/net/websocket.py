@@ -30,6 +30,24 @@ connection state, error string, generation counter, latency — each written by
 one side and read by the other.  No locks, because no compound value is ever
 read across a write.
 
+AND EXACTLY ONE THREAD, WHICH IS THE POINT.  The outbox used to be read with
+``loop.run_in_executor(None, ...)`` around a blocking ``queue.get``, which put a
+*second* thread — one belonging to asyncio's default ThreadPoolExecutor — inside
+a loop it only left when :attr:`_stop` was set.  ``concurrent.futures.thread``
+registers a ``threading._register_atexit`` hook that joins every executor worker
+it ever created, DAEMON FLAG INCLUDED, and that hook runs inside
+``threading._shutdown()`` before daemon threads are abandoned.  So a game that
+exited without closing its transport — which is every game that was closed by
+its window button — left the interpreter blocked forever in ``_python_exit``,
+joining a worker that was never going to return.  The window was gone, the
+process was not, and it could not be stopped from a debugger because the main
+thread was inside a non-interruptible ``join()``.
+
+The writer below therefore waits on an :class:`asyncio.Event` woken from the
+game thread with ``call_soon_threadsafe``, and no executor is involved: the
+queue is only ever drained without blocking.  That removes the shutdown hazard
+at its source rather than arranging for the flag to be set more reliably.
+
 RECONNECTION IS THE TRANSPORT'S JOB.  Losing WiFi for four seconds should cost
 four seconds, not the match.  The loop below reconnects with exponential
 backoff for as long as the policy allows, and bumps :attr:`generation` when it
@@ -109,10 +127,15 @@ class WebSocketTransport(Transport):
         self.description = url
 
         self._inbox: "queue.Queue[Message]" = queue.Queue()
-        self._outbox: "queue.Queue[Optional[Message]]" = queue.Queue()
+        self._outbox: "queue.Queue[Message]" = queue.Queue()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        #: Set from the GAME thread whenever there is something to send or the
+        #: transport has been asked to stop.  Lives on the network thread's
+        #: loop; see :meth:`_wake`, which is the only way it is ever touched
+        #: from outside.
+        self._pending: Optional[asyncio.Event] = None
 
         #: Round-trip time of the last application-level ping, in milliseconds.
         self.latency_ms: Optional[float] = None
@@ -136,23 +159,52 @@ class WebSocketTransport(Transport):
         self._thread.start()
 
     def close(self) -> None:
+        """Send what is already queued, then let go.  Safe to call twice.
+
+        THE OUTBOX IS DRAINED, NOT DROPPED.  The last thing a leaving player
+        puts on it is the message that says so, and a close that raced it
+        turned a deliberate departure into a socket that merely stopped
+        answering — which the server correctly treats as a temporary failure
+        and holds a seat open for.  The writer below finishes its queue before
+        it returns, and only then is the connection shut.
+
+        The wait is bounded by ``config.shutdown_timeout`` and is a ceiling
+        rather than a delay: the network thread is woken immediately and
+        normally finishes in milliseconds.
+        """
         if self.state is ConnectionState.CLOSED and self._thread is None:
             return
         self._stop.set()
-        self._outbox.put(None)          # wake the sender out of its wait
+        self._wake()                    # drain the queue and shut the socket
         self.state = ConnectionState.CLOSED
         thread, self._thread = self._thread, None
         if thread is not None and thread.is_alive():
-            # Short join: the loop checks the stop flag between operations, and
-            # the thread is a daemon, so a stubborn socket cannot hold the
-            # application open at exit.
-            thread.join(timeout=1.5)
+            thread.join(timeout=self.config.shutdown_timeout)
+
+    def _wake(self) -> None:
+        """Tell the network thread there is something to do.
+
+        Called from the GAME thread, which is why it goes through
+        ``call_soon_threadsafe`` rather than touching the event directly.  A
+        loop that has already finished is not an error: there is nothing left
+        to wake, and whatever was queued is going nowhere either way.
+        """
+        loop, pending = self._loop, self._pending
+        if loop is None or pending is None:
+            return
+        try:
+            loop.call_soon_threadsafe(pending.set)
+        except RuntimeError:
+            # The loop closed between the two lines above.  The thread it ran
+            # on is already finished, so there is no waiter left to notify.
+            return
 
     # ── Transport ────────────────────────────────────────────────────────────
     def send(self, message: Message) -> None:
         if self._stop.is_set():
             return
         self._outbox.put(message)
+        self._wake()
 
     def poll(self) -> List[Message]:
         """Drain the inbox.  Also the moment the heartbeat timeout is judged."""
@@ -211,6 +263,10 @@ class WebSocketTransport(Transport):
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)
+        # Built here rather than in ``__init__`` so it belongs to the loop that
+        # will actually wait on it.  Anything the game sent before this moment
+        # is already in the outbox and is drained by the writer's first pass.
+        self._pending = asyncio.Event()
         try:
             loop.run_until_complete(self._supervise())
         except Exception as exc:  # pragma: no cover - defensive
@@ -223,6 +279,7 @@ class WebSocketTransport(Transport):
                 pass
             loop.close()
             self._loop = None
+            self._pending = None
 
     async def _supervise(self) -> None:
         """Keep a connection up for as long as the policy says to try."""
@@ -248,8 +305,27 @@ class WebSocketTransport(Transport):
                 self.state = ConnectionState.CLOSED
                 return
             self.state = ConnectionState.RECONNECTING
-            await asyncio.sleep(policy.delay_for(self.attempt))
+            await self._backoff(policy.delay_for(self.attempt))
         self.state = ConnectionState.CLOSED
+
+    async def _backoff(self, delay: float) -> None:
+        """Wait out the retry delay, but not past a request to stop.
+
+        A plain sleep here would keep the network thread inside an eight-second
+        pause it could not be woken from, so closing the game while the server
+        was unreachable meant waiting for the backoff to end before anything
+        was released.  The wake event is set by :meth:`close`, so the wait ends
+        the moment there is a reason for it to.
+        """
+        pending = self._pending
+        if pending is None:
+            await asyncio.sleep(delay)
+            return
+        pending.clear()
+        try:
+            await asyncio.wait_for(pending.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            return                      # the delay simply elapsed
 
     async def _session(self) -> None:
         """One connection, from handshake to close."""
@@ -314,24 +390,33 @@ class WebSocketTransport(Transport):
     async def _write(self, connection) -> None:
         """Move the outbox onto the wire without blocking either side.
 
-        The queue read is a blocking call, so it runs in a worker thread; the
-        alternative is polling it on a timer, which trades latency for CPU in
-        the one place the game cannot afford either.
-        """
-        loop = asyncio.get_running_loop()
-        while not self._stop.is_set():
-            message = await loop.run_in_executor(None, self._next_outbound)
-            if message is None:
-                return
-            await connection.send(message.encode())
+        Nothing here ever blocks a thread: the queue is drained with
+        ``get_nowait`` and the coroutine then suspends on an event the game
+        thread sets.  The previous version handed a blocking ``queue.get`` to
+        asyncio's default executor, and that worker — which the interpreter
+        joins at exit whatever its daemon flag says — is what used to keep the
+        process alive for ever.  See the module docstring.
 
-    def _next_outbound(self) -> Optional[Message]:
-        while not self._stop.is_set():
-            try:
-                return self._outbox.get(timeout=0.25)
-            except queue.Empty:
-                continue
-        return None
+        THE ORDER OF THE THREE STEPS IS LOAD-BEARING.  The event is cleared
+        *before* the queue is inspected, so a message that arrives during the
+        drain leaves the event set and is collected on the next pass instead of
+        waiting for one that never comes.  The stop flag is read *after* the
+        drain, so a goodbye queued a moment before ``close()`` still reaches the
+        server.
+        """
+        pending = self._pending
+        while True:
+            if pending is not None:
+                pending.clear()
+            while True:
+                try:
+                    message = self._outbox.get_nowait()
+                except queue.Empty:
+                    break
+                await connection.send(message.encode())
+            if self._stop.is_set() or pending is None:
+                return
+            await pending.wait()
 
     async def _heartbeat(self, connection) -> None:
         """An application-level ping, which doubles as the latency probe.

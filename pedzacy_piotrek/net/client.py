@@ -90,6 +90,12 @@ class GameClient:
         #: Set when the player is out of the game for good, with the reason.
         #: A temporary drop does NOT set it — that is what reconnection is for.
         self.disconnected: Optional[str] = None
+        #: The player CHOSE to leave the room.  Distinct from
+        #: :attr:`disconnected`, which is something that happened to them, and
+        #: from the transport being closed, which is how both of them end.  It
+        #: is what stops a deliberate exit being reported to the player as a
+        #: lost connection on the way out.
+        self.departed: bool = False
         self.error: Optional[str] = None
         self.notices: List[str] = []
         self.stats = NetworkStats(mode="client")
@@ -223,6 +229,35 @@ class GameClient:
         self._intent = None
         self._send(Message(MessageType.LEAVE_LOBBY))
 
+    def leave_room(self) -> None:
+        """The player chose to leave.  THIS IS NOT A NETWORK FAILURE.
+
+        One message — the ``LEAVE_LOBBY`` this client has always had — and then
+        the connection goes, in that order and with the transport draining the
+        first before it performs the second.  The distinction matters at the
+        far end: a socket that merely stops answering buys a reconnect grace
+        period and a held seat, which is exactly right for a train entering a
+        tunnel and exactly wrong for somebody who pressed "wróć do menu".
+        Without the message the server could not tell the two apart, so it
+        assumed the kinder one and the room stayed occupied by a player who had
+        gone back to the main menu.
+
+        Idempotent: the screens call it on the way out, and the application's
+        own shutdown closes whatever it still owns afterwards.
+        """
+        if self.departed:
+            return
+        self.departed = True
+        self.leave_lobby()
+        # Forget the room locally as well.  The server's answer — a lobby
+        # broadcast this client is no longer addressed by — is not coming, so
+        # nothing else will do it, and a stale mirror would have the menus
+        # believing there is still a room to go back to.
+        self._end_match_locally()
+        self.lobby_state = LobbyState()
+        self.seat = None
+        self.transport.close()
+
     def set_nickname(self, nickname: str) -> None:
         self.nickname = nickname or DEFAULT_NICKNAME
         self._send(Message(MessageType.SET_NICKNAME, {"nickname": self.nickname}))
@@ -306,6 +341,12 @@ class GameClient:
             # The intent is replayed from ``_on_welcome`` once the server has
             # greeted this connection; sending it now would race the handshake.
             self._send(Message.hello(self.nickname, self.resume_token))
+            return
+
+        if self.departed:
+            # The closed socket is the one we closed on purpose a moment ago.
+            # Calling it a lost connection would put "Połączenie zerwane" in
+            # front of somebody who chose to go back to the menu.
             return
 
         if transport.state is ConnectionState.CLOSED and self.disconnected is None:
@@ -564,6 +605,18 @@ class GameClient:
         self.transport.close()
 
     def close(self) -> None:
+        """Release this client's end of the connection.
+
+        ``BYE`` is the connection-level goodbye and the server routes it to the
+        same departure :meth:`leave_room` asks for, so closing an application
+        that is still sitting in a room leaves it properly rather than looking
+        like a machine that fell off the network.  Sent BEFORE the transport is
+        closed and drained by it on the way out; that ordering is the whole
+        reason the message arrives at all.
+
+        Safe after :meth:`leave_room`, which has already said goodbye and shut
+        the transport: there is nothing alive left to send on.
+        """
         if self.transport.alive:
             self._send(Message.bye("Gracz wyszedł"))
         self.transport.close()

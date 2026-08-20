@@ -7695,3 +7695,394 @@ than "that room is stuck".
 
 The same four tests were already failing before this stage and still are: three
 in `test_stage43_herold_card.py` and one in `test_visual_style.py`.
+
+## Stage 56 — Leaving, and the process that would not end
+
+Two reports, and they turned out to be one story: the game sometimes did not
+terminate when it was closed, and a player who left a room sometimes stayed in
+it. The second is partly a consequence of the first — a process that has to be
+killed says no goodbye — and both come down to the same omission, which is that
+nothing in the application ever closed the connection it had opened.
+
+### Defect A: the hang
+
+Reported as "closing the game does not terminate the Python process; PyCharm's
+Stop button may fail". It is not pygame and it is not a stray non-daemon thread
+of ours: every thread this project starts is a daemon, and I checked before
+looking further.
+
+`WebSocketTransport._write` read its outbox with a blocking `queue.get` handed
+to asyncio's DEFAULT EXECUTOR:
+
+    message = await loop.run_in_executor(None, self._next_outbound)
+
+`concurrent.futures.thread` registers a hook through
+`threading._register_atexit` that joins every executor worker it has ever
+created — **the daemon flag does not exempt them** — and that hook runs inside
+`threading._shutdown()` before daemon threads are abandoned. `_next_outbound`
+looped until the transport's stop flag was set, so unless somebody called
+`transport.close()` the worker never returned and the interpreter blocked for
+ever. Reproduced, with the stack:
+
+    File "concurrent/futures/thread.py", line 31 in _python_exit  ->  t.join()
+    File "threading.py", line 1592 in _shutdown
+    [waiting on a worker in websocket.py:331 in _next_outbound]
+
+That join is not interruptible by a signal, which is exactly why Stop could not
+touch it and why the window disappearing did not mean the process had.
+
+The second half: **no exit path closed anything.** `App.run` left its loop on
+`pygame.QUIT` without popping screens, no screen implements `on_exit`, so
+`service.close()` was never reached and an embedded server was never stopped.
+
+**The fix** is to remove the executor rather than to arrange for the flag to be
+set more reliably. The writer now drains the outbox with `get_nowait` and
+suspends on an `asyncio.Event` the game thread sets through
+`call_soon_threadsafe`. One thread per transport, and it is the daemon one that
+already existed. The retry backoff waits on the same event with a timeout
+instead of sleeping, so closing during a reconnection attempt no longer has to
+wait out an eight-second delay.
+
+The order inside `_write` is load-bearing and commented as such: clear the
+event, then drain, then test the stop flag. Clearing after the drain loses a
+message that arrived during it; testing the flag first throws away the goodbye
+`close()` had just queued.
+
+### Defect B: leaving that did not leave
+
+The Esc exits called `service.close()`, which sends `BYE` and closes the socket.
+I expected the defect to be a race between the queued goodbye and the close, and
+measured it before writing anything — twelve rounds over a real socket, old code
+and new, **zero messages lost either way**. On loopback the executor worker is
+always already parked on the queue and picks the message up. I did not claim a
+defect I could not demonstrate.
+
+The demonstrable one is the window's close box, which cleaned up nothing at all.
+Three players, one closes the window:
+
+    ORIGINAL   peer still seated after closing the window: True
+               transport state: ConnectionState.CONNECTED
+    FIXED      peer still seated after closing the window: False
+               transport state: ConnectionState.CLOSED
+
+The player was gone from their own machine and still holding a seat — and with
+`max_rooms` at 1, still holding the entire server, until the grace period
+expired. This is stage 55's symptom arriving through a path stage 55 did not
+cover, because stage 55 taught the server to reap an empty room and this is a
+room that never became empty.
+
+**The fix, in two parts.**
+
+`GameClient.leave_room()` / `NetworkService.leave_room()` — one operation for
+"this player chose to go", reusing the `LEAVE_LOBBY` the protocol already had
+rather than inventing a second concept. It sends, forgets the room locally, and
+only then closes the transport, in that order. `client.departed` records that
+the closed socket was closed on purpose, so the player is not shown "Połączenie
+zerwane" on their way to a menu they asked for.
+
+`App.own()` / `close_owned()` — the connection is handed from the join screen to
+the lobby to the game screen, so no screen is its owner, and closing the window
+pops no screens anyway. The application takes it at `_enter_lobby`, the one
+place a connection enters the game, along with an embedded server when there is
+one, and `App.run` closes them in a `finally`. Reverse order, so the connection
+goes before the server it connects to.
+
+### The four states, which is what this stage is really about
+
+    intentional departure    a MESSAGE; seat freed at once; room closes if last
+    temporary disconnection  no message, because that is what it IS
+    reconnect grace period   180s, seat held, resume token puts them back
+    automatic room closure    the SERVER decides, on membership (stage 55)
+
+A departure is not a network failure and must never be routed into the reconnect
+path merely because a socket closed as a result of it: the socket closing is the
+consequence of the decision, the message is the decision. The reverse matters
+just as much — making a disconnection free the seat immediately "for symmetry"
+would delete the reconnect feature.
+
+### The menu
+
+`"Wróć do gry"` leaves nothing, which is now a test rather than an assumption:
+it is the entry somebody who opened the menu by accident is reaching for.
+`"Wróć do menu głównego"` and `"Wyjdź z gry"` both leave. The online label was
+`"Opuść rozgrywkę"` and the offline one `"Wróć do menu głównego"`; they are one
+label now, because they are one action and the old one described half of it.
+
+### Tests
+
+`tests/test_stage56_leaving.py`, 20 tests, **8 of which fail without the fix** —
+six fast, plus the real-socket leave and the process-termination test. They run
+on the existing `InProcessServer`/`netkit` layers rather than a parallel
+harness, and they assert against the hub's own room membership and
+`identity.room_code`, not a flag on a screen.
+
+The two that could not be written any other way:
+
+- the window test drives the REAL main loop with a posted `QUIT`, because the
+  point is that the exit path reaches the teardown, not that the teardown works;
+- the termination test starts a whole client process, connects it to a real
+  server, and lets it return from `main` with nothing closed on purpose. An
+  atexit hook that never returns is invisible from inside the process it is
+  hanging.
+
+### Notes
+
+`shutdown_timeout` is now configuration rather than a hard-coded `1.5`. It is a
+ceiling, not a delay: the network thread is woken immediately and normally
+finishes in milliseconds.
+
+Two honest limitations are recorded rather than papered over. Leaving while the
+connection is already down cannot reach the server — `leave_room` goes through
+the same handshake gate as everything else, so there is no socket to announce it
+on, and the seat falls back to the grace period. A departure is also a single
+unacknowledged message, because waiting for an acknowledgement would block the
+frame drawing the main menu. Both degrade to the existing grace-period path,
+which is one more reason it must not be weakened.
+
+The same four tests were already failing before this stage and still are: three
+in `test_stage43_herold_card.py` and one in `test_visual_style.py`.
+
+## Stage 57 — The view stops following the turn online
+
+Four friends testing an online editing table reported that the screen kept
+jumping to somebody else's character. It was doing exactly what it was written
+to do, for a case that no longer applied.
+
+### Why the rule existed, and why it is wrong here
+
+Edit mode was built for ONE person at ONE keyboard. There, the screen following
+the turn is not a convenience — it is the only way to reach the next seat, and
+removing it would make hot-seat editing unusable. Put four people at four
+clients and the same rule inverts: somebody plays a card, the turn advances,
+`ActivePlayerChanged` reaches every replica, and every screen in the room walks
+away from the seat its owner was reading.
+
+Nothing about the GAME differs between those two tables. Same authority, same
+turn cursor, same `may_control`/`may_act`, same `authorise_remote`, same
+fingerprint. The only thing that genuinely differs is how many pairs of eyes are
+pointed at the state — so that is the only thing the new rule knows about, and
+it lives in the interface, which is where that knowledge belongs.
+
+### The change
+
+`GameScreen.view_follows_the_game`, one property, four cases, one of them no:
+
+    local  + edit mode      follows the turn   one person IS every seat
+    local  + no edit mode   follows            there is only ever one seat
+    online + no edit mode   follows            likewise; always your own
+    online + EDIT MODE      DOES NOT FOLLOW    several people, several screens
+
+Deliberately narrow: it answers no ONLY for an online editing table, so the
+other three quadrants keep the behaviour they have always had rather than
+inheriting a rule written for a case they are not in.
+
+Every AUTOMATIC write of `view_seat` now goes through `_follow_seat` — the turn
+changing, and the two chest-limit prompts, which were the other places the view
+moved because the GAME moved. Every DELIBERATE one — `focus_seat`,
+`return_to_my_seat`, the player tiles — does not, and is never refused. That
+split is the whole change: the screen stopped following on its own and kept
+doing exactly what it is told.
+
+An online editing table also now OPENS on your own seat rather than on whoever
+is starting. Without that the first thing a player saw was a jump they never
+asked for, with nothing to undo it but a click.
+
+### What was NOT touched
+
+The turn cursor, `active_player_index`, turn slots, round progression, server
+ownership, command authority, synchronisation and the hidden-information split
+are all exactly as they were, and there are tests that say so — a fix that
+bought a stable view by loosening any of them would be a far worse bug than the
+one it cured. There is no new message: this is local UI state, and nothing about
+which seat a screen draws belongs on the wire.
+
+### One thing found on the way
+
+Clicking a player tile in edit mode is two actions in one: look at that seat,
+and take it. Online, `authorise_remote` has always refused a `player_index` that
+is not the connection's own seat, so taking somebody else's was never possible —
+the click merely ASKED and was told off, putting "To nie jest twoje miejsce przy
+stole" in front of a player who had done nothing but look.
+
+That was tolerable when clicking was one way among several. It is not now that
+it is the ONLY way to change seats, so `GameScreen.may_take_seat` is asked
+before the command is sent and the doomed one is not sent at all. The
+authoritative outcome is identical — the server refused it before and would
+refuse it now; what changed is that a look is no longer answered with an error.
+
+### Tests
+
+`tests/test_stage53_online_edit_mode.py` grew by 21, extending the file that
+already owned both a local-screen and an online-screens helper rather than
+starting a second abstraction. 11 of them fail against the previous build.
+
+They cover the four quadrants, a local command, a remote player's command, an
+explicit `SetActivePlayer`, a whole round of cards coming back to where it
+started, manual clicking at four resolutions, the click that looks without
+taking, the click on your own seat that still takes, reconnection, the safety
+net, and — because this is the important half — that the turn cursor still
+advances, that every replica still agrees with the room, and that the room still
+replays to its own fingerprint.
+
+`test_the_view_cannot_be_used_to_act_for_another_seat` sets `view_seat` by hand,
+further than any click can reach, and submits for that seat through the ordinary
+path. The server refuses it and the fingerprint does not move.
+
+### UI verification
+
+Checked at 1280x760, 1920x1080, 2560x1440 and 3840x2160 on a real three-player
+online editing table. At each: the view opens on your own seat, survives another
+player's card, and moves only on a click. The tile rect comes from
+`Layout.player_tile_rect` and is asserted to be on-screen, non-degenerate and
+actually painted — nothing in the check knows a coordinate.
+
+     size          tile        opens on   after card   after click
+     1280x760      262x64      own seat   unchanged    clicked seat
+     1920x1080     444x89      own seat   unchanged    clicked seat
+     2560x1440     581x112     own seat   unchanged    clicked seat
+     3840x2160     909x112     own seat   unchanged    clicked seat
+
+### A flake diagnosed on the way, and why it was NOT just adjusted
+
+Two tests in this file failed intermittently, and the first instinct — that
+something in this stage had disturbed them — was wrong. Measured on the
+pristine stage 55 build, before a line of stage 56 or 57 existed:
+
+    test_a_card_dealt_by_the_library_does_not_enter_the_public_snapshot
+    -> 3 failures in 20 runs
+
+Both name the card on top of a freshly seeded movement deck, deal it, and then
+assert that exactly one card arrived, in the last position of the hand. The
+cause is not the seed in general — it is TROLL specifically. Troll has an
+`on_draw` rule, so dealing it legitimately brings two more cards with it:
+
+    trial 15: title='Troll' before=3 after=6 last='Astral 2022'
+
+The game was right and the arithmetic was wrong. The tests now assert what they
+are actually about — the named card arrived, out of the named deck, and the
+published `hand_size` matches the real hand — instead of counting. Nothing was
+weakened to make them green: the snapshot test still checks that the CARDS are
+absent from the public dict, and the deal test still checks the room replays to
+its own fingerprint. 0 failures in 24 runs afterwards.
+
+Recorded rather than quietly patched because the shape recurs: any test that
+deals a random card and then counts is making the same mistake.
+
+The same four tests were already failing before this stage and still are: three
+in `test_stage43_herold_card.py` and one in `test_visual_style.py`.
+
+## Stage 58 — Only Piotrek may see Piotrek's colour
+
+Reported as: in online edit mode, click another player's tile and if that player
+is Piotrek his secret colour is printed above the portrait.
+
+### What the investigation actually found
+
+The report was right that the badge appears, and wrong about what it says — and
+the difference decided the whole fix, so it is worth writing down.
+
+I probed a real three-player online editing table before changing anything:
+
+    server piotrek seat: 0   secret: czerwony
+      seat 0: piotrek_pawn='czerwony'
+      seat 1: piotrek_pawn=None
+      seat 2: piotrek_pawn=None
+    snapshot has secret?: False
+
+**The colour never reaches a hunter's client.** `set_piotrek_pawn` is
+deliberately not a command, so it is in no log and no snapshot;
+`assign_secret_pawn` is skipped when `piotrek_picks_pawn` is set, which both
+production paths — `net/lobby.py` and `ui/menu.py` — do; and a resync after a
+reconnect was checked separately and hands over nothing. The data architecture
+was already correct and has not been touched.
+
+Rendering the panel and recording every string drawn confirmed what a hunter
+inspecting Piotrek saw before this stage:
+
+    HUNTER views piotrek -> 'NIE WYBRANO'   (not the colour)
+
+So the leak was real but not the one described: the badge was drawn because the
+SEAT being displayed was Piotrek's, without asking whose eyes were on it. What
+it leaked was that this seat is Piotrek's — the placeholder row only ever
+appears on a Piotrek panel — and it would have printed the colour the moment any
+client legitimately held it. Same defect, one step from the reported symptom.
+
+**This is why the fix is not a rectangle over the text**, and also why it is not
+a change to the data flow: there was no extra private information arriving to
+stop sending.
+
+### The change
+
+`GameScreen.entitled_to_secrets` — one property, and the only thing that answers
+"may the person at this screen see this seat's secrets?". Hot-seat is entitled
+to everything, because one person owns every seat. Over a network it is
+`view_seat == local_seat`, whatever the table is configured for.
+
+Not `may_control` or `can_act`, which are true for every seat in edit mode —
+the very mode this has to hold in. Not `may_view`, which is a real guard that
+still runs first but is a weaker claim: being allowed to look at a hand is not
+being allowed to know which pawn its owner is secretly racing. And not
+`player.is_piotrek`, which is a question about the subject rather than the
+viewer, and is exactly what leaked.
+
+The badge now has three states, and a hunter only ever sees the third:
+
+    chosen      the pawn's colour and name       Piotrek, on his own screen
+    not chosen  an empty ring, "NIE WYBRANO"     likewise
+    not yours   a locked ring, "UKRYTA TOŻSAMOŚĆ"
+
+The third is constant — identical before and after Piotrek chooses, identical
+whichever colour he chose, and drawn in the theme's dim ink with a keyhole
+motif so there is no second colour on screen to eyedropper. A badge that
+changed when he picked would announce that he had; a row that vanished would
+announce the panel had something to hide. The band keeps its height for every
+viewer, which is why the "not chosen" state was a ring rather than nothing in
+the first place.
+
+### Tests
+
+`tests/test_stage58_identity_secrecy.py`, 26 tests, 11 of which fail against the
+previous build. Measured in PIXELS wherever the claim is about pixels, following
+the portrait and card-art tests already here.
+
+The one worth reading is
+`test_the_badge_refuses_even_when_the_secret_is_planted_in_the_replica`. Every
+other secrecy test in the file would pass against a panel that drew whatever it
+was handed, because a hunter's replica holds `None` anyway. That test writes the
+real colour into the hunter's own copy of the state — simulating exactly the
+data-flow regression this must survive — and asserts the badge still refuses,
+pixel for pixel identical to the frame before the plant.
+
+Two of my own tests were wrong on the first run and the corrections are worth
+noting. `test_the_public_snapshot_carries_no_secret` asserted the string
+`czerwony` was absent from the snapshot; it is present for honest reasons, since
+every pawn's board position is public. The claim is now informational: set the
+secret to each of the six pawns in turn and the published state does not move a
+byte. A snapshot identical for all six secrets cannot be carrying any of them.
+
+### UI verification
+
+Four resolutions x four viewpoints, badge rect taken from `Layout`:
+
+    size          Piotrek->self   hunter->Piotrek   hunter->own   Piotrek->hunter
+    1280x760      colour+swatch   UKRYTA, no swatch  no row        no row
+    1920x1080     colour+swatch   UKRYTA, no swatch  no row        no row
+    2560x1440     colour+swatch   UKRYTA, no swatch  no row        no row
+    3840x2160     colour+swatch   UKRYTA, no swatch  no row        no row
+
+The masked band is asserted to actually paint, to sit above the portrait and to
+stay inside the right panel — a masked row that painted nothing would pass every
+secrecy test by leaving a hole.
+
+### Notes
+
+Two limitations recorded rather than papered over. The badge stays masked after
+the match ends, when the colour is public by design; the victory overlay
+announces it, and an exception keyed on `phase is ENDED` fires the moment
+anything sets that phase early. And in edit mode a hunter can still tell WHICH
+seat holds the Piotrek character, because the panel keeps its skill layout and
+prints the name — the brief here was the colour, and hiding the role changes the
+panel's geometry for that viewer.
+
+The same four tests were already failing before this stage and still are: three
+in `test_stage43_herold_card.py` and one in `test_visual_style.py`.

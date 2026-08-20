@@ -66,6 +66,16 @@ class HudContext:
     view_index: int = 0
     #: Whether the viewer may act for the seat they are looking at.
     can_act: bool = True
+    #: Whether the person AT THIS SCREEN is entitled to the hidden information
+    #: of the seat on screen — today that means Piotrek's secret colour, which
+    #: is the one thing a panel draws that no other player may ever see.
+    #:
+    #: A separate question from ``can_act`` and deliberately so: editing lets
+    #: everybody act for everybody, so a panel that asked "may I act here?"
+    #: before drawing a secret would show it to the whole table.  Defaults to
+    #: true because a context built without one is a hot-seat context, where
+    #: every seat belongs to the person at the keyboard anyway.
+    entitled_to_secrets: bool = True
     #: Where a panel asks for an enlarged hover preview of a slot card.  A
     #: panel only ever calls ``request``; the screen draws it late, above
     #: every panel.  ``None`` in the tests and screens that build a context
@@ -628,25 +638,45 @@ class CharacterPanel(Panel):
     def _draw_identity_badge(self, ctx: HudContext, rect: pygame.Rect) -> None:
         """Piotrek's own colour, kept in front of him for the whole match.
 
-        Drawn ONLY on a Piotrek panel, and a Piotrek panel is only ever on
-        Piotrek's own screen — a hunter's client has ``show_skill`` false for
-        its own seat and is not allowed to look at anybody else's
-        (``GameScreen.may_view``).  On top of that, a hunter's copy of the state
-        does not contain the colour to draw: ``secret_pawn`` is ``None`` there
-        all match.  Two independent reasons, because this is the one thing on
-        screen that must never leak.
+        THE ROW IS DRAWN FOR THE SUBJECT; THE COLOUR IS DRAWN FOR THE VIEWER,
+        and stage 58 exists because those used to be the same decision.  A
+        Piotrek panel is not only ever on Piotrek's own screen: edit mode lets
+        anybody open anybody's, and the panel that came up drew the badge
+        because the SEAT was Piotrek's, without asking whose eyes were on it.
 
-        Before the colour is chosen the badge is an empty ring rather than
-        nothing, so the row does not appear from nowhere and shift the panel.
+        Three states, and a hunter only ever sees the third:
+
+            chosen      the pawn's colour and name — Piotrek, on his own screen
+            not chosen  an empty ring and "NIE WYBRANO", likewise
+            not yours   a locked ring and "UKRYTA TOŻSAMOŚĆ", for everyone else
+
+        The third is CONSTANT: identical before and after Piotrek chooses, and
+        identical whichever colour he chose.  A badge that changed when he
+        picked would say when he picked, and a row that vanished would say the
+        panel had something to hide.  It also keeps the band the same height
+        for every viewer, which is why the "not chosen" state was a ring rather
+        than nothing in the first place.
+
+        The colour is a secret in the DATA too — a hunter's replica holds
+        ``secret_pawn`` as ``None`` all match, and the public snapshot and the
+        command log never carry it.  This is the presentation half of that
+        guarantee, not a substitute for it: both have tests.
         """
         r, theme, surface = ctx.r, ctx.theme, ctx.surface
-        pawn_id = ctx.player.secret_pawn
-        pawn = ctx.state.library.pawn(pawn_id) if pawn_id else None
         scale = ctx.layout.ui_scale
-
         radius = max(5, int(rect.height * 0.34))
         centre_y = rect.centery
         font = r.fonts.get(max(9, int(12 * scale)), bold=True)
+
+        if not ctx.entitled_to_secrets:
+            # Nothing is read out of the state here.  Not "read it and decline
+            # to draw it" — there is no branch below this one that could ever
+            # be reached with somebody else's colour in hand.
+            self._draw_masked_identity(ctx, rect, radius, centre_y, font)
+            return
+
+        pawn_id = ctx.player.secret_pawn
+        pawn = ctx.state.library.pawn(pawn_id) if pawn_id else None
         label = pawn.name.upper() if pawn is not None else "NIE WYBRANO"
         text = r.text_surface(label, font, theme.brass_light if pawn is not None
                               else theme.text_dim)
@@ -664,6 +694,36 @@ class CharacterPanel(Panel):
                            alpha=140, surface=surface)
         else:
             r.aa_ring(centre, radius, theme.text_dim, 2, surface=surface)
+        surface.blit(text, (left + radius * 2 + int(8 * scale),
+                            centre_y - text.get_height() // 2))
+
+    def _draw_masked_identity(self, ctx: HudContext, rect: pygame.Rect,
+                              radius: int, centre_y: int,
+                              font: pygame.font.Font) -> None:
+        """The badge as everyone except Piotrek sees it.
+
+        Deliberately built out of the theme's dim ink and nothing else: no
+        pawn, no swatch, no colour anywhere near it, so there is no shade on
+        screen for anybody to eyedropper.  It reads as a locked slot rather
+        than an empty one, which is the honest description — the row exists,
+        its contents are not yours.
+        """
+        r, theme, surface = ctx.r, ctx.theme, ctx.surface
+        scale = ctx.layout.ui_scale
+        text = r.text_surface("UKRYTA TOŻSAMOŚĆ", font, theme.text_dim)
+        total = radius * 2 + int(8 * scale) + text.get_width()
+        left = rect.centerx - total // 2
+        centre = (left + radius, centre_y)
+
+        r.aa_ring(centre, radius, theme.text_dim, 2, surface=surface)
+        # A keyhole: two dim strokes inside the ring, in the same ink as the
+        # ring, so the badge says "locked" without introducing a second colour.
+        bar = max(1, int(2 * scale))
+        pygame.draw.line(surface, theme.text_dim,
+                         (centre[0], centre[1] - radius // 3),
+                         (centre[0], centre[1] + radius // 2), bar)
+        r.aa_ring((centre[0], centre[1] - radius // 3),
+                  max(2, radius // 3), theme.text_dim, bar, surface=surface)
         surface.blit(text, (left + radius * 2 + int(8 * scale),
                             centre_y - text.get_height() // 2))
 
@@ -937,7 +997,12 @@ class PlayerTiles(Panel):
                 ui.start_rename(i)
                 return []
             ui.view_seat = i
-            if state.edit_mode:
+            if ui.may_take_seat(i):
+                # Hot-seat editing hands the turn over with the same click that
+                # changes the view.  Online it does not: the server judges the
+                # seat, and asking for one that is not ours answers a look with
+                # an error.  The VIEW moves either way — that is the local part,
+                # and it is the only part this click is guaranteed to do.
                 return [cmd.SetActivePlayer(player_index=i)]
             return []
         return []

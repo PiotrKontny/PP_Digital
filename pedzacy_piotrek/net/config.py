@@ -247,6 +247,14 @@ class NetworkConfig:
     #: Seconds a client waits for the server to accept an action before warning
     #: the player.  The action is not cancelled — this only drives the display.
     action_timeout: float = 10.0
+    #: Seconds :meth:`WebSocketTransport.close` waits for the network thread to
+    #: put the last message on the wire and shut the socket.  It is a CEILING,
+    #: not a delay: the thread is woken immediately and normally finishes in
+    #: milliseconds.  The wait exists because the last message a leaving player
+    #: sends is the one that tells the server they left — abandoning it turns a
+    #: deliberate exit into a dropped socket, which the server answers with a
+    #: reconnect grace period.
+    shutdown_timeout: float = 2.0
     reconnect: ReconnectPolicy = field(default_factory=ReconnectPolicy)
     heartbeat: HeartbeatPolicy = field(default_factory=HeartbeatPolicy)
     tls: TlsConfig = field(default_factory=TlsConfig)
@@ -305,6 +313,7 @@ class NetworkConfig:
             public_server_url=str(raw.get("public_server_url") or ""),
             connect_timeout=float(raw.get("connect_timeout", 8.0)),
             action_timeout=float(raw.get("action_timeout", 10.0)),
+            shutdown_timeout=float(raw.get("shutdown_timeout", 2.0)),
             reconnect=section("reconnect", ReconnectPolicy),
             heartbeat=section("heartbeat", HeartbeatPolicy),
             tls=section("tls", TlsConfig),

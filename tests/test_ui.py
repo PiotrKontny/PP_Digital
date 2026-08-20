@@ -1929,6 +1929,10 @@ class _FakeService:
         self.chosen = None
         self.returned = False
         self.closed = False
+        #: Stage 56: leaving is its own operation, distinct from the connection
+        #: happening to close, because the SERVER has to be told which one
+        #: occurred.  The double records both so a test can say which it saw.
+        self.departed = False
 
     def poll(self, library=None):
         pass
@@ -1943,6 +1947,11 @@ class _FakeService:
 
     def return_to_lobby(self):
         self.returned = True
+
+    def leave_room(self):
+        # As the real one does: say so, then let the connection go.
+        self.departed = True
+        self.closed = True
 
     def close(self):
         self.closed = True
@@ -2013,8 +2022,10 @@ def test_the_main_menu_button_closes_the_connection(library):
     """The other two endings differ in exactly this.
 
     Returning to the poczekalnia keeps the room; going to the main menu leaves
-    it, and leaving without closing would hold a seat open behind a grace
-    period nobody is waiting through.
+    it, and leaving without SAYING SO would hold a seat open behind a grace
+    period nobody is waiting through.  Since stage 56 that is a departure
+    rather than a bare close, because a closed socket alone is what a lost
+    connection looks like and the server cannot tell the two apart.
     """
     game, service = _online_screen(library)
     game.state.apply(cmd.BeginMatch(), local=False)
@@ -2022,6 +2033,7 @@ def test_the_main_menu_button_closes_the_connection(library):
     settle(game, 10)
 
     click(game, dict(game.victory.buttons)["menu"].center)
+    assert service.departed, "the room was never told"
     assert service.closed and not service.returned
     from pedzacy_piotrek.ui.network_screens import MainMenuScreen
     assert isinstance(game.app.screen, MainMenuScreen)

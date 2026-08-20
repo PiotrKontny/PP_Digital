@@ -121,6 +121,15 @@ class EmbeddedServer:
             thread.join(timeout=2.0)
         self._server = None
 
+    def close(self) -> None:
+        """The vocabulary :meth:`~pedzacy_piotrek.ui.app.App.close_owned` uses.
+
+        The same operation as :meth:`stop` under the name every other resource
+        the application holds answers to, so shutting down does not need to
+        know which of its two things is which.
+        """
+        self.stop()
+
 
 class _InProcessTransport(Transport):
     """A client transport wired straight into a hub, with no socket at all."""

@@ -123,8 +123,12 @@ class GameScreen(Screen):
         )
         #: Seat currently on screen.  A hot-seat game starts on whoever is
         #: playing; a networked one starts on the seat this machine owns, and
-        #: ``my_seat`` always brings it back.
-        self.view_seat = (self.state.active_player_index if self.state.edit_mode
+        #: ``my_seat`` always brings it back.  An ONLINE editing table counts
+        #: as the second kind (stage 57): the person at this keyboard owns one
+        #: seat and opening somebody else's would be a jump they never asked
+        #: for, with nothing to bring them back but a click.
+        self.view_seat = (self.state.active_player_index
+                          if self.state.edit_mode and self.view_follows_the_game
                           else self.state.local_seat)
         self.hand = HandFan(
             app.renderer, self.cards, app.layout, self.state, self.submit,
@@ -704,6 +708,69 @@ class GameScreen(Screen):
         """Whether the seat being shown is one we may actually play."""
         return self.state.may_control(self.view_seat)
 
+    @property
+    def entitled_to_secrets(self) -> bool:
+        """Whether the person at THIS screen may see the viewed seat's secrets.
+
+        The question is who is LOOKING, not who is being looked at.  Asking
+        "is this a Piotrek panel?" is what leaked the identity badge: in edit
+        mode anybody may open anybody's panel, so a badge drawn because the
+        SUBJECT is Piotrek is a badge drawn for the whole table.
+
+        Not ``may_control`` and not ``can_act``, both of which are true for
+        every seat in edit mode — that is exactly the mode this has to hold in.
+        Not ``may_view`` either: being allowed to look at a hand is not being
+        allowed to know which pawn its owner is secretly racing.
+
+        Hot-seat is entitled to everything, because the person at the keyboard
+        owns every seat; there is nobody to keep a secret from.  Over a network
+        it is one seat and one seat only, whatever the table is configured for.
+        """
+        if self.service is None:
+            return True
+        return self.view_seat == self.state.local_seat
+
+    @property
+    def view_follows_the_game(self) -> bool:
+        """Whether the view may move ITSELF when the game moves.
+
+        THE ONE PLACE THE FOUR CASES ARE DECIDED, and only one of them says no:
+
+            local  + edit mode      follows   one person IS every seat
+            local  + no edit mode   follows   there is only ever one seat
+            online + no edit mode   follows   likewise; it is always your own
+            online + EDIT MODE      NO        several people, several screens
+
+        Editing was built for one person at one keyboard, where the screen
+        following the turn is not a convenience but the only way to play the
+        next seat.  Turn that table into four people with four clients and the
+        same rule takes the board out from under all of them: somebody plays a
+        card, the turn advances, and every screen in the room jumps to a seat
+        its owner was not looking at.  Nothing about the GAME differs between
+        the two — same authority, same turn cursor, same commands — so the
+        distinction lives here, in the one thing that genuinely is different:
+        how many pairs of eyes are pointed at this state.
+
+        Deliberately narrow.  It answers "no" ONLY for an online editing table,
+        so the other three keep the behaviour they have always had rather than
+        inheriting a rule written for a case they are not in.
+        """
+        return self.service is None or not self.state.edit_mode
+
+    def _follow_seat(self, seat: int) -> None:
+        """Move the view because the GAME moved.
+
+        Every automatic change of :attr:`view_seat` comes through here, and
+        none of the deliberate ones do — :meth:`focus_seat`, the player tiles
+        and :meth:`return_to_my_seat` are somebody asking, and are never
+        refused on these grounds.  That split is the whole change: the screen
+        stops following on its own and keeps doing exactly what it is told.
+        """
+        if not self.view_follows_the_game:
+            return
+        if self.may_view(seat):
+            self.view_seat = seat
+
     def may_view(self, seat: int) -> bool:
         """Looking at another player's cards is a testing aid, not a feature.
 
@@ -714,6 +781,26 @@ class GameScreen(Screen):
         if seat == self.my_seat:
             return True
         return self.state.edit_mode or self.state.config.debug_version
+
+    def may_take_seat(self, seat: int) -> bool:
+        """Whether asking to make ``seat`` the active player would be accepted.
+
+        Editing hands the turn around, but ``authorise_remote`` judges every
+        command's ``player_index`` against the seat the SERVER gave this
+        connection, so over a network a request for somebody else's seat is
+        refused whatever the table is configured for.  That was always true;
+        what changed in stage 57 is that clicking a tile is now the ORDINARY
+        way to look at a seat, so a click that fired a doomed command put
+        "To nie jest twoje miejsce przy stole" in front of a player who had
+        done nothing but look.
+
+        Asked BEFORE the command is sent rather than answered after it comes
+        back refused.  The engine still decides — this only declines to ask a
+        question whose answer is already known.
+        """
+        if not self.state.edit_mode:
+            return False
+        return self.service is None or seat == self.my_seat
 
     def focus_seat(self, seat: int) -> None:
         if self.may_view(seat):
@@ -883,7 +970,7 @@ class GameScreen(Screen):
             return
         cards = [c for c in player.hand if c.uid in set(event.card_uids)]
         self.chest_choice_seat = event.player_index
-        self.view_seat = event.player_index
+        self._follow_seat(event.player_index)
         self.chest_choice.show(cards, event.limit, event.new_card_uid)
 
     def _on_mod_selection_started(self, event: ev.ModSelectionStarted) -> None:
@@ -1239,9 +1326,10 @@ class GameScreen(Screen):
         self.hand.cancel_drag()
         self.pending_mod_uid = None
         if self.state.edit_mode:
-            # Hot-seat: the screen follows the turn, because the person at the
-            # keyboard is now playing that seat.
-            self.view_seat = event.player_index
+            # The screen follows the turn, because at ONE keyboard the person
+            # sitting at it is now playing that seat.  Online it does not: see
+            # ``view_follows_the_game``, which is what refuses here.
+            self._follow_seat(event.player_index)
         if self.pending_choice is not None:
             self._cancel_choice()
 
@@ -1695,7 +1783,7 @@ class GameScreen(Screen):
         if not cards:
             return
         self.chest_choice_seat = seat
-        self.view_seat = seat
+        self._follow_seat(seat)
         self.chest_choice.show(cards, self.state.chest_limit(player), None)
 
     @property
@@ -1872,14 +1960,15 @@ class GameScreen(Screen):
             self.submit(cmd.ResetBoard())
 
     def _pause_entries(self):
-        entries = [("resume", "Wróć do gry")]
-        if self.service is not None:
-            # Leaving no longer ends anybody else's match: the game lives on the
-            # server, so the others carry on and this seat is simply empty.
-            entries.append(("leave", "Opuść rozgrywkę"))
-        else:
-            entries.append(("leave", "Wróć do menu głównego"))
-        entries.append(("quit", "Wyjdź z gry"))
+        # ONE LABEL FOR ONE ACTION, online and off.  It used to read "Opuść
+        # rozgrywkę" in an online match, which described half of what it did
+        # and left the other half — that the player lands back on the main menu
+        # — to be discovered.  Leaving still does not end anybody else's match:
+        # the game lives on the server, the others carry on, and this seat is
+        # simply empty.
+        entries = [("resume", "Wróć do gry"),
+                   ("leave", "Wróć do menu głównego"),
+                   ("quit", "Wyjdź z gry")]
         if self.service is not None and self.service.is_host:
             # Host only, matching the server's rule rather than guessing at it.
             # Offered next to the other endings and not among them: leaving is
@@ -1903,9 +1992,23 @@ class GameScreen(Screen):
                                      self.service))
 
     def _leave_match(self, quit_app: bool = False, message: str = "") -> None:
-        """Close the connection and go back where the player came from."""
+        """Leave the room, release what this machine holds, and go back.
+
+        BOTH WAYS OUT OF THE PAUSE MENU COME THROUGH HERE — "Wróć do menu
+        głównego" and "Wyjdź z gry" — and both are a decision, not a failure.
+        The room is told before the socket goes, so the server frees this seat
+        immediately instead of holding it through a reconnect grace period for
+        a player who has left; when it was the last seat, the room closes with
+        it.  "Wróć do gry" does not call this, which is the whole of the
+        difference between the entries.
+
+        Also reached when the server has already sent us home, where
+        ``leave_room`` finds nothing alive to say goodbye on and simply
+        releases.
+        """
         if self.service is not None:
-            self.service.close()
+            self.service.leave_room()
+        self.app.close_owned()
         if quit_app:
             self.app.quit()
             return
@@ -1984,6 +2087,7 @@ class GameScreen(Screen):
             dt=dt,
             view_index=self.view_seat,
             can_act=self.controls_view,
+            entitled_to_secrets=self.entitled_to_secrets,
             preview=self.card_preview,
             abilities=self.ability_cards,
         )

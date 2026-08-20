@@ -18,7 +18,7 @@ size — cached card faces, mostly.
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import pygame
 
@@ -84,6 +84,13 @@ class App:
         self._apply_font_scale()
         self.screens: List[Screen] = []
         self.running = True
+        #: Things that outlive the screen that made them and must be closed
+        #: before the process ends: the network connection, and a server the
+        #: player asked to run inside this process.  A screen is the wrong
+        #: owner — the connection is handed from the join screen to the lobby
+        #: to the game — and closing the window pops no screens at all, which
+        #: is how a game used to exit while still holding an open socket.
+        self._owned: List[Any] = []
 
     # ── window ───────────────────────────────────────────────────────────────
     def _preferred_size(self) -> Tuple[int, int]:
@@ -159,8 +166,63 @@ class App:
     def quit(self) -> None:
         self.running = False
 
+    # ── resources the application owns ───────────────────────────────────────
+    def own(self, resource: Any) -> Any:
+        """Hand the application something it must close before it exits.
+
+        Anything with a ``close()``.  Registered once and closed once, however
+        many screens pass it between themselves in the meantime.
+        """
+        if resource is not None and not any(held is resource
+                                            for held in self._owned):
+            self._owned.append(resource)
+        return resource
+
+    def disown(self, resource: Any) -> None:
+        """Give up ownership without closing.  Rare; the leave paths close."""
+        self._owned = [held for held in self._owned if held is not resource]
+
+    def close_owned(self) -> None:
+        """Close everything handed to :meth:`own`, newest first.
+
+        Reverse order because that is the order they were built in: the
+        connection is closed before the server it connects to, so the player
+        leaves the room rather than having the room vanish underneath them.
+
+        One resource failing must not leave the rest open, so every close is
+        attempted and the first failure is raised afterwards — nothing is
+        swallowed and nothing is skipped.
+        """
+        owned, self._owned = list(self._owned), []
+        failure: Optional[BaseException] = None
+        for resource in reversed(owned):
+            try:
+                resource.close()
+            except Exception as exc:            # noqa: BLE001 - re-raised below
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
+
     # ── main loop ────────────────────────────────────────────────────────────
     def run(self, max_frames: Optional[int] = None) -> None:
+        """The main loop, and the only place the application shuts down.
+
+        The teardown is in a ``finally`` because there are three ways out of
+        the loop and only one of them is a button: the window's close box, the
+        last screen popping, and ``--selftest`` running out of frames all end
+        up here.  Whatever the reason, the connection this machine holds is
+        closed explicitly rather than being left for the interpreter to notice.
+        """
+        try:
+            self._loop(max_frames)
+        finally:
+            try:
+                self.close_owned()
+            finally:
+                pygame.quit()
+
+    def _loop(self, max_frames: Optional[int] = None) -> None:
         frames = 0
         while self.running and self.screens:
             dt = min(self.clock.tick(settings.FPS) / 1000.0, 0.1)
@@ -191,5 +253,3 @@ class App:
             frames += 1
             if max_frames is not None and frames >= max_frames:
                 break
-
-        pygame.quit()

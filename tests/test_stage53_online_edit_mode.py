@@ -228,6 +228,14 @@ def test_a_card_dealt_by_the_library_does_not_enter_the_public_snapshot(table):
     card through the editor must not be the one path that gets round it.  Note
     what this does NOT claim — see the two tests below, which state plainly
     what an editing table does and does not keep secret.
+
+    THE SIZE IS READ, NOT COUNTED ON (stage 57).  It used to assert
+    ``before + 1``, which is wrong roughly one run in seven: the title comes
+    off the top of a freshly seeded deck, and when that card is Troll its
+    ``on_draw`` legitimately brings two more with it.  The game was right and
+    the arithmetic was not.  What this test is actually about is that whatever
+    the hand ends up being, the published size matches it and the CARDS are not
+    there — so that is what it now says.
     """
     host, clients = table.editing("Kuba", "Ola", "Norbert")
     room, by_seat, _, idle = seats(table, host, clients)
@@ -238,10 +246,11 @@ def test_a_card_dealt_by_the_library_does_not_enter_the_public_snapshot(table):
         player_index=idle, deck_id="movement", title=title))
     table.pump()
 
-    assert len(room.state.player(idle).hand) == before + 1
+    hand = room.state.player(idle).hand
+    assert len(hand) > before, "the deal did nothing"
     published = [p for p in room.state.snapshot()["players"]
                  if p["index"] == idle][0]
-    assert published["hand_size"] == before + 1
+    assert published["hand_size"] == len(hand)
     assert "hand" not in published and "cards" not in published
 
 
@@ -289,17 +298,32 @@ def test_an_editing_table_does_show_the_other_hands_and_that_is_the_point(table)
 
 def test_the_library_deals_the_named_card_and_nothing_else(table, library):
     """Data-driven: the command names a TITLE and the deck answers.  No branch
-    anywhere is keyed on which card it is."""
+    anywhere is keyed on which card it is.
+
+    ASKED FOR BY TITLE, CHECKED BY TITLE (stage 57).  It used to read
+    ``hand[-1]``, which assumed the named card lands last and alone; when the
+    top of a freshly seeded deck is Troll, its ``on_draw`` rule deals two more
+    behind it and the assertion caught the game doing its job.  The claim in the
+    name survives — the named card arrived, it came out of the named deck, and
+    the room still replays to its own fingerprint — without depending on which
+    card the shuffle happened to put on top.
+    """
     host, clients = table.editing("Kuba", "Ola", "Norbert")
     room, by_seat, _, idle = seats(table, host, clients)
-    title = room.state.decks["movement"].draw_pile[-1].definition.title
+    deck = room.state.decks["movement"]
+    title = deck.draw_pile[-1].definition.title
+    before = len(room.state.player(idle).hand)
 
     by_seat[idle].session.submit(cmd.DrawTitledCard(
         player_index=idle, deck_id="movement", title=title))
     table.pump()
 
-    dealt = room.state.player(idle).hand[-1]
-    assert dealt.definition.title == title
+    hand = room.state.player(idle).hand
+    assert len(hand) > before, "nothing was dealt"
+    assert title in [c.definition.title for c in hand], \
+        "the deck did not answer the title it was given"
+    assert all(c.deck_id == "movement" for c in hand[before:]), \
+        "a deck nobody named was drawn from"
     assert replay_fingerprint(room, library) == fingerprint_of(
         room.state.snapshot())
 
@@ -704,3 +728,432 @@ def test_every_client_redraws_after_an_authoritative_reset(table, library):
         host.state.snapshot())
     assert replay_fingerprint(room, library) == fingerprint_of(
         room.state.snapshot())
+
+
+# ── stage 57: an online editing table does not move anybody's view ───────────
+#
+# Editing was built for ONE person at ONE keyboard, where the screen following
+# the turn is not a convenience but the only way to reach the next seat.  Four
+# friends testing online inherited that rule and it does the opposite of what it
+# was for: somebody plays a card, the turn advances, and every screen in the
+# room jumps to a seat its owner was not looking at.
+#
+# The distinction is entirely LOCAL and entirely about the VIEW.  The turn
+# cursor, the authority, the command gates and the hidden information are the
+# same on both kinds of table, and the tests below check that they still are —
+# a fix that bought a stable view by loosening any of them would be a much
+# worse bug than the one it cured.
+#
+#     local  + edit mode      view follows the turn      (unchanged)
+#     local  + no edit mode   unchanged
+#     online + no edit mode   unchanged
+#     online + EDIT MODE      view stays put; only a click moves it
+def _headless():
+    import os
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+
+def online_screens(table, library, *names, size=(1920, 1080), edit_mode=True):
+    """An online match with a GameScreen per player, editing or not.
+
+    Goes through ``table.editing``/``table.playing`` rather than building a
+    state by hand, so the screens are looking at real replicas fed by the real
+    server — which is the only way the "somebody else's command arrived" cases
+    below mean anything.
+    """
+    _headless()
+    from pedzacy_piotrek.ui.app import App
+    from pedzacy_piotrek.ui.game_screen import GameScreen
+    from pedzacy_piotrek.ui.layout import Layout
+
+    opener = table.editing if edit_mode else table.playing
+    host, clients = opener(*names)
+    screens = []
+    for service in [host, *clients]:
+        app = App(Layout(), headless=True, size=size)
+        screen = GameScreen(app, service.session, service=service)
+        app.push(screen)
+        screens.append(screen)
+    return host, clients, screens
+
+
+def a_movement_card(state, seat):
+    from pedzacy_piotrek.config import settings
+
+    player = state.player(seat)
+    return next(c for c in player.hand
+                if c.deck_id == settings.DECK_MOVEMENT and not c.locked)
+
+
+def play_a_card(table, service, seat):
+    """Whoever holds ``seat`` discards a movement card, which passes the turn."""
+    card = a_movement_card(service.state, seat)
+    service.session.submit(cmd.DiscardCard(player_index=seat,
+                                           card_uid=card.uid))
+    table.pump()
+
+
+def click_tile(screen, seat):
+    """Click a player tile through the REAL layout, at whatever size it is.
+
+    The rect comes from ``Layout.player_tile_rect``; nothing here knows a
+    coordinate, which is what lets the same test run at four resolutions.
+    """
+    import pygame
+
+    frame_once(screen)
+    rect = screen.app.layout.player_tile_rect(seat, len(screen.state.players))
+    pos = rect.center
+    screen.handle_event(
+        pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=pos, button=1), pos)
+    screen.handle_event(
+        pygame.event.Event(pygame.MOUSEBUTTONUP, pos=pos, button=1), pos)
+
+
+def frame_once(screen, dt=1 / 60.0, mouse=(0, 0)):
+    app = screen.app
+    app.renderer.begin(app.canvas)
+    app.canvas.fill(app.renderer.theme.background)
+    screen.update(dt, mouse)
+    screen.draw(app.canvas)
+
+
+# ── 1. local editing is untouched ────────────────────────────────────────────
+def test_a_local_editing_table_still_follows_the_turn(library):
+    """THE BEHAVIOUR THAT MUST SURVIVE.  One keyboard, five seats, and the
+    screen moving to the seat now in play is how the next card gets played."""
+    screen = a_local_screen(library)
+    assert screen.view_follows_the_game
+    screen.state.apply(cmd.BeginMatch(), local=False)
+    start = screen.state.active_player_index
+    assert screen.view_seat == start
+
+    card = a_movement_card(screen.state, start)
+    screen.submit(cmd.DiscardCard(player_index=start, card_uid=card.uid))
+
+    assert screen.state.active_player_index != start, "the turn passed"
+    assert screen.view_seat == screen.state.active_player_index, \
+        "the hot-seat screen stopped following the turn"
+
+
+def test_a_local_table_without_editing_is_untouched(library):
+    screen = a_local_screen(library, edit_mode=False)
+    assert screen.view_follows_the_game
+    assert screen.view_seat == screen.my_seat
+
+
+# ── 2-3. an online editing table keeps its seat ──────────────────────────────
+def test_an_online_editing_table_opens_on_your_own_seat(table, library):
+    """Not on whoever happens to be starting: you own one seat here."""
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    for screen in screens:
+        assert not screen.view_follows_the_game
+        assert screen.view_seat == screen.my_seat
+
+
+def test_playing_a_card_does_not_move_your_own_view(table, library):
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    by_seat = table.by_seat(host, clients)
+    active = host.state.active_player_index
+    actor = next(s for s in screens if s.my_seat == active)
+    watched = actor.view_seat
+
+    play_a_card(table, by_seat[active], active)
+
+    assert actor.state.active_player_index != active, "the turn still passed"
+    assert actor.view_seat == watched, "the view jumped after playing a card"
+
+
+def test_somebody_elses_card_does_not_move_your_view(table, library):
+    """THE REPORT, in one test: A is watching A, B plays, A still watches A."""
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    by_seat = table.by_seat(host, clients)
+    active = host.state.active_player_index
+    idle = next(s for s in screens if s.my_seat != active)
+    watched = idle.view_seat
+
+    play_a_card(table, by_seat[active], active)
+
+    assert idle.view_seat == watched, \
+        "a remote player's card moved this machine's view"
+    assert idle.state.active_player_index != active, \
+        "but the turn did advance on this replica"
+
+
+def test_a_whole_round_of_cards_leaves_every_view_where_it_was(table, library):
+    """Not one command: several, including the turn coming back round."""
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    by_seat = table.by_seat(host, clients)
+    watching = {screen.my_seat: screen.view_seat for screen in screens}
+
+    for _ in range(len(by_seat) + 1):
+        active = host.state.active_player_index
+        play_a_card(table, by_seat[active], active)
+
+    for screen in screens:
+        assert screen.view_seat == watching[screen.my_seat]
+        assert screen.view_seat == screen.my_seat
+
+
+def test_an_explicit_turn_change_does_not_move_a_watching_client(table, library):
+    """``SetActivePlayer`` is the bluntest turn transition there is.
+
+    It is also still allowed: this stage does not take editing away, it stops
+    the VIEW from chasing it.
+    """
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    by_seat = table.by_seat(host, clients)
+    active = host.state.active_player_index
+    target = next(s for s in by_seat if s != active)
+    watchers = {id(s): s.view_seat for s in screens}
+
+    # The seat asks for itself: the server judges ``player_index`` against the
+    # connection's own seat, so this is the only form a client can send.
+    by_seat[target].session.submit(cmd.SetActivePlayer(player_index=target))
+    table.pump()
+
+    assert host.state.active_player_index == target, "the turn DID move"
+    for screen in screens:
+        assert screen.view_seat == watchers[id(screen)]
+
+
+# ── 4. clicking still works, at every resolution ─────────────────────────────
+@pytest.mark.parametrize("size", [(1280, 760), (1920, 1080),
+                                  (2560, 1440), (3840, 2160)])
+def test_clicking_a_player_still_switches_the_view(table, library, size):
+    """Manual selection is the ONLY way to move now, so it had better work.
+
+    Run at four resolutions because the tile it clicks is placed by ``Layout``
+    and nothing in the test knows a coordinate — a rect that collapsed at
+    1280x760 would take the last remaining way to change seats with it.
+    """
+    host, clients, screens = online_screens(table, library, "Kuba", "Ola",
+                                            "Norbert", size=size)
+    screen = screens[0]
+    other = next(i for i in range(len(screen.state.players))
+                 if i != screen.my_seat)
+
+    click_tile(screen, other)
+
+    assert screen.view_seat == other, f"tile click did nothing at {size}"
+    click_tile(screen, screen.my_seat)
+    assert screen.view_seat == screen.my_seat, "and back again"
+
+
+def test_a_click_is_still_honoured_after_the_turn_moves(table, library):
+    """The view stays where it is put, not where it was put once."""
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    by_seat = table.by_seat(host, clients)
+    screen = screens[0]
+    other = next(i for i in range(len(screen.state.players))
+                 if i != screen.my_seat)
+    click_tile(screen, other)
+
+    active = host.state.active_player_index
+    play_a_card(table, by_seat[active], active)
+
+    assert screen.view_seat == other, \
+        "the chosen seat was overwritten by the turn"
+
+
+def test_returning_to_your_own_seat_still_works(table, library):
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    screen = screens[0]
+    other = next(i for i in range(len(screen.state.players))
+                 if i != screen.my_seat)
+    screen.focus_seat(other)
+    assert screen.view_seat == other
+
+    screen.return_to_my_seat()
+    assert screen.view_seat == screen.my_seat
+
+
+# ── 5. an ordinary online table is untouched ─────────────────────────────────
+def test_an_ordinary_online_table_is_untouched(table, library):
+    """Edit mode off: the rule that answers "no" never applies."""
+    host, clients, screens = online_screens(table, library, "Kuba", "Ola",
+                                            "Norbert", edit_mode=False)
+    by_seat = table.by_seat(host, clients)
+    for screen in screens:
+        assert screen.view_follows_the_game
+        assert screen.view_seat == screen.my_seat
+
+    active = host.state.active_player_index
+    play_a_card(table, by_seat[active], active)
+
+    for screen in screens:
+        assert screen.view_seat == screen.my_seat, \
+            "an ordinary table never shows another hand anyway"
+        assert not screen.may_view(
+            next(i for i in range(len(screen.state.players))
+                 if i != screen.my_seat)), "hidden information is still hidden"
+
+
+# ── 6-8. nothing about the AUTHORITY moved ───────────────────────────────────
+def test_the_turn_cursor_advances_exactly_as_before(table, library):
+    """The view is the only thing this stage touches.
+
+    The server's own cursor, the clients' replicas and the fingerprint all have
+    to agree afterwards, because "the screen stopped following the turn" must
+    not become "the turn stopped".
+    """
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    room = table.room(host.room_code)
+    by_seat = table.by_seat(host, clients)
+    seen = [room.state.active_player_index]
+
+    for _ in range(4):
+        active = room.state.active_player_index
+        play_a_card(table, by_seat[active], active)
+        seen.append(room.state.active_player_index)
+
+    assert len(set(seen)) > 1, "the turn never moved at all"
+    assert all(a != b for a, b in zip(seen, seen[1:])), \
+        "the turn stood still on a card"
+    for service in [host, *clients]:
+        assert service.state.active_player_index == \
+            room.state.active_player_index
+        assert fingerprint_of(service.state.snapshot()) == \
+            fingerprint_of(room.state.snapshot())
+    assert replay_fingerprint(room, library) == \
+        fingerprint_of(room.state.snapshot())
+
+
+def test_the_view_cannot_be_used_to_act_for_another_seat(table, library):
+    """A stable view must not become a way round the gates.
+
+    ``view_seat`` is a local picture and always was; the engine judges
+    ``player_index`` against the seat the SERVER gave this connection.  Setting
+    the view by hand — further than any click could — and acting through the
+    ordinary path must still be refused on an ordinary table.
+    """
+    host, clients, screens = online_screens(table, library, "Kuba", "Ola",
+                                            "Norbert", edit_mode=False)
+    room = table.room(host.room_code)
+    screen = screens[0]
+    victim = next(i for i in range(len(screen.state.players))
+                  if i != screen.my_seat)
+    screen.view_seat = victim          # by hand: no click can reach here
+
+    assert not screen.state.may_control(victim)
+    assert not screen.controls_view
+    before = fingerprint_of(room.state.snapshot())
+    card = a_movement_card(room.state, victim)
+    screen.submit(cmd.DiscardCard(player_index=victim, card_uid=card.uid))
+    table.pump()
+
+    assert fingerprint_of(room.state.snapshot()) == before, \
+        "a command for somebody else's seat was accepted"
+
+
+def test_the_safety_net_still_reclaims_a_seat_it_may_not_watch(table, library):
+    """``_context`` snaps back when the right to look is gone.
+
+    Unchanged by this stage, and checked because it is the other thing that
+    writes ``view_seat`` without being asked.
+    """
+    host, clients, screens = online_screens(table, library, "Kuba", "Ola",
+                                            "Norbert", edit_mode=False)
+    screen = screens[0]
+    screen.view_seat = next(i for i in range(len(screen.state.players))
+                            if i != screen.my_seat)
+
+    frame_once(screen)
+
+    assert screen.view_seat == screen.my_seat
+
+
+# ── 9. reconnection ──────────────────────────────────────────────────────────
+def test_reconnecting_does_not_move_the_chosen_seat(table, library):
+    """A dropped connection is not a request to look somewhere else.
+
+    The seat this player chose is a local decision, and coming back through the
+    grace period restores the MATCH, not the interface.
+    """
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    screen = screens[1]
+    service = clients[0]
+    other = next(i for i in range(len(screen.state.players))
+                 if i != screen.my_seat)
+    click_tile(screen, other)
+    assert screen.view_seat == other
+
+    service.client.transport.drop()
+    table.pump()
+    service.client.transport.restore()
+    table.pump(20)
+
+    assert service.disconnected is None, "the player came back"
+    assert screen.view_seat == other, "reconnecting moved the view"
+
+
+# ── the click itself: what it moves, and what it must not say ────────────────
+def test_a_local_click_still_hands_the_turn_over(library):
+    """Hot-seat editing: one click both looks AND takes the seat.
+
+    The whole point of the mode at one keyboard, and untouched by stage 57.
+    """
+    screen = a_local_screen(library)
+    screen.state.apply(cmd.BeginMatch(), local=False)
+    other = next(i for i in range(len(screen.state.players))
+                 if i != screen.state.active_player_index)
+
+    click_tile(screen, other)
+
+    assert screen.view_seat == other
+    assert screen.state.active_player_index == other, \
+        "the hot-seat click stopped handing the turn over"
+
+
+def test_an_online_click_looks_without_taking_the_turn(table, library):
+    """Looking is local; the turn is the server's, and it says no.
+
+    ``authorise_remote`` has always refused a ``player_index`` that is not the
+    connection's own seat, so this was never a way to move somebody else's
+    turn.  What it used to do was ASK and be told off — one red line per look,
+    on the interaction that is now the only way to change seats at all.
+    """
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    room = table.room(host.room_code)
+    screen = screens[0]
+    other = next(i for i in range(len(screen.state.players))
+                 if i != screen.my_seat)
+    before = room.state.active_player_index
+    screen.status_bar.clear()               # a known-empty starting point
+
+    click_tile(screen, other)
+    table.pump()
+
+    assert screen.view_seat == other, "the look did not happen"
+    assert room.state.active_player_index == before, \
+        "a client moved the authoritative turn"
+    assert not screen.may_take_seat(other)
+    said = screen.status_bar.message or ""
+    assert "miejsce" not in said, f"looking was answered with a refusal: {said}"
+
+
+def test_an_online_click_on_your_own_seat_still_asks_for_the_turn(table, library):
+    """Editing is not taken away: your OWN seat is a request the server takes."""
+    host, clients, screens = online_screens(table, library,
+                                            "Kuba", "Ola", "Norbert")
+    room = table.room(host.room_code)
+    idle = next(s for s in screens if s.my_seat != room.state.active_player_index)
+
+    assert idle.may_take_seat(idle.my_seat)
+    click_tile(idle, idle.my_seat)
+    table.pump()
+
+    assert room.state.active_player_index == idle.my_seat, \
+        "an editing table stopped letting a seat take its own turn"
+    assert idle.view_seat == idle.my_seat

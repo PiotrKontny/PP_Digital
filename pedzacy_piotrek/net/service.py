@@ -128,6 +128,20 @@ class NetworkService:
     def close_room(self, reason: str = "") -> None:
         self.client.close_room(reason)
 
+    def leave_room(self) -> None:
+        """This player is leaving the room deliberately.
+
+        What every "go back" and "quit" in the interface calls, and the only
+        thing they need to know about the difference between choosing to leave
+        and losing a connection.  See
+        :meth:`~pedzacy_piotrek.net.client.GameClient.leave_room`.
+        """
+        self.client.leave_room()
+
+    @property
+    def departed(self) -> bool:
+        return self.client.departed
+
     def start_game(self, library: Optional[ContentLibrary] = None
                    ) -> Optional[NetworkSession]:
         """Ask the server to begin.
