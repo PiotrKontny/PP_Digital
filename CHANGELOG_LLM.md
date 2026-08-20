@@ -8086,3 +8086,122 @@ panel's geometry for that viewer.
 
 The same four tests were already failing before this stage and still are: three
 in `test_stage43_herold_card.py` and one in `test_visual_style.py`.
+
+## Stage 59 — A room outlives its matches
+
+Reported as: once the room exists and the settings are confirmed, there is no
+way back to them. Friends who wanted to try a different deck had to close the
+room, make another one and set it up again.
+
+### What already existed
+
+Almost all of it, which is the useful finding. `Room.return_to_lobby` already
+dropped the state, the session config, the command log, the fingerprint and the
+identity, kept the seats and rebroadcast the lobby. The client side was already
+generic: `GameClient` clears the session on any lobby broadcast with `started`
+false, and `GameScreen.update` replaces itself with `LobbyScreen` when the
+session goes. So every client already made the trip back on the server's
+message.
+
+One guard stood in the way:
+
+    if not self.state.finished:
+        return error("Gra jeszcze się nie skończyła")
+
+with a good reason attached — one player must not be able to end everybody
+else's game. So it was narrowed rather than removed:
+
+    finished match   anybody may ask.  Nothing left to end.
+    running match    THE HOST ONLY.  The same say-so that starts a match and
+                     closes the room.
+
+`test_a_room_cannot_be_reset_mid_match` uses a NON-host and passes unmodified,
+which is the point: the rule it protects is still there.
+
+### The change
+
+**Pause menu.** `"Wróć do poczekalni"`, host only, placed second — directly
+under "Wróć do gry", because those two are the entries that keep you in the
+room and everything below them is a way out. It asks and nothing else: no local
+screen change, because a client that showed itself the lobby while the others
+played on is exactly what the broadcast shape prevents.
+
+**Lobby settings.** A `"Ustawienia gry"` button opening the SAME
+`GameSettingsPanel` the host screen and the hot-seat menu already share, seeded
+from the replicated `LobbyState` and applied through the existing `set_settings`
+message. Closing the panel is what sends it, so Esc, the done button and a click
+outside all send one identical message. It sits beside the room code rather than
+in the bottom button column — that column is measured against the shortest
+supported window and the changelog records an extra row pushing it off before.
+
+**The next match is built, not rewound.** Unchanged and worth restating: `start`
+builds a fresh `GameState` from `lobby.to_config(seed=new_seed())`. That is the
+only reason an old hand, board, mark, elimination or secret cannot follow the
+room into the next game.
+
+### Two things the tests taught me
+
+**Clearing ready flags broke starting entirely.** My first version cleared them
+on every settings change, and the smoke test would not start a match at all:
+`netkit.seated()` and `HostSetupScreen` both send `set_settings` AFTER players
+are ready, so every settings message unreadied the room and `validate()` refused.
+
+The rule is now narrow and `Room.matches_played` is what makes it possible:
+
+    return to lobby              flags KEPT — same people, same table, and
+                                 "jeszcze raz" stays one click for the host
+    settings changed, room has
+    already played               flags CLEARED — the table they agreed to is
+                                 gone
+    settings changed before the
+    first match                  flags UNTOUCHED — settings messages ARE the
+                                 setup at that point
+
+That counter exists because a room now outlives its matches, so "has this room
+played yet?" stopped being the same question as "is a match running?".
+
+**Card uids legitimately repeat between matches.** My test asserted the new
+hands held different uids and failed — correctly. Uids are handed out when a
+deck is built, so a fresh deck numbers from the same place and the new match
+holds the same numbers. The cards are new objects; the numbers are not new. The
+test compares `id(card)` now, and the trap is recorded in the instructions
+because the next person writing "prove the hands are fresh" will reach for uids
+too.
+
+### Tests
+
+`tests/test_stage59_back_to_lobby.py`, 31 tests, **26 of which fail against the
+previous build**. Driven through the real pause menu — the entry is found by key
+in the laid-out menu and clicked with a synthesised event — and through the real
+in-process server, with a `GameScreen` per player so "every client lands in the
+lobby" is measured on three screens rather than asserted about one.
+
+`test_no_session_config_field_is_lost_across_the_round_trip` walks
+`dataclasses.fields(SessionConfig)` rather than naming the fields, because a
+written-out list is what silently stops covering a field somebody adds later —
+which is the failure this project has actually had.
+
+### Layout
+
+The pause menu grew a row, and this project has pushed a screen off a 1280x760
+window twice. Checked at all five reference windows: five entries, all inside
+the window, none overlapping; and the lobby's settings button inside the window
+and clear of the copy button at every size.
+
+    1280x760   entries 247-555    settings button 200x44  @326
+    1600x900   entries 317-625    settings button 200x46  @479
+    1920x1080  entries 395-728    settings button 227x50  @589
+    2560x1440  entries 562-920    settings button 254x54  @864
+    3840x2160  entries 902-1300   settings button 296x60  @1431
+
+### Notes
+
+The lobby panel does not reach six scalar settings that live as their own
+widgets on `HostSetupScreen` — board size, chest round, the two Mod Patusa
+numbers, the doubles percentage and the debug/edit switches. Recorded under
+KNOWN LIMITATIONS with the two honest ways to fix it, neither of which is a
+button. Copying the steppers into a second screen would be two copies of "how
+big is the board", which is the duplication the shared panel was built to end.
+
+The same four tests were already failing before this stage and still are: three
+in `test_stage43_herold_card.py` and one in `test_visual_style.py`.

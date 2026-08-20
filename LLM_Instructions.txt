@@ -332,7 +332,13 @@ WORKING:
   locked badge reading "UKRYTA TOŻSAMOŚĆ". The data half was already correct and
   is unchanged: the colour is in no log, no snapshot and no hunter's replica.
   See "WHO MAY SEE THE SECRET COLOUR".
-- 2113 automated tests.
+- A ROOM OUTLIVES ITS MATCHES (stage 59). The host can send the whole table back
+  to the poczekalnia mid-match from the pause menu — "Wróć do poczekalni" — and
+  the room, its code, its seats and every connection survive it. The lobby then
+  reopens the SAME settings panel the host screen uses, and the next match is
+  built fresh from whatever the table now says. MATCH -> LOBBY -> MATCH, without
+  anybody leaving. See "A ROOM OUTLIVES ITS MATCHES".
+- 2144 automated tests.
 
 NOT IMPLEMENTED ON PURPOSE (see KNOWN LIMITATIONS for why):
 - ONE of the eight Mody Patusa: AKO. It is drawable, selectable and occupies a
@@ -4021,6 +4027,85 @@ The remaining automatic writer is the safety net in ``_context``, which snaps
 back to ``my_seat`` when the right to look at a seat is gone.  It is not a
 "follow" and is deliberately outside the rule: hidden information wins.
 
+A ROOM OUTLIVES ITS MATCHES  (stage 59 — read with ROOM LIFECYCLE above)
+-------------------------------------------------------------------------
+The lifecycle is now a loop, on one room, one code and one set of connections:
+
+    MATCH  ->  LOBBY  ->  MATCH  ->  LOBBY  ->  ...
+
+``Room.return_to_lobby`` is the ONE transition and always was; stage 59 only
+changed who may ask and when.  The teardown, the broadcast and every client's
+trip back to the poczekalnia are the code that already handled the post-match
+case, which is why there is no second implementation to keep in step.
+
+WHO MAY ASK
+    finished match   anybody.  There is nothing left to end.
+    running match    THE HOST ONLY.  A mid-match return ends everybody else's
+                     game, so it is the same say-so that starts a match and
+                     closes the room.  A non-host asking mid-match is refused
+                     exactly as it always was — the guard was narrowed, not
+                     removed, and ``test_a_room_cannot_be_reset_mid_match``
+                     still passes unmodified because it uses a non-host.
+
+HOW EVERY CLIENT MAKES THE TRIP, and why no client decides it locally:
+
+    server drops the match, broadcasts the lobby with ``started`` false
+      -> GameClient sees ``was_playing and not started`` -> _end_match_locally
+      -> ``service.session`` becomes None
+      -> GameScreen.update sees no session -> replaces itself with LobbyScreen
+
+Every one of those steps existed before this stage.  The pause entry does
+nothing but ask; it draws no lobby and touches no state.  DO NOT add a local
+screen change beside it — a client that showed itself the lobby while the
+others played on is the exact failure this shape prevents.
+
+THE NEXT MATCH IS BUILT, NOT REWOUND.  ``return_to_lobby`` drops the state, the
+session config, the command log, the fingerprint and the identity; ``start``
+then builds a fresh ``GameState`` from ``lobby.to_config(seed=new_seed())``.
+Nothing is mutated back into a pre-game shape, which is the only reason an old
+hand, board, mark, elimination or secret cannot follow the room into the next
+game.  Do not "optimise" this into a reset method.
+
+CARD UIDS LEGITIMATELY REPEAT between matches.  They are handed out when a deck
+is built, so a fresh deck numbers its cards from the same place and the new
+match holds the same numbers as the old one.  A test that compares uids to prove
+the hands are new WILL FAIL AGAINST CORRECT BEHAVIOUR; compare object identity
+(``id(card)``) instead.
+
+READY FLAGS: KEPT BY THE TRANSITION, CLEARED BY A SETTINGS CHANGE
+Ready is consent to a TABLE.
+
+    return to lobby            flags KEPT.  The same people are in the same
+                               seats and the table has not changed, so
+                               "jeszcze raz" stays one click for the host.
+    settings changed after
+    the room has played        flags CLEARED for everybody but the host.  The
+                               table they agreed to no longer exists.
+    settings changed before
+    the first match            flags UNTOUCHED.  Settings messages ARE the
+                               setup here — the host screen sends them the
+                               moment the room exists and the test harness
+                               sends them while seating people, so clearing
+                               would leave a lobby that can never start.
+
+``Room.matches_played`` is what tells the second case from the third.  It exists
+because a room now outlives its matches, so "has this room played yet?" stopped
+being the same question as "is a match running?".
+
+REOPENING THE SETTINGS
+``LobbyScreen`` opens THE SAME ``GameSettingsPanel`` the host screen and the
+hot-seat menu use — one deck, one place to say what is in it — seeded from the
+replicated ``LobbyState`` rather than from the screen's own defaults, and
+applied through the existing ``set_settings`` message.  Closing the panel is
+what sends it, so the Esc key, the done button and a click outside all send the
+same one message.  ``may_edit_settings`` asks the same two questions the server
+does (host, and not started) so the button is absent rather than present and
+rejected; the server still decides.
+
+WHAT THE LOBBY PANEL DOES NOT REACH: the scalars that live as steppers on
+``HostSetupScreen`` — board size, chest round, the two Mod Patusa numbers, the
+doubles percentage, and the debug/edit switches.  See KNOWN LIMITATIONS.
+
 CLICKING A TILE IS TWO THINGS, and online it is only one of them.  Hot-seat
 editing both looks at a seat and takes it, in one click.  Over a network
 ``authorise_remote`` has always refused a ``player_index`` that is not the
@@ -4942,6 +5027,24 @@ KNOWN LIMITATIONS
   every hand is already open.  Hiding the role as well means changing
   ``show_skill`` in ``CharacterPanel.draw``, which changes the panel's geometry
   for that viewer — a bigger decision than a badge, and one to take deliberately.
+
+- THE LOBBY'S SETTINGS BUTTON DOES NOT REACH EVERY SETTING.  It opens
+  ``GameSettingsPanel``, which owns the deck compositions, the ability uses, the
+  card variants, the two decision timers and the check/victory variants — the
+  large majority of the table, and the part people actually retune between
+  games.  It does NOT reach the six scalars that live as their own widgets on
+  ``HostSetupScreen``: board size, chest round, the two Mod Patusa numbers, the
+  doubles percentage and the debug/edit switches.  Those are set when the room
+  is created and cannot be changed afterwards.
+
+  Reaching them means one of two things, and both are bigger than a button.
+  Either the settings block of ``HostSetupScreen`` becomes a component both
+  screens mount — a real refactor of a screen whose elastic row-fitting is
+  pinned by layout tests at five window sizes — or they become a tab in
+  ``GameSettingsPanel``, which would then also appear on the host screen beside
+  the steppers that already set them, in two places at once.  Neither was
+  attempted here rather than half-done.  If a host needs a different board size
+  today, that is still a new room.
 
 - AN EVENT NOTHING SUBSCRIBES TO CHANGES NOTHING ON SCREEN.  `BoardView.visual`
   is the board's own copy of where each pawn is drawn, written by the view's
@@ -6333,6 +6436,14 @@ RECOMMENDED ORDER OF FUTURE DEVELOPMENT
    final hop has still never been observed. Stage 16 exists because stage 16's
    bug was invisible to every test that stayed inside the process — check the
    Polish letters and a room code by eye, not just that something arrives.
+
+0aw. STAGE 59'S REMAINING HALF, if anybody wants it: the six scalar settings the
+   lobby panel cannot reach (see KNOWN LIMITATIONS).  The honest version is to
+   lift the settings block out of ``HostSetupScreen`` into a component the lobby
+   mounts too, NOT to copy the steppers into a second screen — two copies of
+   "how big is the board" is exactly the kind of duplication stage 26 built the
+   shared panel to end.  Do it with the layout tests running: that screen's row
+   fitting has been pushed off a 1280x760 window twice already.
 
 0az. STAGE 56 NEEDS ONE HUMAN PASS, and it is fifteen minutes. Everything in it
    is covered by tests, including two over real sockets and one that starts a

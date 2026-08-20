@@ -1947,6 +1947,13 @@ class GameScreen(Screen):
             self._leave_match()
         elif choice == "quit":
             self._leave_match(quit_app=True)
+        elif choice == "lobby":
+            # ASK, then wait to be told.  Nothing happens on screen here: the
+            # answer is a broadcast, and every player leaves the table on the
+            # same message rather than each on their own click.  The connection
+            # stays exactly as it is — this ends a MATCH, not a room.
+            self.pause_menu.close()
+            self._return_to_lobby()
         elif choice == "close_room":
             # The room ends for everybody; this client learns about it the same
             # way the others do, through MATCH_ENDED, so there is nothing to do
@@ -1966,9 +1973,16 @@ class GameScreen(Screen):
         # — to be discovered.  Leaving still does not end anybody else's match:
         # the game lives on the server, the others carry on, and this seat is
         # simply empty.
-        entries = [("resume", "Wróć do gry"),
-                   ("leave", "Wróć do menu głównego"),
-                   ("quit", "Wyjdź z gry")]
+        entries = [("resume", "Wróć do gry")]
+        if self.service is not None and self.service.is_host:
+            # SECOND, directly under "Wróć do gry", because it is the other
+            # entry that keeps you in the room — everything below it is a way
+            # out.  Host only, matching the server's rule rather than guessing
+            # at it: a mid-match return ends the game for the whole table, so
+            # it is the same say-so as starting one.
+            entries.append(("lobby", "Wróć do poczekalni"))
+        entries.extend([("leave", "Wróć do menu głównego"),
+                        ("quit", "Wyjdź z gry")])
         if self.service is not None and self.service.is_host:
             # Host only, matching the server's rule rather than guessing at it.
             # Offered next to the other endings and not among them: leaving is

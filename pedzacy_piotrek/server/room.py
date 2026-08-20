@@ -101,6 +101,10 @@ class Room:
         #: player are sent, and what makes a second representation of the game
         #: state unnecessary.
         self.command_log: List[Dict[str, Any]] = []
+        #: Matches started in this room.  A room outlives its matches now
+        #: (MATCH -> LOBBY -> MATCH), so "has this room played yet?" is no
+        #: longer the same question as "is a match running?".
+        self.matches_played: int = 0
         self.fingerprint: str = ""
         #: Which peer was asked for Piotrek's colour, and whether it arrived.
         #: The colour ITSELF is never stored here — it goes straight into the
@@ -418,6 +422,26 @@ class Room:
             lobby.debug_version = bool(payload["debug_version"])
         if "edit_mode" in payload:
             lobby.edit_mode = bool(payload["edit_mode"])
+        # READY IS CONSENT TO A TABLE, and changing the table withdraws it —
+        # but ONLY once this room has actually played something.  Before the
+        # first match the settings arrive as part of setting up: the host
+        # screen sends them the moment the room exists, and the test harness
+        # sends them while seating people, so clearing here would leave a lobby
+        # that can never start because every settings message unreadies it.
+        #
+        # After a match it is the opposite.  The host returns to the poczekalni
+        # mid-game, opens the settings and changes the deck, and the room would
+        # otherwise still be unanimously ready for the game it just abandoned —
+        # ready about a configuration nobody at the table has seen.
+        #
+        # A rematch on the SAME settings changes nothing and stays one click,
+        # which is the behaviour ``return_to_lobby`` deliberately preserves.
+        # The host's own flag is untouched because ``everyone_ready`` never
+        # reads it: the host starts the match, which is consent enough.
+        if self.matches_played:
+            for seat in lobby.seats:
+                if not seat.is_host:
+                    seat.ready = False
         return self.broadcast_lobby()
 
     # ── starting the match ───────────────────────────────────────────────────
@@ -448,6 +472,10 @@ class Room:
                 player.name = seat.nickname
                 player.owner_id = seat.peer_id
         self.lobby.started = True
+        #: How many matches this room has hosted.  Read by ``_apply_settings``
+        #: to tell "still setting the room up" from "changing a table people
+        #: have already agreed to".
+        self.matches_played += 1
         self.command_log = []
         self.fingerprint = fingerprint_of(self.state.snapshot())
         self.identity_settled = False
@@ -639,18 +667,32 @@ class Room:
 
     # ── after the match ──────────────────────────────────────────────────────
     def return_to_lobby(self, peer_id: str) -> List[Outbound]:
-        """Put a finished room back the way it was, ready for another match.
+        """Put the room back the way it was, ready for another match.
 
-        Only once somebody has won: a room reset mid-game would be a way for
-        one player to end everybody else's.  Seats survive — the same people
-        are still sitting there — but everything the match consisted of is
-        dropped, including the hidden colour, which is how the next game gets
-        a fresh one.
+        TWO CALLERS, ONE TRANSITION.  After somebody has won, anybody may ask —
+        the match is over and there is nothing left to end.  While it is still
+        running only the HOST may, because a mid-match reset ends everybody
+        else's game and that is a room-level decision; the host is already the
+        one who may start a match and close the room, so it is their say here
+        too.  A non-host asking mid-match is refused exactly as it always was.
+
+        Seats survive — the same people are still sitting there — but
+        everything the match consisted of is dropped rather than wound back:
+        the state, the config, the log, the fingerprint and the hidden colour.
+        The next match is BUILT FRESH from the lobby in :meth:`start`, which is
+        the only reason a stale hand or an old board cannot follow it there.
+
+        Ready flags are deliberately KEPT.  They are what makes "jeszcze raz"
+        one click for the host, and the people who set them are still sitting
+        in the same seats.  Changing the settings is what clears them — see
+        :meth:`_apply_settings` — because ready is consent to a table, and that
+        is the moment the table changes.
         """
         if self.state is None:
             return self.lobby_message(peer_id)
-        if not self.state.finished:
-            return [(peer_id, Message.error("Gra jeszcze się nie skończyła"))]
+        if not self.state.finished and not self.lobby.is_host(peer_id):
+            return [(peer_id,
+                     Message.error("Tylko host może wrócić do poczekalni"))]
         self.state = None
         self.session_config = None
         self.command_log = []

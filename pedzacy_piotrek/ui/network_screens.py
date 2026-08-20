@@ -791,6 +791,19 @@ class LobbyScreen(Screen):
         #: pasting it into a chat window is what people actually do.
         self.copy_code = Button(pygame.Rect(0, 0, 200, 32), "Kopiuj kod pokoju",
                                 radius=8, text_size=14)
+        #: Reopen the table settings after the room exists.  THE SAME PANEL the
+        #: host screen and the hot-seat menu use — one deck, one place to say
+        #: what is in it — so a setting added there appears here with no code.
+        #: Beside the room code rather than in the button column at the bottom:
+        #: that column is measured against the shortest window the layout tests
+        #: cover and the changelog records an extra row pushing it off the
+        #: screen.  This row has spare width and none.
+        self.settings_button = Button(pygame.Rect(0, 0, 200, 32),
+                                      "Ustawienia gry", radius=8, text_size=14)
+        self.settings_panel = GameSettingsPanel(app, library)
+        #: The panel has no "apply" of its own — it is a modal that closes.
+        #: Watched so that closing it is what sends the settings, once.
+        self._settings_open = False
         self.copied = CopyNotice()
         #: Remembered once, when the room really exists — see :meth:`update`.
         self._remembered = False
@@ -863,6 +876,16 @@ class LobbyScreen(Screen):
         # seat list below never moves when it appears and disappears.
         self.copied_pos = (self.copy_code.rect.right + 12,
                            self.copy_code.rect.centery)
+        # LEFT of the copy button, because the confirmation notice lives on its
+        # right and the two would land on each other.  Measured off the button
+        # it sits beside, so it follows it at every window size.
+        self.settings_button.fit(r, min_width=200,
+                                 min_height=int(32 * r.fonts.scale),
+                                 max_width=max(180, layout.win_w - 64))
+        self.settings_button.rect.midright = (
+            self.copy_code.rect.left - int(12 * r.fonts.scale),
+            self.copy_code.rect.centery)
+        self.settings_panel.on_resize()
         y = self.copy_code.rect.bottom + BLOCK_GAP
 
         self.character_row_y = self.start.rect.top - BLOCK_GAP - 34
@@ -893,6 +916,10 @@ class LobbyScreen(Screen):
 
     # ── input ────────────────────────────────────────────────────────────────
     def handle_event(self, event: pygame.event.Event, mouse: Tuple[int, int]) -> None:
+        # Modal while open, and FIRST: it covers the seat list underneath, so a
+        # click that fell through would pick a character through the panel.
+        if self.settings_panel.handle_event(event, mouse):
+            return
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             if self.character.open:
                 self.character.open = False
@@ -917,6 +944,9 @@ class LobbyScreen(Screen):
         if self.lobby.code and self.copy_code.hit(mouse):
             self._copy_code()
             return
+        if self.may_edit_settings and self.settings_button.hit(mouse):
+            self._open_settings()
+            return
         if self.is_host and self.start.hit(mouse):
             self._start()
             return
@@ -926,6 +956,60 @@ class LobbyScreen(Screen):
             return
         if self.leave.hit(mouse):
             self._leave()
+
+    @property
+    def may_edit_settings(self) -> bool:
+        """Host only, and only while the room is between matches.
+
+        THE SAME TWO CONDITIONS THE SERVER APPLIES — ``_apply_settings``
+        refuses a non-host and refuses a started room — asked here so the
+        button is absent rather than present and rejected.  The server is still
+        the one that decides; this only declines to offer a question whose
+        answer is already known.
+        """
+        return self.is_host and not self.lobby.started
+
+    def _open_settings(self) -> None:
+        """Reopen the table settings, seeded from the ROOM's current ones.
+
+        Not from this screen's defaults: the lobby state is the single source
+        of truth and it is replicated, so what the host edits is what the room
+        actually has — including anything a previous host set before handing
+        over.
+        """
+        lobby = self.lobby
+        self.settings_panel.open(
+            counts=dict(lobby.mod_counts),
+            movement_counts=dict(lobby.movement_counts),
+            chest_counts=dict(lobby.chest_counts),
+            ability_uses=dict(lobby.ability_uses),
+            card_variants=dict(lobby.card_variants),
+            block_decision_seconds=lobby.block_decision_seconds,
+        )
+        self._settings_open = True
+
+    def _apply_settings(self) -> None:
+        """Send what the panel now holds.  One message, the existing one.
+
+        ``set_settings`` is what the host screen sends before the room exists
+        and what the server merges and clamps; nothing here validates anything,
+        because the server settles what the settings ARE.  The reply is a
+        lobby broadcast every client already mirrors, which is how the other
+        players see the new table without a second protocol.
+        """
+        panel = self.settings_panel
+        self.service.set_settings(
+            mod_counts=panel.mod_counts,
+            movement_counts=panel.movement_counts,
+            chest_counts=panel.chest_counts,
+            ability_uses=panel.ability_uses,
+            card_variants=panel.card_variants,
+            block_decision_seconds=panel.block_decision_seconds,
+            check_decision_seconds=panel.check_decision_seconds,
+            check_variant=panel.check_variant,
+            victory_variant=panel.victory_variant,
+            copy_consumes_use=panel.copy_consumes_use,
+        )
 
     def _copy_code(self) -> None:
         """Put ONLY the code on the clipboard.
@@ -1011,6 +1095,15 @@ class LobbyScreen(Screen):
         self.ready.update(mouse, dt)
         self.leave.update(mouse, dt)
         self.character.update(mouse, dt)
+        self.settings_button.update(mouse, dt)
+        self.settings_panel.update(dt, mouse)
+        # CLOSING IS APPLYING.  The panel is a modal with a done button and no
+        # notion of a server, so the moment it stops being open is the moment
+        # the room is told.  Watched rather than hooked so the Esc key, the
+        # button and a click outside all send exactly the same one message.
+        if self._settings_open and not self.settings_panel.active:
+            self._settings_open = False
+            self._apply_settings()
 
     def draw(self, surface: pygame.Surface) -> None:
         r, layout = self.app.renderer, self.app.layout
@@ -1024,6 +1117,8 @@ class LobbyScreen(Screen):
                 r.text(self.copied.text, r.fonts.get(14, bold=True),
                        mix(theme.background, theme.valid, self.copied.fade()),
                        surface, midleft=self.copied_pos)
+            if self.may_edit_settings:
+                self.settings_button.draw(r, surface)
         self._draw_seats(surface)
 
         r.text("Twoja postać:", r.fonts.get(17), theme.text_light, surface,
@@ -1053,6 +1148,10 @@ class LobbyScreen(Screen):
                    midtop=(centre, self.message_y))
         if self.character.open:
             self.character.draw_overlay(r, self.app.mouse(), surface)
+        # LAST, above the dropdown overlay as well: it is modal and consumes
+        # every click while it is open, so anything drawn over it would be a
+        # control the player can see and cannot press.
+        self.settings_panel.draw(surface)
 
     def _draw_code(self, surface: pygame.Surface) -> None:
         """The room code, big, because it is the one thing to read aloud."""
